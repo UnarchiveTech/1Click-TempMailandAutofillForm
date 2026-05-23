@@ -18,7 +18,8 @@
     "yes": "Ja",
     "no": "Nein",
     "archive": "Archivieren",
-    "unarchive": "Aus Archiv nehmen"
+    "unarchive": "Aus Archiv nehmen",
+    "restore": "Wiederherstellen"
   },
   "inbox": {
     "title": "Posteingang",
@@ -45,6 +46,9 @@
     "autoCopyDescription": "Nach Generierung in Zwischenablage kopieren",
     "autoRenew": "Automatisch verlängern",
     "autoRenewDescription": "Automatisch vor Ablauf verlängern",
+    "emailRetention": "E-Mail-Aufbewahrung",
+    "emailRetentionDescription": "Wie lange E-Mails lokal gespeichert werden",
+    "storageUsage": "Speichernutzung",
     "appearance": "Darstellung",
     "theme": "Design",
     "light": "Hell",

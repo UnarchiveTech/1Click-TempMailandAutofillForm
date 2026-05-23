@@ -12,3 +12,6 @@ package-lock.json
 .DS_Store
 *.log
 reference/
+temp_old_inbox.svelte
+
+temp_old_popup.css

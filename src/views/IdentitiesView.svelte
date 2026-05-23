@@ -1,6 +1,7 @@
 <script lang="ts">
 import { t } from 'svelte-i18n';
 import { browser } from 'wxt/browser';
+import IconChevronDown from '@/components/icons/IconChevronDown.svelte';
 import IconPlus from '@/components/icons/IconPlus.svelte';
 import IconTrash from '@/components/icons/IconTrash.svelte';
 import IconUser from '@/components/icons/IconUser.svelte';
@@ -69,6 +70,7 @@ let identities = $state<Identity[]>([]);
 let selectedIdentityId = $state<string | null>(null);
 let editingIdentity = $state<Identity | null>(null);
 let showCreateDialog = $state(false);
+let showIdentityDropdown = $state(false);
 
 let newIdentityFirstNames = $state('');
 let newIdentityLastNames = $state('');
@@ -188,38 +190,19 @@ async function createNewIdentity() {
 loadIdentitiesData();
 </script>
 
-<div class="flex flex-col h-full">
+<div class="flex flex-col h-full relative">
   <!-- Header -->
   <div class="px-5 py-4 border-b border-md-secondary-container">
-    <div class="flex items-center justify-between mb-3">
-      <div class="flex items-center gap-3">
-        <button class="w-8 h-8 flex items-center justify-center rounded-lg bg-transparent hover:bg-md-secondary-container transition-colors" onclick={onBack} aria-label="Go back">
-          <IconX class="w-5 h-5" />
-        </button>
-        <h2 class="font-semibold text-base">{$t('identities.title')}</h2>
-      </div>
-      <button class="px-3 py-1.5 text-sm rounded-lg bg-md-secondary text-md-on-secondary hover:bg-md-secondary/90 transition-colors flex items-center gap-2" onclick={openCreateDialog}>
+    <div class="flex items-center justify-end">
+      <button class="btn-primary px-3 py-1.5 text-sm rounded-lg flex items-center gap-2" onclick={openCreateDialog}>
         <IconPlus class="w-4 h-4" />
         {$t('identities.create')}
       </button>
     </div>
-    <div class="flex items-center justify-between gap-3">
-      <span class="text-xs text-md-on-surface/50">Default for autofill:</span>
-      <select 
-        class="flex-1 px-2 py-1 rounded border border-md-outline-variant text-xs bg-md-secondary-container outline-none focus:border-md-primary focus:ring-1 focus:ring-md-primary" 
-        aria-label="Select default identity for autofill"
-        bind:value={selectedIdentityId}
-        onchange={() => selectIdentity(browser, selectedIdentityId!, identitySetters)}
-      >
-        {#each identities as identity}
-          <option value={identity.id}>{identity.name}</option>
-        {/each}
-      </select>
-    </div>
   </div>
 
   <!-- Content -->
-  <div class="flex-1 overflow-y-auto" style="scrollbar-width: thin; scrollbar-color: var(--md-primary) transparent;">
+  <div class="flex-1 overflow-y-auto pb-16" style="scrollbar-width: thin; scrollbar-color: var(--md-primary) transparent;">
     {#if editingIdentity}
       <!-- Identity Editor -->
       <div class="p-5">
@@ -377,6 +360,54 @@ loadIdentitiesData();
         {/each}
       </div>
     {/if}
+  </div>
+
+  <!-- Default for Autofill - Fixed at bottom (same styling as InboxView autofill strip) -->
+  <div class="absolute bottom-0 left-0 right-0 z-10 flex justify-center transition-all duration-200">
+    <div class="px-3 bg-md-primary-container rounded-xl" style="height: 40px; width: 350px; display: flex; align-items: center; box-sizing: border-box;">
+      <div class="flex items-center gap-2 w-full">
+        <!-- Identity Selector -->
+        <div class="relative flex-1 min-w-0">
+          <div
+            class="flex items-center gap-1 bg-md-secondary-container/70 rounded-full px-2.5 py-1 cursor-pointer relative"
+            role="button"
+            tabindex="0"
+            onclick={() => showIdentityDropdown = !showIdentityDropdown}
+            onkeydown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                showIdentityDropdown = !showIdentityDropdown;
+              }
+            }}
+          >
+            <IconUser class="w-3 h-3 text-md-secondary flex-shrink-0" />
+            <div class="flex-1 min-w-0 text-[11px] font-medium text-md-on-surface pr-2 truncate">
+              {identities.find(i => i.id === selectedIdentityId)?.name || $t('identities.select')}
+            </div>
+            <IconChevronDown class="w-2.5 h-2.5 text-md-on-surface/40 flex-shrink-0 transition-transform {showIdentityDropdown ? 'rotate-180' : ''}" />
+
+            <!-- Dropup Menu -->
+            {#if showIdentityDropdown}
+              <div class="absolute bottom-full left-0 right-0 mb-1 bg-md-primary-container border border-md-secondary-container rounded-xl shadow-lg z-50 max-h-48 overflow-y-auto" style="scrollbar-width: thin; scrollbar-color: var(--md-primary) transparent;">
+                {#each identities as identity}
+                  <button
+                    class="w-full text-left px-3 py-2 text-[11px] font-medium text-md-on-surface hover:bg-md-secondary-container transition-colors first:rounded-t-xl last:rounded-b-xl"
+                    onclick={(e) => {
+                      e.stopPropagation();
+                      selectedIdentityId = identity.id;
+                      selectIdentity(browser, identity.id, identitySetters);
+                      showIdentityDropdown = false;
+                    }}
+                  >
+                    {identity.name}
+                  </button>
+                {/each}
+              </div>
+            {/if}
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <!-- Create Dialog -->

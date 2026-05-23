@@ -3,6 +3,22 @@ export default {
   content: ['./src/**/*.{svelte,js,ts}'],
   theme: {
     extend: {
+      fontFamily: {
+        sans: [
+          'ui-sans-serif',
+          'system-ui',
+          '-apple-system',
+          'BlinkMacSystemFont',
+          '"Segoe UI"',
+          '"Segoe UI Emoji"',
+          '"Apple Color Emoji"',
+          '"Noto Color Emoji"',
+          'Roboto',
+          '"Helvetica Neue"',
+          'Arial',
+          'sans-serif',
+        ],
+      },
       colors: {
         // Material Design Primary
         'md-primary': 'var(--md-primary)',

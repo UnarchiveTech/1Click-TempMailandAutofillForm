@@ -23,7 +23,7 @@ import type {
   ProviderInstance,
 } from '@/utils/types.js';
 import { incrementAnalytic } from './analytics.js';
-import { archiveInboxEmails, clearStoredEmails, getStoredEmails } from './email-storage.js';
+import { clearStoredEmails, getStoredEmails } from './email-storage.js';
 
 export interface DeleteInboxResult {
   success: boolean;
@@ -161,7 +161,7 @@ export async function createInbox(
         const now = Date.now();
         const isExpired = existingInbox.expiresAt && now > existingInbox.expiresAt;
 
-        if (!isExpired && !existingInbox.archived) {
+        if (!isExpired && existingInbox.accountStatus !== 'archived') {
           // Reuse existing valid inbox, update its sidToken
           const inboxIndex = inboxes.findIndex((i: Account) => i.address === existingInbox.address);
           if (inboxIndex !== -1 && inbox.sidToken) {
@@ -191,7 +191,7 @@ export async function createInbox(
                 ((timestamp || 0) + (config.expiry?.duration || 3600000) / 1000) * 1000;
 
               const stillDuplicate = inboxes.find(
-                (i: Account) => i.address === inbox.address && !i.archived
+                (i: Account) => i.address === inbox.address && i.accountStatus !== 'archived'
               );
               if (stillDuplicate) {
                 throw new InboxSessionConflictError({ address: inbox.address });
@@ -302,7 +302,7 @@ export async function deleteInbox(
       if (!preserveEmails) {
         await clearStoredEmails(inbox.address);
       } else {
-        await archiveInboxEmails(inbox.address);
+        await clearStoredEmails(inbox.address);
       }
     }
 
@@ -345,15 +345,30 @@ export async function checkNewEmails(
       });
     }
 
-    // If inbox is archived, load emails from archivedEmails storage
-    if (inbox.archived) {
-      const { archivedEmails = {} } = (await browser.storage.local.get(['archivedEmails'])) as {
+    // If inbox is archived, expired, or deleted, load emails from both archivedEmails and storedEmails storage and mark as local-only
+    if (
+      inbox.accountStatus === 'archived' ||
+      inbox.accountStatus === 'deleted' ||
+      Date.now() > (inbox.expiresAt || 0)
+    ) {
+      const { archivedEmails = {}, storedEmails = {} } = (await browser.storage.local.get([
+        'archivedEmails',
+        'storedEmails',
+      ])) as {
         archivedEmails?: Record<string, Email[]>;
+        storedEmails?: Record<string, Email[]>;
       };
       const archived = archivedEmails[inbox.address] || [];
+      const stored = storedEmails[inbox.address] || [];
 
-      // Apply filters to archived emails
-      let filtered = archived;
+      // Combine archived and stored emails, mark all as local-only
+      const allLocalEmails = [...archived, ...stored].map((email) => ({
+        ...email,
+        local_only: true,
+      }));
+
+      // Apply filters to local emails
+      let filtered = allLocalEmails;
       if (filters.searchQuery) {
         const query = filters.searchQuery.toLowerCase();
         filtered = filtered.filter(

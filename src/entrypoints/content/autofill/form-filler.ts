@@ -205,9 +205,9 @@ export async function fillSignupForm(
 
     await updateAndCopyCredentials(credentials);
 
-    const { credentialsHistory = [] } = (await browser.storage.local.get([
-      'credentialsHistory',
-    ])) as { credentialsHistory?: CredentialsHistoryItem[] };
+    const { loginInfo = [] } = (await browser.storage.local.get(['loginInfo'])) as {
+      loginInfo?: CredentialsHistoryItem[];
+    };
     const newCredential: CredentialsHistoryItem = {
       email: emailAddress,
       username: randomUsername,
@@ -219,8 +219,8 @@ export async function fillSignupForm(
       timestamp: Date.now(),
       inboxId: activeInboxId,
     };
-    credentialsHistory.unshift(newCredential);
-    await browser.storage.local.set({ credentialsHistory });
+    loginInfo.unshift(newCredential);
+    await browser.storage.local.set({ loginInfo });
 
     return true;
   } catch (error: unknown) {

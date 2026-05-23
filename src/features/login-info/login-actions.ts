@@ -1,41 +1,26 @@
 import type { Browser } from 'wxt/browser';
 import { logError } from '@/utils/logger.js';
-
-export interface SavedLogin {
-  id: string;
-  website: string;
-  email: string;
-  username: string;
-  password: string;
-  timestamp: number;
-}
+import type { CredentialsHistoryItem } from '@/utils/types.js';
 
 export interface LoginState {
-  savedLogins: SavedLogin[];
+  savedLogins: CredentialsHistoryItem[];
 }
 
 export interface LoginSetters {
-  setSavedLogins: (logins: SavedLogin[]) => void;
+  setSavedLogins: (logins: CredentialsHistoryItem[]) => void;
 }
 
 export async function loadLoginInfo(ext: Browser, setters: LoginSetters) {
   try {
     const result = (await ext.storage.local.get(['loginInfo'])) as {
-      loginInfo?: Record<string, Array<{ username: string; password: string; timestamp: number }>>;
+      loginInfo?: CredentialsHistoryItem[];
     };
-    const loginInfo = result.loginInfo || {};
-    const savedLogins = Object.entries(loginInfo).flatMap(
-      ([domain, entries]: [
-        string,
-        Array<{ username: string; password: string; timestamp: number }>,
-      ]) =>
-        entries.map((entry, i) => ({
-          id: `${domain}-${i}`,
-          website: domain,
-          email: entry.username,
-          ...entry,
-        }))
-    );
+    const loginInfo = result.loginInfo || [];
+    // Add id field for each login item
+    const savedLogins = loginInfo.map((item, i) => ({
+      ...item,
+      id: `${item.domain}-${item.username || 'unknown'}-${i}`,
+    }));
     setters.setSavedLogins(savedLogins);
   } catch (e: unknown) {
     logError('loadLoginInfo error:', undefined, e instanceof Error ? e : new Error(String(e)));

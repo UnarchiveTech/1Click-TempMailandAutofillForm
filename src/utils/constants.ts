@@ -18,6 +18,12 @@ export const EXPIRY_WARNING_THRESHOLD_MS = 60 * 60 * 1000; // 1 hour before expi
 // Password generation
 export const PASSWORD_MIN_LENGTH = 8;
 export const PASSWORD_MAX_LENGTH = 42;
+
+// External URLs
+export const GITHUB_REPO_URL = 'https://github.com/UnarchiveTech/1Click-TempMailwithAutofill';
+export const GITHUB_ISSUES_URL =
+  'https://github.com/UnarchiveTech/1Click-TempMailwithAutofill/issues/new';
+export const GOOGLE_FAVICON_API_URL = 'https://www.google.com/s2/favicons';
 export const USERNAME_MIN_LENGTH = 8;
 export const USERNAME_MAX_LENGTH = 15;
 

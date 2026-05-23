@@ -18,7 +18,8 @@
     "yes": "Yes",
     "no": "No",
     "archive": "Archive",
-    "unarchive": "Unarchive"
+    "unarchive": "Unarchive",
+    "restore": "Restore"
   },
   "inbox": {
     "title": "Inbox",
@@ -45,6 +46,9 @@
     "autoCopyDescription": "Copy to clipboard after generation",
     "autoRenew": "Auto-Renew",
     "autoRenewDescription": "Automatically renew before expiration",
+    "emailRetention": "Email Retention",
+    "emailRetentionDescription": "How long to keep emails locally",
+    "storageUsage": "Storage Usage",
     "appearance": "Appearance",
     "theme": "Theme",
     "light": "Light",

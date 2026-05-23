@@ -1,8 +1,8 @@
 import { DEFAULT_PROVIDER, loadProviderConfig } from '@/utils/email-service.js';
-import { ApiError, ValidationError } from '@/utils/errors.js';
+import { ApiError, getErrorMessage, ValidationError } from '@/utils/errors.js';
 import { setProviderInstance as setProviderInstanceStorage } from '@/utils/instance-manager.js';
 import { logError } from '@/utils/logger.js';
-import type { Account, ProviderInstance } from '@/utils/types.js';
+import type { ProviderInstance } from '@/utils/types.js';
 import { validateCustomInstanceName, validateCustomInstanceUrl } from '@/utils/validation.js';
 
 export interface SettingsState {
@@ -21,6 +21,8 @@ export interface SettingsState {
   enableLogging: boolean;
   savingSettings: boolean;
   settingsLoading: boolean;
+  emailRetentionDays: number;
+  faviconCaching: 'direct' | 'local';
 }
 
 export interface SettingsSetters {
@@ -39,10 +41,18 @@ export interface SettingsSetters {
   setEnableLogging: (value: boolean) => void;
   setSavingSettings: (value: boolean) => void;
   setSettingsLoading: (value: boolean) => void;
+  setEmailRetentionDays: (value: number) => void;
+  setFaviconCaching: (value: 'direct' | 'local') => void;
   setShowToast: (message: string, type: 'success' | 'error' | 'warning') => void;
   loadInboxes: () => Promise<void>;
 }
 
+/**
+ * Load settings from browser storage
+ * @param ext - Browser extension API
+ * @param _state - Current settings state (unused)
+ * @param setters - Settings setter functions
+ */
 export async function loadSettings(
   ext: typeof browser,
   _state: SettingsState,
@@ -58,6 +68,8 @@ export async function loadSettings(
       'selectedProvider',
       'customColor',
       'developerSettings',
+      'emailRetentionDays',
+      'faviconCaching',
     ])) as {
       passwordSettings?: { useCustom: boolean; customPassword: string };
       nameSettings?: { useCustom: boolean; firstName: string; lastName: string };
@@ -66,6 +78,8 @@ export async function loadSettings(
       selectedProvider?: string;
       customColor?: string;
       developerSettings?: { showDeveloperSettings: boolean; enableLogging: boolean };
+      emailRetentionDays?: number;
+      faviconCaching?: 'direct' | 'local';
     };
     if (result.passwordSettings) {
       setters.setUseCustomPassword(result.passwordSettings.useCustom || false);
@@ -84,6 +98,16 @@ export async function loadSettings(
       setters.setShowDeveloperSettings(result.developerSettings.showDeveloperSettings || false);
       setters.setEnableLogging(result.developerSettings.enableLogging || false);
     }
+    if (result.emailRetentionDays !== undefined) {
+      setters.setEmailRetentionDays(result.emailRetentionDays);
+    } else {
+      setters.setEmailRetentionDays(30); // Default to 30 days
+    }
+    if (result.faviconCaching) {
+      setters.setFaviconCaching(result.faviconCaching);
+    } else {
+      setters.setFaviconCaching('local'); // Default to local
+    }
   } catch (e: unknown) {
     logError('loadSettings error:', undefined, e instanceof Error ? e : new Error(String(e)));
   } finally {
@@ -91,6 +115,12 @@ export async function loadSettings(
   }
 }
 
+/**
+ * Save settings to browser storage
+ * @param ext - Browser extension API
+ * @param state - Current settings state
+ * @param setters - Settings setter functions
+ */
 export async function saveSettings(
   ext: typeof browser,
   state: SettingsState,
@@ -116,6 +146,8 @@ export async function saveSettings(
         showDeveloperSettings: state.showDeveloperSettings,
         enableLogging: state.enableLogging,
       },
+      emailRetentionDays: state.emailRetentionDays,
+      faviconCaching: state.faviconCaching,
     });
     setters.setShowToast('Settings saved', 'success');
   } catch (e: unknown) {
@@ -126,6 +158,12 @@ export async function saveSettings(
   }
 }
 
+/**
+ * Toggle developer settings visibility
+ * @param ext - Browser extension API
+ * @param state - Current settings state
+ * @param setters - Settings setter functions
+ */
 export async function toggleDeveloperSettings(
   ext: typeof browser,
   state: SettingsState,
@@ -138,6 +176,12 @@ export async function toggleDeveloperSettings(
   });
 }
 
+/**
+ * Toggle logging enable/disable
+ * @param ext - Browser extension API
+ * @param state - Current settings state
+ * @param setters - Settings setter functions
+ */
 export async function toggleEnableLogging(
   ext: typeof browser,
   state: SettingsState,
@@ -154,6 +198,12 @@ export async function toggleEnableLogging(
   setters.setShowToast(`Logging ${newValue ? 'enabled' : 'disabled'}`, 'success');
 }
 
+/**
+ * Handle provider change and reload inboxes
+ * @param _ext - Browser extension API (unused)
+ * @param provider - New provider to select
+ * @param setters - Settings setter functions
+ */
 export async function handleProviderChange(
   _ext: typeof browser,
   provider: string,
@@ -163,12 +213,22 @@ export async function handleProviderChange(
   await setters.loadInboxes();
 }
 
+/**
+ * Save password settings to browser storage
+ * @param ext - Browser extension API
+ * @param state - Current settings state
+ */
 export async function savePasswordSettings(ext: typeof browser, state: SettingsState) {
   await ext.storage.local.set({
     passwordSettings: { useCustom: state.useCustomPassword, customPassword: state.customPassword },
   });
 }
 
+/**
+ * Save name settings to browser storage
+ * @param ext - Browser extension API
+ * @param state - Current settings state
+ */
 export async function saveNameSettings(ext: typeof browser, state: SettingsState) {
   await ext.storage.local.set({
     nameSettings: {
@@ -179,18 +239,57 @@ export async function saveNameSettings(ext: typeof browser, state: SettingsState
   });
 }
 
+/**
+ * Save auto-copy setting to browser storage
+ * @param ext - Browser extension API
+ * @param value - Auto-copy enabled/disabled
+ */
 export async function saveAutoCopy(ext: typeof browser, value: boolean) {
   await ext.storage.local.set({ autoCopy: value });
 }
 
+/**
+ * Save auto-renew setting to browser storage
+ * @param ext - Browser extension API
+ * @param value - Auto-renew enabled/disabled
+ */
 export async function saveAutoRenew(ext: typeof browser, value: boolean) {
   await ext.storage.local.set({ autoRenew: value });
 }
 
+/**
+ * Save email retention days setting to browser storage
+ * @param ext - Browser extension API
+ * @param value - Number of days to retain emails
+ */
+export async function saveEmailRetentionDays(ext: typeof browser, value: number) {
+  await ext.storage.local.set({ emailRetentionDays: value });
+}
+
+/**
+ * Save favicon caching setting to browser storage
+ * @param ext - Browser extension API
+ * @param value - Favicon caching mode ('direct' or 'local')
+ */
+export async function saveFaviconCaching(ext: typeof browser, value: 'direct' | 'local') {
+  await ext.storage.local.set({ faviconCaching: value });
+}
+
+/**
+ * Handle custom color change
+ * @param ext - Browser extension API
+ * @param color - Hex color code
+ */
 export async function handleColorChange(ext: typeof browser, color: string) {
   await ext.storage.local.set({ customColor: color });
 }
 
+/**
+ * Switch to a different email provider
+ * @param ext - Browser extension API
+ * @param provider - Provider to switch to
+ * @param setters - Settings setter functions
+ */
 export async function switchProvider(
   ext: typeof browser,
   provider: string,
@@ -208,6 +307,11 @@ export async function switchProvider(
 
 export const changeProvider = switchProvider;
 
+/**
+ * Load provider instances from storage
+ * @param ext - Browser extension API
+ * @param setters - Settings setter functions
+ */
 export async function loadProviderInstances(ext: typeof browser, setters: SettingsSetters) {
   try {
     const { selectedProvider } = await ext.storage.local.get(['selectedProvider']);
@@ -231,11 +335,17 @@ export async function loadProviderInstances(ext: typeof browser, setters: Settin
     logError(
       'loadProviderInstances error:',
       undefined,
-      error instanceof Error ? error : new Error(String(error))
+      error instanceof Error ? error : new Error(getErrorMessage(error))
     );
   }
 }
 
+/**
+ * Set the selected provider instance
+ * @param instanceId - Instance ID to select
+ * @param ext - Browser extension API
+ * @param setters - Settings setter functions
+ */
 export async function setProviderInstance(
   instanceId: string,
   ext: typeof browser,
@@ -323,8 +433,9 @@ export async function hardReset(ext: typeof browser, setters: SettingsSetters) {
     return;
   try {
     await ext.storage.local.clear();
-    // biome-ignore lint/suspicious/noExplicitAny: Browser storage API
-    await (ext.storage.sync as any).clear();
+    if ('sync' in ext.storage && ext.storage.sync) {
+      await ext.storage.sync.clear();
+    }
     const response = await ext.runtime.sendMessage({ action: 'hardReset' });
     if (response?.success) {
       setters.setShowToast('Hard reset completed', 'success');
@@ -337,19 +448,31 @@ export async function hardReset(ext: typeof browser, setters: SettingsSetters) {
 
 export async function exportData(ext: typeof browser) {
   try {
-    const result = (await ext.storage.local.get([
+    const result = await ext.storage.local.get([
       'emailHistory',
-      'credentialsHistory',
-      'darkMode',
+      'loginInfo',
+      'storedEmails',
       'inboxes',
       'activeInboxId',
-    ])) as {
-      emailHistory?: Array<{ email: string; timestamp: number }>;
-      credentialsHistory?: Array<{ username: string; password: string; timestamp: number }>;
-      darkMode?: string;
-      inboxes?: Account[];
-      activeInboxId?: string;
-    };
+      'identities',
+      'selectedIdentityId',
+      'savedSearchFilters',
+      'themeMode',
+      'darkMode',
+      'contrastLevel',
+      'customColor',
+      'autoCopy',
+      'autoRenew',
+      'selectedProvider',
+      'useCustomPassword',
+      'customPassword',
+      'useCustomName',
+      'customFirstName',
+      'customLastName',
+      'emailRetentionDays',
+      'showDeveloperSettings',
+      'enableLogging',
+    ]);
     const data = { version: '3.0', exportDate: new Date().toISOString(), data: { ...result } };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -374,7 +497,64 @@ export function importData(ext: typeof browser, loadInboxes: () => Promise<void>
       const text = await file.text();
       const parsed = JSON.parse(text);
       if (!parsed.version || !parsed.data) throw new Error('Invalid format');
-      await ext.storage.local.set(parsed.data);
+      const importedData = parsed.data;
+
+      // Merge arrays (inboxes, emailHistory, loginInfo, identities) to avoid overwriting
+      const existing = await ext.storage.local.get([
+        'inboxes',
+        'emailHistory',
+        'loginInfo',
+        'storedEmails',
+        'identities',
+        'savedSearchFilters',
+      ]);
+
+      const mergeById = <T extends { id: string }>(existing: T[], incoming: T[]): T[] => {
+        const merged = [...existing];
+        for (const item of incoming) {
+          if (!merged.some((e) => e.id === item.id)) merged.push(item);
+        }
+        return merged;
+      };
+
+      const mergeByKey = <T>(existing: T[], incoming: T[], key: keyof T): T[] => {
+        const merged = [...existing];
+        for (const item of incoming) {
+          if (!merged.some((e) => e[key] === item[key])) merged.push(item);
+        }
+        return merged;
+      };
+
+      const toSet: Record<string, unknown> = { ...importedData };
+
+      if (Array.isArray(importedData.inboxes)) {
+        toSet.inboxes = mergeById(existing.inboxes || [], importedData.inboxes);
+      }
+      if (Array.isArray(importedData.emailHistory)) {
+        toSet.emailHistory = mergeByKey(
+          existing.emailHistory || [],
+          importedData.emailHistory,
+          'email' as keyof unknown
+        );
+      }
+      if (Array.isArray(importedData.loginInfo)) {
+        toSet.loginInfo = mergeByKey(
+          existing.loginInfo || [],
+          importedData.loginInfo,
+          'domain' as keyof unknown
+        );
+      }
+      if (Array.isArray(importedData.identities)) {
+        toSet.identities = mergeById(existing.identities || [], importedData.identities);
+      }
+      if (Array.isArray(importedData.savedSearchFilters)) {
+        toSet.savedSearchFilters = mergeById(
+          existing.savedSearchFilters || [],
+          importedData.savedSearchFilters
+        );
+      }
+
+      await ext.storage.local.set(toSet);
       await loadInboxes();
     } catch (_err) {
       throw new Error('Import failed');

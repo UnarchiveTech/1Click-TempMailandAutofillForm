@@ -4,7 +4,9 @@ import IconCopy from '@/components/icons/IconCopy.svelte';
 import IconMail from '@/components/icons/IconMail.svelte';
 import IconTrash from '@/components/icons/IconTrash.svelte';
 import EmptyState from '@/components/ui/EmptyState.svelte';
+import FaviconImage from '@/components/ui/FaviconImage.svelte';
 import Skeleton from '@/components/ui/Skeleton.svelte';
+import { logDebug, logError } from '@/utils/logger.js';
 import type { Email } from '@/utils/types.js';
 
 let {
@@ -40,6 +42,7 @@ let pullToRefresh = $state(false);
 let pullDistance = $state(0);
 let startY = $state(0);
 let isPulling = $state(false);
+let refreshRotation = $derived(pullDistance * 4.5); // Rotate icon based on pull distance
 
 // Long-press context menu state
 let longPressTimer: ReturnType<typeof setTimeout> | null = null;
@@ -47,10 +50,97 @@ let longPressEmail = $state<Email | null>(null);
 let contextMenuOpen = $state(false);
 let contextMenuPosition = $state({ x: 0, y: 0 });
 
+// Swipe gesture state for mobile
+let swipeStartX = $state(0);
+let swipeDistance = $state(0);
+let swipeDirection = $state<'left' | 'right' | null>(null);
+let swipingEmail = $state<Email | null>(null);
+let swipeActionTriggered = $state(false);
+
+// Multi-select state
+let selectionMode = $state(false);
+let selectedEmailIds = $state<Set<string>>(new Set());
+
+// Starred emails
+let starredEmailIds = $state<Set<string>>(new Set());
+
+async function loadStarredEmails() {
+  const result = (await browser.storage.local.get(['starredEmails'])) as {
+    starredEmails?: string[];
+  };
+  starredEmailIds = new Set(result.starredEmails || []);
+}
+
+async function toggleStar(emailId: string) {
+  const updated = new Set(starredEmailIds);
+  if (updated.has(emailId)) {
+    updated.delete(emailId);
+  } else {
+    updated.add(emailId);
+  }
+  starredEmailIds = updated;
+  await browser.storage.local.set({ starredEmails: Array.from(updated) });
+}
+
+$effect(() => {
+  loadStarredEmails();
+});
+
+function handleSwipeStart(email: Email, e: TouchEvent | MouseEvent) {
+  const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
+  swipeStartX = clientX;
+  swipingEmail = email;
+  swipeDistance = 0;
+  swipeDirection = null;
+  swipeActionTriggered = false;
+}
+
+function handleSwipeMove(e: TouchEvent | MouseEvent) {
+  if (!swipingEmail) return;
+  const currentX = 'touches' in e ? e.touches[0].clientX : e.clientX;
+  const diff = currentX - swipeStartX;
+
+  // Only track horizontal swipes beyond threshold
+  if (Math.abs(diff) > 10) {
+    swipeDistance = Math.max(Math.min(diff, 120), -120);
+    swipeDirection = diff > 0 ? 'right' : 'left';
+  }
+}
+
+function handleSwipeEnd() {
+  if (!swipingEmail) return;
+
+  // Trigger action if swiped far enough
+  if (Math.abs(swipeDistance) > 80) {
+    swipeActionTriggered = true;
+    // Close the context menu after a brief delay
+    setTimeout(() => {
+      swipeDistance = 0;
+      swipeDirection = null;
+      swipingEmail = null;
+      swipeActionTriggered = false;
+    }, 300);
+  } else {
+    // Reset if not swiped far enough
+    swipeDistance = 0;
+    swipeDirection = null;
+    swipingEmail = null;
+  }
+}
+
 function handleLongPressStart(email: Email, e: TouchEvent | MouseEvent) {
   if (longPressTimer) clearTimeout(longPressTimer);
   longPressTimer = setTimeout(() => {
     longPressEmail = email;
+    selectionMode = true;
+    // If already in selection mode, add to existing selection; otherwise start fresh
+    if (selectedEmailIds.size > 0) {
+      const next = new Set(selectedEmailIds);
+      next.add(email.id);
+      selectedEmailIds = next;
+    } else {
+      selectedEmailIds = new Set([email.id]);
+    }
     contextMenuOpen = true;
     const touch = 'touches' in e ? e.touches[0] : e;
     contextMenuPosition = { x: touch.clientX, y: touch.clientY };
@@ -67,181 +157,46 @@ function handleLongPressEnd() {
 function closeContextMenu() {
   contextMenuOpen = false;
   longPressEmail = null;
+  selectionMode = false;
+  selectedEmailIds = new Set();
 }
 
-// Track successful image loads and domain attempts for each email
-let imageLoaded = $state<Record<string, boolean>>({});
-let faviconDomainAttempt = $state<
-  Record<string, 'full' | 'stripped' | 'root' | 'google' | 'failed'>
->({});
-let googleFaviconBlobUrl = $state<Record<string, string>>({});
-
-// Derived state for each email to ensure reactivity
-let faviconUrls = $derived<Record<string, string>>({});
-$effect(() => {
-  const urls: Record<string, string> = {};
-  for (const mail of displayedEmails) {
-    if (!mail.from) continue;
-    const fullDomain = getDomainFromEmail(mail.from);
-    const strippedDomain = getStrippedDomain(fullDomain);
-    const rootDomain = getRootDomain(fullDomain);
-    const attempt = faviconDomainAttempt[mail.id] || 'full';
-    let currentDomain = fullDomain;
-    if (attempt === 'stripped') currentDomain = strippedDomain;
-    else if (attempt === 'root') currentDomain = rootDomain;
-    urls[mail.id] = googleFaviconBlobUrl[mail.id] || `https://${currentDomain}/favicon.ico`;
+function toggleEmailSelection(id: string) {
+  const next = new Set(selectedEmailIds);
+  if (next.has(id)) {
+    next.delete(id);
+  } else {
+    next.add(id);
   }
-  faviconUrls = urls;
-});
-
-// Google's default favicon hash (SHA-256 of default placeholder)
-const GOOGLE_DEFAULT_HASH = '59bfe9bc385ad69f50793ce4a53397316d7a875a7148a63c16df9b674c6cda64';
-
-// Fetch favicon via background script (bypasses CORS), returns base64 data URL or null
-async function fetchFaviconViaBackground(
-  url: string
-): Promise<{ dataUrl: string; hash: string } | null> {
-  try {
-    const response = (await browser.runtime.sendMessage({ type: 'fetchFavicon', url })) as {
-      success: boolean;
-      base64?: string;
-      contentType?: string;
-      hash?: string;
-      error?: string;
-    };
-    console.log('fetchFaviconViaBackground response:', response);
-    if (!response.success || !response.base64 || !response.hash) {
-      console.log('fetchFaviconViaBackground failed:', response);
-      return null;
-    }
-    const dataUrl = `data:${response.contentType};base64,${response.base64}`;
-    console.log('fetchFaviconViaBackground success:', {
-      dataUrl: `${dataUrl.substring(0, 50)}...`,
-      hash: response.hash,
-    });
-    return { dataUrl, hash: response.hash };
-  } catch (e) {
-    console.error('fetchFaviconViaBackground error:', e);
-    return null;
+  selectedEmailIds = next;
+  if (next.size === 0) {
+    selectionMode = false;
+    contextMenuOpen = false;
   }
 }
 
-// Favicon cache for successful loads only (24-hour expiration)
-const FAVICON_CACHE_KEY = 'favicon_success_cache';
-const CACHE_DURATION = 24 * 60 * 60 * 1000; // 24 hours
-
-function getFaviconCache(): Record<string, { timestamp: number }> {
-  try {
-    const cached = localStorage.getItem(FAVICON_CACHE_KEY);
-    if (cached) return JSON.parse(cached);
-  } catch {}
-  return {};
-}
-
-function setFaviconCacheSuccess(domain: string) {
-  const cache = getFaviconCache();
-  cache[domain] = { timestamp: Date.now() };
-  try {
-    localStorage.setItem(FAVICON_CACHE_KEY, JSON.stringify(cache));
-  } catch {}
-}
-
-function isFaviconCachedSuccess(domain: string): boolean {
-  const cache = getFaviconCache();
-  const entry = cache[domain];
-  if (!entry) return false;
-  if (Date.now() - entry.timestamp > CACHE_DURATION) {
-    delete cache[domain];
-    try {
-      localStorage.setItem(FAVICON_CACHE_KEY, JSON.stringify(cache));
-    } catch {}
-    return false;
-  }
-  return true;
-}
-
-// Extract domain from email address
-function getDomainFromEmail(email: string): string {
-  const match = email.match(/@([^@]+)$/);
-  return match ? match[1] : '';
-}
-
-// Get root domain (strips subdomains, handles multi-level TLDs like .co.uk)
-function getRootDomain(domain: string): string {
-  const parts = domain.split('.');
-  // Common multi-level TLDs
-  const multiLevelTLDs = [
-    'co.uk',
-    'com.au',
-    'co.nz',
-    'co.za',
-    'ac.uk',
-    'gov.uk',
-    'org.uk',
-    'net.uk',
-    'nhs.uk',
-    'police.uk',
-    'mod.uk',
-    'sch.uk',
-  ];
-  const tld = parts.slice(-2).join('.');
-
-  if (multiLevelTLDs.includes(tld)) {
-    // For multi-level TLDs, if more than 3 parts, take last 3
-    // If exactly 3 parts, check if first part is a subdomain (contains dash or is common subdomain)
-    if (parts.length > 3) {
-      return parts.slice(-3).join('.');
-    } else if (parts.length === 3) {
-      // For domains like "email-staples.co.uk", the root is "staples.co.uk"
-      // For domains like "staples.co.uk", the root is "staples.co.uk"
-      // We need to detect if the first part is a subdomain
-      const firstPart = parts[0];
-      const commonSubdomains = [
-        'www',
-        'mail',
-        'email',
-        'web',
-        'm',
-        'mobile',
-        'app',
-        'api',
-        'blog',
-        'shop',
-        'store',
-      ];
-      if (commonSubdomains.includes(firstPart) || firstPart.includes('-')) {
-        // It's a subdomain, take last 2 parts
-        return parts.slice(-2).join('.');
-      }
-      // Not a subdomain, return as is
-      return domain;
-    }
-  }
-
-  // Standard TLDs: take last 2 parts
-  return parts.length > 2 ? parts.slice(-2).join('.') : domain;
-}
-
-// Strip dash and preceding word from domain (e.g., email-staples.co.uk -> staples.co.uk)
-function getStrippedDomain(domain: string): string {
-  const dashIndex = domain.indexOf('-');
-  if (dashIndex === -1) return domain;
-  return domain.substring(dashIndex + 1);
-}
-
-// Get favicon URL for a domain
-function getFaviconUrl(domain: string): string {
-  if (!domain) return '';
-  return `https://${domain}/favicon.ico`;
-}
+// Track per-email favicon loaded state for container styling
+let faviconLoaded = $state<Record<string, boolean>>({});
 
 // Extract display name from email address
 function getDisplayName(email: string, name?: string): string {
-  if (name) return name;
+  // Prioritize name over email
+  if (name?.trim()) {
+    // If name looks like an email address, extract the local part
+    if (name.includes('@')) {
+      const localPart = name.split('@')[0];
+      return localPart.replace(/[._]/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase());
+    }
+    return name.trim();
+  }
   if (!email) return 'Unknown';
-  const localPart = email.split('@')[0];
-  // Convert john.doe or john_doe to "John Doe"
-  return localPart.replace(/[._]/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase());
+  // If email looks like a full email address, extract local part
+  if (email.includes('@')) {
+    const localPart = email.split('@')[0];
+    // Convert john.doe or john_doe to "John Doe"
+    return localPart.replace(/[._]/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase());
+  }
+  return email;
 }
 
 const AVATAR_COLORS = [
@@ -262,28 +217,98 @@ function avatarColor(email: string): string {
 }
 </script>
 
+<div class="relative">
+  <!-- Pull-to-refresh overlay (outside scrollable area) -->
+  {#if pullDistance > 0}
+    <div
+      class="absolute top-0 left-0 right-0 flex items-center justify-center py-2 z-10 bg-md-surface pointer-events-none"
+      style="opacity: {Math.min(pullDistance / 60, 1)}; transform: translateY({Math.min(pullDistance - 10, 50)}px); transition: opacity 0.1s;"
+    >
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        class="w-5 h-5 text-md-primary"
+        fill="none"
+        viewBox="0 0 24 24"
+        stroke="currentColor"
+        stroke-width="2"
+        style="transform: rotate({refreshRotation}deg);"
+      >
+        <path
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99"
+        />
+      </svg>
+      <span class="text-xs text-md-primary ml-2 font-semibold">
+        {pullDistance > 60 ? 'Release to refresh' : 'Pull to refresh'}
+      </span>
+    </div>
+  {/if}
+
+<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+<!-- Pull-to-refresh gesture area: touch/mouse handlers are intentional for mobile refresh functionality -->
+<!-- This is a scrollable list region that supports pull-to-refresh gesture -->
 <div
   class="flex-1 px-1 border-t border-md-secondary-container {displayedEmails.length > 0 ? 'overflow-y-auto' : ''} relative"
   style="max-height: 300px; padding-bottom: 120px; scrollbar-width: thin; scrollbar-color: var(--md-primary) transparent;"
   role="region"
-  aria-label="Email list"
+  aria-label="Email list with pull-to-refresh"
+  aria-hidden="false"
   ontouchstart={(e) => {
-    const container = e.currentTarget as HTMLElement;
-    if (container.scrollTop === 0) {
-      startY = e.touches[0].clientY;
-      isPulling = true;
-    }
+    startY = e.touches[0].clientY;
+    isPulling = true;
+    pullDistance = 0;
   }}
   ontouchmove={(e) => {
     if (!isPulling) return;
+    const container = e.currentTarget as HTMLElement;
+    if (container.scrollTop > 0) return;
     const currentY = e.touches[0].clientY;
-    pullDistance = Math.min(currentY - startY, 80);
-    if (pullDistance > 20) pullToRefresh = true;
+    const dist = currentY - startY;
+    if (dist > 0) {
+      pullDistance = Math.min(dist, 80);
+      pullToRefresh = pullDistance > 60;
+      e.preventDefault();
+    }
   }}
-  ontouchend={async () => {
-    if (pullToRefresh && pullDistance > 50) {
+  ontouchend={async (e) => {
+    const container = e.currentTarget as HTMLElement;
+    if (pullToRefresh && container.scrollTop === 0) {
       await onRefreshInbox();
     }
+    pullToRefresh = false;
+    pullDistance = 0;
+    isPulling = false;
+    startY = 0;
+  }}
+  onmousedown={(e) => {
+    startY = e.clientY;
+    isPulling = true;
+    pullDistance = 0;
+  }}
+  onmousemove={(e) => {
+    if (!isPulling || e.buttons !== 1) return;
+    const container = e.currentTarget as HTMLElement;
+    if (container.scrollTop > 0) return;
+    const currentY = e.clientY;
+    const dist = currentY - startY;
+    if (dist > 0) {
+      pullDistance = Math.min(dist, 80);
+      pullToRefresh = pullDistance > 60;
+      e.preventDefault();
+    }
+  }}
+  onmouseup={async (e) => {
+    const container = e.currentTarget as HTMLElement;
+    if (pullToRefresh && container.scrollTop === 0) {
+      await onRefreshInbox();
+    }
+    pullToRefresh = false;
+    pullDistance = 0;
+    isPulling = false;
+    startY = 0;
+  }}
+  onmouseleave={() => {
     pullToRefresh = false;
     pullDistance = 0;
     isPulling = false;
@@ -297,14 +322,6 @@ function avatarColor(email: string): string {
     }
   }}
 >
-  {#if pullDistance > 0}
-    <div class="flex items-center justify-center py-2" style="opacity: {pullDistance / 80}">
-      {#if pullToRefresh}
-        <span class="loading loading-spinner loading-sm text-md-primary"></span>
-      {/if}
-      <span class="text-xs text-md-on-surface/50 ml-2">{pullToRefresh ? 'Release to refresh' : 'Pull to refresh'}</span>
-    </div>
-  {/if}
   {#if loading}
     <div class="py-2 space-y-2">
       {#each [1, 2, 3] as _}
@@ -327,154 +344,168 @@ function avatarColor(email: string): string {
     />
   {:else}
     {#each displayedEmails as mail, index}
-      <button
-        class="w-full text-left border-0 bg-transparent focus:outline-none hover:bg-md-surface-variant/40 transition-colors duration-150 {mail.id === highlightedEmailId ? 'bg-md-primary/5' : ''}"
-        onclick={() => onOpenMessageDetail(mail)}
-        ontouchstart={(e) => handleLongPressStart(mail, e)}
-        ontouchend={handleLongPressEnd}
-        ontouchmove={handleLongPressEnd}
-        onmousedown={(e) => handleLongPressStart(mail, e)}
-        onmouseup={handleLongPressEnd}
-        onmouseleave={handleLongPressEnd}
-        oncontextmenu={(e) => { e.preventDefault(); }}
-        onkeydown={(e) => {
-          if (e.key === 'ArrowDown') { e.preventDefault(); (e.currentTarget.nextElementSibling as HTMLElement)?.focus(); }
-          else if (e.key === 'ArrowUp') { e.preventDefault(); (e.currentTarget.previousElementSibling as HTMLElement)?.focus(); }
-        }}
-        aria-label={`Email from ${mail.from}: ${mail.subject}`}
-        tabindex="0"
-      >
-        <div class="flex items-center gap-2 px-0 py-00.5 border-b border-md-outline-variant/50">
-
-          <!-- Indigo unread dot -->
-          <div class="flex-shrink-0 w-2 flex items-center justify-center">
-            {#if mail.unread}
-              <span class="w-2 h-2 rounded-full bg-md-primary"></span>
+      <div class="relative overflow-hidden border-b border-md-outline-variant/50" id="email-item-{mail.id}">
+        <!-- Swipe action background (delete/archive) -->
+        {#if swipingEmail === mail && swipeDirection}
+          <div
+            class="absolute inset-0 flex items-center justify-end gap-2 px-4 transition-colors duration-200"
+            class:bg-red-500={swipeDirection === 'left'}
+            class:bg-blue-500={swipeDirection === 'right'}
+            style="opacity: {Math.abs(swipeDistance) / 120};"
+          >
+            {#if swipeDirection === 'left'}
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                class="w-6 h-6 text-white"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                stroke-width="2"
+              >
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                />
+              </svg>
+              <span class="text-white font-medium">Delete</span>
             {:else}
-              <span class="w-2 h-2"></span>
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                class="w-6 h-6 text-white"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                stroke-width="2"
+              >
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"
+                />
+              </svg>
+              <span class="text-white font-medium">Archive</span>
             {/if}
           </div>
+        {/if}
+
+        <!-- Email item -->
+        <button
+          id="email-button-{mail.id}"
+          class="w-full text-left border-0 focus:outline-none hover:bg-md-surface-variant/40 duration-150 {mail.id === highlightedEmailId ? 'bg-md-primary/5' : ''} {mail.unread ? 'bg-md-primary/5' : 'bg-transparent'} py-1 px-1"
+          style="transform: translateX({swipingEmail === mail ? swipeDistance : 0}px); transition: {swipeActionTriggered ? 'transform 0.3s' : 'none'}; user-select: none;"
+          onclick={(e) => { if (Math.abs(swipeDistance) > 5) { e.preventDefault(); return; } if (selectionMode) { toggleEmailSelection(mail.id); } else { onOpenMessageDetail(mail); } }}
+          ontouchstart={(e) => {
+            handleLongPressStart(mail, e);
+            handleSwipeStart(mail, e);
+          }}
+          ontouchend={() => {
+            handleLongPressEnd();
+            handleSwipeEnd();
+          }}
+          ontouchmove={(e) => {
+            handleLongPressEnd();
+            handleSwipeMove(e);
+          }}
+          onmousedown={(e) => {
+            handleLongPressStart(mail, e);
+            handleSwipeStart(mail, e);
+          }}
+          onmouseup={() => {
+            handleLongPressEnd();
+            handleSwipeEnd();
+          }}
+          onmousemove={(e) => {
+            if (e.buttons === 1) handleSwipeMove(e);
+          }}
+          onmouseleave={() => {
+            handleLongPressEnd();
+            handleSwipeEnd();
+          }}
+          oncontextmenu={(e) => { e.preventDefault(); }}
+          onkeydown={(e) => {
+            if (e.key === 'ArrowDown') { e.preventDefault(); (e.currentTarget.nextElementSibling as HTMLElement)?.focus(); }
+            else if (e.key === 'ArrowUp') { e.preventDefault(); (e.currentTarget.previousElementSibling as HTMLElement)?.focus(); }
+          }}
+          aria-label={`Email from ${mail.from}: ${mail.subject}`}
+          tabindex="0"
+        >
+        <div class="flex items-center gap-2 px-0 py-0.5 ">
 
           <!-- Avatar: letter shown until favicon loads, then replaced -->
           {#if mail.from}
-            {@const fullDomain = getDomainFromEmail(mail.from)}
-            {@const strippedDomain = getStrippedDomain(fullDomain)}
-            {@const rootDomain = getRootDomain(fullDomain)}
-            {@const googleUrl = `https://www.google.com/s2/favicons?sz=32&domain=${strippedDomain}`}
-            {@const attempt = faviconDomainAttempt[mail.id] || 'full'}
-            {@const isFailed = attempt === 'failed'}
-            {@const isLoaded = imageLoaded[mail.id] === true || isFaviconCachedSuccess(rootDomain)}
-            <div class="flex-shrink-0 w-10 h-10 rounded-lg {isLoaded ? 'bg-md-surface-container-low' : avatarColor(mail.from)} overflow-hidden flex items-center justify-center relative">
-              {#if attempt === 'full'}
-                <img
-                  src={`https://${fullDomain}/favicon.ico`}
-                  alt=""
+            {@const isLoaded = faviconLoaded[mail.id] === true}
+            <div class="flex-shrink-0 w-[35px] h-[35px] rounded-lg {selectedEmailIds.has(mail.id) ? 'bg-md-primary' : (isLoaded ? 'bg-md-surface-container-low' : (mail.unread ? avatarColor(mail.from) : 'bg-gray-400'))} overflow-hidden flex items-center justify-center relative">
+              {#if selectedEmailIds.has(mail.id)}
+                <!-- Tick icon when selected -->
+                <svg xmlns="http://www.w3.org/2000/svg" class="w-6 h-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
+                </svg>
+              {:else}
+                <FaviconImage
+                  email={mail.from}
+                  size={32}
                   class="absolute inset-0 w-full h-full object-cover {isLoaded ? 'opacity-100' : 'opacity-0'}"
-                  onload={() => {
-                    console.log('img onload for full:', mail.id);
-                    imageLoaded[mail.id] = true;
-                    setFaviconCacheSuccess(rootDomain);
-                  }}
-                  onerror={() => {
-                    console.log('img onerror for full:', mail.id);
-                    faviconDomainAttempt[mail.id] = 'stripped';
-                  }}
+                  fallbackLetter={(mail.from_name || mail.from || '?')[0].toUpperCase()}
+                  fallbackColor={mail.unread ? avatarColor(mail.from) : 'bg-gray-400'}
+                  onLoad={() => faviconLoaded[mail.id] = true}
+                  onError={() => faviconLoaded[mail.id] = false}
                 />
-              {:else if attempt === 'stripped'}
-                <img
-                  src={`https://${strippedDomain}/favicon.ico`}
-                  alt=""
-                  class="absolute inset-0 w-full h-full object-cover {isLoaded ? 'opacity-100' : 'opacity-0'}"
-                  onload={() => {
-                    console.log('img onload for stripped:', mail.id);
-                    imageLoaded[mail.id] = true;
-                    setFaviconCacheSuccess(rootDomain);
-                  }}
-                  onerror={() => {
-                    console.log('img onerror for stripped:', mail.id);
-                    faviconDomainAttempt[mail.id] = 'root';
-                  }}
-                />
-              {:else if attempt === 'root'}
-                <img
-                  src={`https://${rootDomain}/favicon.ico`}
-                  alt=""
-                  class="absolute inset-0 w-full h-full object-cover {isLoaded ? 'opacity-100' : 'opacity-0'}"
-                  onload={() => {
-                    console.log('img onload for root:', mail.id);
-                    imageLoaded[mail.id] = true;
-                    setFaviconCacheSuccess(rootDomain);
-                  }}
-                  onerror={() => {
-                    console.log('img onerror for root:', mail.id);
-                    console.log('Fetching Google favicon for:', googleUrl);
-                    fetchFaviconViaBackground(googleUrl).then(result => {
-                      console.log('Google favicon result:', result);
-                      if (!result || result.hash === GOOGLE_DEFAULT_HASH) {
-                        console.log('Google favicon is default or failed');
-                        faviconDomainAttempt[mail.id] = 'failed';
-                        imageLoaded[mail.id] = false;
-                      } else {
-                        console.log('Google favicon is valid, setting blob URL');
-                        googleFaviconBlobUrl[mail.id] = result.dataUrl;
-                        faviconDomainAttempt[mail.id] = 'google';
-                      }
-                    });
-                  }}
-                />
-              {:else if attempt === 'google' && googleFaviconBlobUrl[mail.id]}
-                <img
-                  src={googleFaviconBlobUrl[mail.id]}
-                  alt=""
-                  class="absolute inset-0 w-full h-full object-cover {isLoaded ? 'opacity-100' : 'opacity-0'}"
-                  onload={() => {
-                    console.log('img onload for google:', mail.id);
-                    imageLoaded[mail.id] = true;
-                    setFaviconCacheSuccess(rootDomain);
-                  }}
-                  onerror={() => {
-                    console.log('img onerror for google:', mail.id);
-                    faviconDomainAttempt[mail.id] = 'failed';
-                    imageLoaded[mail.id] = false;
-                  }}
-                />
-              {/if}
-              {#if !isLoaded}
-                <span class="text-white text-lg font-bold z-10">
-                  {(mail.from_name || mail.from || '?')[0].toUpperCase()}
-                </span>
               {/if}
             </div>
-          {:else}
-            <span class="text-white text-lg font-bold bg-gray-500 w-10 h-10 rounded-lg flex items-center justify-center">?</span>
-          {/if}
-
-          <!-- Text -->
+          {/if}          <!-- Text -->
           <div class="flex flex-col flex-1 min-w-0">
-            <div class="flex items-baseline justify-between gap-2 mb-0.5">
-              <span class="text-sm font-bold text-md-on-surface truncate leading-tight">{getDisplayName(mail.from || '', mail.from_name)}</span>
-              <span class="text-[10px] font-medium text-md-on-surface/40 flex-shrink-0">{mail.time}</span>
+            <div class="flex items-center justify-between gap-2">
+              <span class="text-sm font-bold {mail.unread ? 'text-md-on-surface' : 'text-md-on-surface/70'} truncate leading-tight">{getDisplayName(mail.from, mail.from_name)}</span>
+              <span class="text-[10px] font-medium {mail.unread ? 'text-md-on-surface/60' : 'text-md-on-surface/40'} flex-shrink-0">{mail.time}</span>
             </div>
-            <div class="flex items-center gap-2">
-              <p class="text-xs text-md-on-surface/50 truncate leading-tight flex-1">{mail.subject || '(no subject)'}</p>
-              {#if mail.local_only}
-                <span class="px-2 py-0.5 text-xs rounded-full bg-amber-500/20 text-amber-600 flex-shrink-0">Local</span>
-              {/if}
-              {#if mail.isOtp}
-                <span
-                  class="px-2 py-0.5 text-xs rounded-full bg-md-primary/20 text-md-primary cursor-pointer hover:bg-md-primary/30 transition-colors flex-shrink-0"
-                  role="button"
-                  tabindex="0"
-                  onclick={(e) => { e.stopPropagation(); onCopyOtpFromMessage(mail.otp); }}
-                  onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); onCopyOtpFromMessage(mail.otp); } }}
-                  aria-label={`Copy OTP code ${mail.otp}`}
-                >OTP: {mail.otp}</span>
-              {/if}
+            <div class="flex items-start gap-1">
+              <!-- col1: subject + body/OTP -->
+              <div class="flex flex-col flex-1 min-w-0">
+                <p class="text-xs {mail.unread ? 'font-semibold text-md-on-surface' : 'text-md-on-surface/50'} truncate leading-tight">{mail.subject || '(no subject)'}</p>
+                <div class="flex items-center gap-1 mt-1 flex-wrap">
+                  {#if mail.local_only}
+                    <span id="local-badge-{mail.id}" class="px-2 py-0.5 text-xs rounded-full bg-amber-500/20 text-amber-600 flex-shrink-0">Local</span>
+                  {/if}
+                  {#if mail.isOtp}
+                    <span
+                      id="otp-badge-{mail.id}"
+                      role="button"
+                      tabindex="0"
+                      class="px-2 py-0.5 text-xs rounded-full bg-md-primary/20 text-md-primary cursor-pointer hover:bg-md-primary/30 transition-colors flex-shrink-0"
+                      onmousedown={(e) => { e.stopPropagation(); e.preventDefault(); onCopyOtpFromMessage(mail.otp); }}
+                      onmouseup={(e) => { e.stopPropagation(); }}
+                      onclick={(e) => { e.stopPropagation(); e.preventDefault(); onCopyOtpFromMessage(mail.otp); }}
+                      onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); e.preventDefault(); onCopyOtpFromMessage(mail.otp); } }}
+                      aria-label={`Copy OTP code ${mail.otp}`}
+                    >OTP: {mail.otp}</span>
+                  {/if}
+                </div>
+                {#if !mail.isOtp && (mail.body_plain || mail.body)}
+                  <p class="text-xs text-md-on-surface/60 truncate leading-tight">{(mail.body_plain || (mail.body_html || '').replace(/<[^>]*>/g, '')) || ''}</p>
+                {/if}
+              </div>
+              <!-- col2: star (div to avoid nested button, intercepts via mousedown) -->
+              <div
+                id="star-button-{mail.id}"
+                role="button"
+                tabindex="0"
+                class="flex-shrink-0 self-center p-0.5 rounded transition-colors hover:bg-md-surface-variant/40 cursor-pointer {starredEmailIds.has(mail.id) ? 'text-amber-400' : 'text-md-on-surface/25'}"
+                onmousedown={(e) => { e.stopPropagation(); e.preventDefault(); toggleStar(mail.id); }}
+                onclick={(e) => { e.stopPropagation(); e.preventDefault(); }}
+                onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); e.preventDefault(); toggleStar(mail.id); } }}
+                aria-label={starredEmailIds.has(mail.id) ? 'Unstar email' : 'Star email'}
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" viewBox="0 0 24 24" fill={starredEmailIds.has(mail.id) ? 'currentColor' : 'none'} stroke="currentColor" stroke-width="2">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
+                </svg>
+              </div>
             </div>
           </div>
 
         </div>
       </button>
+      </div>
     {/each}
     {#if displayedEmailCount < filteredEmails.length}
       <div class="text-center py-2 text-xs text-md-on-surface/50">
@@ -484,47 +515,50 @@ function avatarColor(email: string): string {
     {/if}
   {/if}
 </div>
+</div>
 
-<!-- Context menu for long-press -->
-{#if contextMenuOpen}
+<!-- Selection action pill - fixed bottom -->
+{#if selectionMode}
   <div
-    class="fixed inset-0 z-50"
-    role="dialog"
-    aria-modal="true"
-    tabindex="-1"
-    onclick={closeContextMenu}
+    class="fixed bottom-20 left-4 right-4 bg-md-surface rounded-full shadow-2xl border border-md-outline-variant overflow-hidden flex items-center gap-1 px-2 py-2 z-50"
+    role="toolbar"
+    aria-label="Selection actions"
+    tabindex="0"
     onkeydown={(e) => { if (e.key === 'Escape') closeContextMenu(); }}
   >
-    <div
-      class="absolute bg-md-surface rounded-lg shadow-2xl border border-md-outline-variant overflow-hidden"
-      style="left: {Math.min(contextMenuPosition.x, window.innerWidth - 200)}px; top: {Math.min(contextMenuPosition.y, window.innerHeight - 150)}px;"
-      role="menu"
-      tabindex="-1"
-      onclick={(e) => e.stopPropagation()}
-      onkeydown={(e) => { if (e.key === 'Escape') closeContextMenu(); }}
+    <!-- Close / count -->
+    <button
+      class="flex items-center justify-center w-8 h-8 rounded-full hover:bg-md-surface-variant transition-colors flex-shrink-0"
+      aria-label="Cancel selection"
+      onclick={closeContextMenu}
     >
-      <div class="p-1">
-        <button
-          class="w-full text-left px-3 py-2 text-sm text-md-on-surface hover:bg-md-surface-variant rounded-md transition-colors flex items-center gap-2"
-          role="menuitem"
-          onclick={() => { closeContextMenu(); }}
-          onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') closeContextMenu(); }}
-        >
-          <IconTrash class="w-4 h-4 text-md-error" />
-          <span>Delete</span>
-        </button>
-        <button
-          class="w-full text-left px-3 py-2 text-sm text-md-on-surface hover:bg-md-surface-variant rounded-md transition-colors flex items-center gap-2"
-          role="menuitem"
-          onclick={() => { closeContextMenu(); }}
-          onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') closeContextMenu(); }}
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 text-md-primary" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4" />
-          </svg>
-          <span>Archive</span>
-        </button>
-      </div>
-    </div>
+      <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 text-md-on-surface/60" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+      </svg>
+    </button>
+    <span class="text-xs font-semibold text-md-on-surface/70 px-1 flex-shrink-0">{selectedEmailIds.size} selected</span>
+    <div class="flex-1"></div>
+    <button
+      class="flex items-center justify-center gap-1.5 px-4 py-2 text-sm font-medium text-md-error hover:bg-md-error/10 rounded-full transition-colors"
+      aria-label="Delete selected"
+      onclick={() => { closeContextMenu(); }}
+    >
+      <IconTrash class="w-4 h-4" />
+      <span>Delete</span>
+    </button>
+    <div class="w-px h-6 bg-md-outline-variant/50"></div>
+    <button
+      class="flex items-center justify-center gap-1.5 px-4 py-2 text-sm font-medium text-md-primary hover:bg-md-primary/10 rounded-full transition-colors"
+      aria-label="Archive selected"
+      onclick={() => { closeContextMenu(); }}
+    >
+      <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4" />
+      </svg>
+      <span>Archive</span>
+    </button>
   </div>
 {/if}
+
+
+

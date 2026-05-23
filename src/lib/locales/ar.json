@@ -18,7 +18,8 @@
     "yes": "نعم",
     "no": "لا",
     "archive": "أرشفة",
-    "unarchive": "إلغاء الأرشفة"
+    "unarchive": "إلغاء الأرشفة",
+    "restore": "استعادة"
   },
   "inbox": {
     "title": "صندوق الوارد",
@@ -45,6 +46,9 @@
     "autoCopyDescription": "نسخ إلى الحافظة بعد الإنشاء",
     "autoRenew": "تجديد تلقائي",
     "autoRenewDescription": "تجديد تلقائيًا قبل انتهاء الصلاحية",
+    "emailRetention": "الاحتفاظ بالبريد الإلكتروني",
+    "emailRetentionDescription": "مدة الاحتفاظ بالرسائل محليًا",
+    "storageUsage": "استخدام التخزين",
     "appearance": "المظهر",
     "theme": "المظهر",
     "light": "فاتح",

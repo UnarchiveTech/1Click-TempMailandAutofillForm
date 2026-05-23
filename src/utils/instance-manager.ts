@@ -6,7 +6,8 @@
 import { browser } from 'wxt/browser';
 import { DEFAULT_PROVIDER, loadProviderConfig } from '@/utils/email-service.js';
 import { ProviderInstanceNotFoundError } from '@/utils/errors.js';
-import { logError } from '@/utils/logger.js';
+import { logError, logWarn } from '@/utils/logger.js';
+import { getStorage, type ProviderStorageKey, setStorage } from '@/utils/storage-keys.js';
 import type { ProviderInstance } from '@/utils/types.js';
 
 /**
@@ -32,11 +33,9 @@ export async function getProviderInstancesWithCustom(
   providerId: string
 ): Promise<ProviderInstance[]> {
   const predefinedInstances = getProviderInstances(providerId);
-  const storageKey = `customInstances_${providerId}` as const;
-  // biome-ignore lint/suspicious/noExplicitAny: browser.storage.local.get requires dynamic keys
-  const { customInstances = [] } = (await browser.storage.local.get([storageKey as any])) as {
-    customInstances?: ProviderInstance[];
-  };
+  const storageKey: ProviderStorageKey = `customInstances_${providerId}`;
+  const result = await getStorage<ProviderInstance[]>(storageKey);
+  const customInstances: ProviderInstance[] = result[storageKey] || [];
   return [...predefinedInstances, ...customInstances];
 }
 
@@ -46,16 +45,14 @@ export async function getProviderInstancesWithCustom(
 export async function getSelectedProviderInstance(
   providerId: string
 ): Promise<ProviderInstance | null> {
-  const storageKey = `selectedInstance_${providerId}` as const;
-  // biome-ignore lint/suspicious/noExplicitAny: browser.storage.local.get requires dynamic keys
-  const { selectedInstance } = (await browser.storage.local.get([storageKey as any])) as {
-    selectedInstance?: string;
-  };
+  const storageKey: ProviderStorageKey = `selectedInstance_${providerId}`;
+  const result = await getStorage<string>(storageKey);
+  const selectedInstance = result[storageKey];
 
   const instances = await getProviderInstancesWithCustom(providerId);
 
   if (!selectedInstance || typeof selectedInstance !== 'string') {
-    await browser.storage.local.set({ [storageKey]: 'random' });
+    await setStorage(storageKey, 'random');
     const randomInstance = instances[Math.floor(Math.random() * instances.length)];
     return randomInstance || null;
   }
@@ -67,10 +64,10 @@ export async function getSelectedProviderInstance(
 
   const selected = instances.find((instance) => instance.id === selectedInstance);
   if (!selected) {
-    console.warn(
+    logWarn(
       `Selected instance ${selectedInstance} not found for provider ${providerId}, falling back to random`
     );
-    await browser.storage.local.set({ [storageKey]: 'random' });
+    await setStorage(storageKey, 'random');
     const randomInstance = instances[Math.floor(Math.random() * instances.length)];
     return randomInstance || null;
   }
@@ -86,8 +83,8 @@ export async function setProviderInstance(providerId: string, instanceId: string
   if (!instance) {
     throw new ProviderInstanceNotFoundError(instanceId);
   }
-  const storageKey = `selectedInstance_${providerId}`;
-  await browser.storage.local.set({ [storageKey]: instanceId });
+  const storageKey: ProviderStorageKey = `selectedInstance_${providerId}`;
+  await setStorage(storageKey, instanceId);
 }
 
 /**
@@ -97,18 +94,16 @@ export async function addCustomProviderInstance(
   providerId: string,
   instance: Omit<ProviderInstance, 'id' | 'isCustom'>
 ): Promise<void> {
-  const storageKey = `customInstances_${providerId}`;
-  // biome-ignore lint/suspicious/noExplicitAny: browser.storage.local.get requires dynamic keys
-  const { customInstances = [] } = (await browser.storage.local.get([storageKey as any])) as {
-    customInstances?: ProviderInstance[];
-  };
+  const storageKey: ProviderStorageKey = `customInstances_${providerId}`;
+  const result = await getStorage<ProviderInstance[]>(storageKey);
+  const customInstances: ProviderInstance[] = result[storageKey] || [];
   const newInstance: ProviderInstance = {
     ...instance,
     id: `custom_${providerId}_${Date.now()}`,
     isCustom: true,
   };
   customInstances.push(newInstance);
-  await browser.storage.local.set({ [storageKey]: customInstances });
+  await setStorage(storageKey, customInstances);
 }
 
 /**
@@ -118,15 +113,13 @@ export async function removeCustomProviderInstance(
   providerId: string,
   instanceId: string
 ): Promise<void> {
-  const storageKey = `customInstances_${providerId}`;
-  // biome-ignore lint/suspicious/noExplicitAny: browser.storage.local.get requires dynamic keys
-  const { customInstances = [] } = (await browser.storage.local.get([storageKey as any])) as {
-    customInstances?: ProviderInstance[];
-  };
+  const storageKey: ProviderStorageKey = `customInstances_${providerId}`;
+  const result = await getStorage<ProviderInstance[]>(storageKey);
+  const customInstances: ProviderInstance[] = result[storageKey] || [];
   const filtered = customInstances.filter(
     (instance: ProviderInstance) => instance.id !== instanceId
   );
-  await browser.storage.local.set({ [storageKey]: filtered });
+  await setStorage(storageKey, filtered);
 }
 
 /**

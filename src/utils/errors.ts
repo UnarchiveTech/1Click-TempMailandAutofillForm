@@ -92,7 +92,7 @@ export class BaseExtensionError extends Error {
     // Maintains proper stack trace (Node.js only, not available in browser)
     // Type-safe access to optional Node.js captureStackTrace method
     const ErrorWithStackTrace = Error as {
-      // biome-ignore lint/complexity/noBannedTypes: Node.js API type
+      // biome-ignore lint/complexity/noBannedTypes: Node.js Error.captureStackTrace is not in TypeScript DOM types
       captureStackTrace?: (target: Error, ctor: Function) => void;
     };
     ErrorWithStackTrace.captureStackTrace?.(this, this.constructor);
@@ -386,4 +386,49 @@ export function isRecoverableError(error: BaseExtensionError): boolean {
   ];
 
   return recoverableCodes.includes(error.code) || error.severity === ErrorSeverity.LOW;
+}
+
+// Standardized error handling for async operations
+export async function handleAsyncError<T>(
+  operation: () => Promise<T>,
+  context: string,
+  options?: {
+    throwOnError?: boolean;
+    defaultValue?: T;
+  }
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (error: unknown) {
+    const wrappedError = wrapError(error, { context });
+
+    if (options?.throwOnError) {
+      throw wrappedError;
+    }
+
+    if (options?.defaultValue !== undefined) {
+      return options.defaultValue;
+    }
+
+    throw wrappedError;
+  }
+}
+
+// Standardized error message extraction
+export function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return String(error);
+}
+
+// Standardized error logging helper
+export function logAndWrapError(
+  context: string,
+  error: unknown,
+  logger: { error: (message: string, error?: Error) => void }
+): BaseExtensionError {
+  const wrappedError = wrapError(error, { context });
+  logger.error(context, wrappedError instanceof Error ? wrappedError : undefined);
+  return wrappedError;
 }

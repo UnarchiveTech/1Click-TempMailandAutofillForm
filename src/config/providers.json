@@ -4,6 +4,7 @@
     "name": "Guerrilla Mail",
     "displayName": "Guerrilla Mail",
     "apiUrl": "https://api.guerrillamail.com/ajax.php",
+    "websiteUrl": "https://guerrillamail.com",
     "auth": {
       "type": "query_parameter",
       "paramName": "sid_token",
@@ -128,6 +129,7 @@
       "detailItemIdParam": "email_id",
       "detailResponseMapping": {
         "id": "mail_id",
+        "from": "mail_from",
         "from_name": "mail_from",
         "subject": "mail_subject",
         "body_html": "mail_body",
@@ -152,6 +154,22 @@
     "customEmail": {
       "supported": true,
       "operation": "setEmailUser"
+    },
+    "multiDomain": {
+      "enabled": true,
+      "domains": [
+        "guerrillamail.com",
+        "sharklasers.com",
+        "guerrillamail.info",
+        "grr.la",
+        "guerrillamail.biz",
+        "guerrillamail.de",
+        "guerrillamail.net",
+        "guerrillamail.org",
+        "guerrillamailblock.com",
+        "pokemail.net",
+        "spam4.me"
+      ]
     },
     "multiInstance": {
       "enabled": false,
@@ -193,6 +211,7 @@
     "name": "Burner.kiwi",
     "displayName": "Burner.kiwi",
     "apiUrl": "{instanceUrl}",
+    "websiteUrl": "https://burner.kiwi",
     "auth": {
       "type": "header",
       "headerName": "X-Burner-Key",

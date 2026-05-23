@@ -18,7 +18,8 @@
     "yes": "はい",
     "no": "いいえ",
     "archive": "アーカイブ",
-    "unarchive": "アーカイブ解除"
+    "unarchive": "アーカイブ解除",
+    "restore": "復元"
   },
   "inbox": {
     "title": "受信トレイ",
@@ -45,6 +46,9 @@
     "autoCopyDescription": "生成後にクリップボードにコピー",
     "autoRenew": "自動更新",
     "autoRenewDescription": "有効期限前に自動更新",
+    "emailRetention": "メール保存期間",
+    "emailRetentionDescription": "ローカルにメールを保存する期間",
+    "storageUsage": "ストレージ使用量",
     "appearance": "外観",
     "theme": "テーマ",
     "light": "ライト",

@@ -6,6 +6,7 @@ import IconInbox from '@/components/icons/IconInbox.svelte';
 import IconRefresh from '@/components/icons/IconRefresh.svelte';
 import IconSearch from '@/components/icons/IconSearch.svelte';
 import IconTrash from '@/components/icons/IconTrash.svelte';
+import IconX from '@/components/icons/IconX.svelte';
 import { canUnarchive } from '@/features/inbox/inbox-management.js';
 import type { Account } from '@/utils/types.js';
 
@@ -63,21 +64,42 @@ let {
 
 <!-- Tabs -->
 <div class="flex gap-1 px-4 pt-3 pb-2">
-  {#each ['active', 'expired', 'archived'] as tab}
+  <div class="flex gap-1 p-1 rounded-full bg-md-surface-variant flex-1">
     <button
-      class="flex-1 px-3 py-1.5 text-sm capitalize rounded-lg {mgmtTab === tab ? 'bg-md-tertiary text-md-on-tertiary' : 'bg-transparent text-md-on-surface/60 hover:bg-md-secondary-container'} transition-colors"
-      onclick={() => onTabChange(tab)}
+      class="flex-1 flex items-center justify-center gap-2 px-3 py-1 rounded-full transition-all duration-200 {mgmtTab === 'active' ? 'bg-md-surface shadow-sm' : ''}"
+      onclick={() => onTabChange('active')}
     >
-      {tab}
+      <span class="text-xs font-bold {mgmtTab === 'active' ? 'text-md-on-surface' : 'text-md-on-surface/40'}">Live</span>
     </button>
-  {/each}
+    <button
+      class="flex-1 flex items-center justify-center gap-2 px-3 py-1 rounded-full transition-all duration-200 {mgmtTab === 'expired' || mgmtTab === 'archived' ? 'bg-md-surface shadow-sm' : ''}"
+      onclick={() => onTabChange('expired')}
+    >
+      <span class="text-xs font-bold {mgmtTab === 'expired' || mgmtTab === 'archived' ? 'text-md-on-surface' : 'text-md-on-surface/40'}">Inactive</span>
+    </button>
+  </div>
 </div>
 
 <!-- Search -->
 <div class="px-4 pb-2">
-  <div class="flex items-center gap-2 w-full px-3 py-2 rounded-lg border border-md-outline-variant text-sm bg-md-secondary-container">
-    <IconSearch class="w-4 h-4 text-md-on-surface/40 shrink-0" />
-    <input type="text" class="grow bg-transparent outline-none" placeholder="Search emails by address, provider, or status..." bind:value={mgmtSearch} oninput={(e) => onSearchChange((e.target as HTMLInputElement).value)} />
+  <div class="relative">
+    <input
+      type="text"
+      placeholder="Search addresses or tags..."
+      class="w-full bg-md-surface-container-low rounded-lg px-3 py-1.5 text-sm outline-none placeholder:text-md-on-surface/40"
+      bind:value={mgmtSearch}
+      oninput={(e) => onSearchChange((e.target as HTMLInputElement).value)}
+      aria-label="Search addresses"
+    />
+    {#if mgmtSearch}
+      <button
+        class="absolute right-3 top-1/2 -translate-y-1/2 text-md-on-surface/40 hover:text-md-on-surface/70"
+        aria-label="Clear search"
+        onclick={() => onSearchChange('')}
+      >
+        <IconX class="w-4 h-4" />
+      </button>
+    {/if}
   </div>
 </div>
 

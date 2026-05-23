@@ -32,7 +32,7 @@ export function setupPeriodicEmailCheck(
       try {
         if (DEBUG) log('=== PERIODIC EMAIL CHECK STARTED ===');
         const { inboxes = [] } = (await browser.storage.local.get(['inboxes'])) as {
-          inboxes?: Array<{ id: string; address: string; archived?: boolean }>;
+          inboxes?: Array<{ id: string; address: string; accountStatus?: string }>;
         };
         if (DEBUG) log(`Found ${inboxes.length} inboxes`);
 
@@ -42,7 +42,7 @@ export function setupPeriodicEmailCheck(
         }
 
         for (const inbox of inboxes) {
-          if (inbox.archived) {
+          if (inbox.accountStatus === 'archived') {
             if (DEBUG) logDebug(`Skipping archived inbox: ${inbox.address}`);
             continue;
           }
@@ -73,7 +73,12 @@ export function setupPeriodicEmailCheck(
       }
     } else if (alarm.name === 'cleanupStoredEmails') {
       try {
-        await cleanupOldStoredEmails();
+        const { emailRetentionDays = 30 } = (await browser.storage.local.get([
+          'emailRetentionDays',
+        ])) as {
+          emailRetentionDays?: number;
+        };
+        await cleanupOldStoredEmails(emailRetentionDays, emailRetentionDays * 3); // Archived retention is 3x active retention
       } catch (error: unknown) {
         logError(
           'Error in stored emails cleanup:',

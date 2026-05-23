@@ -69,9 +69,26 @@ export function filterEmails(emails: Email[], options: EmailFilterOptions): Emai
     })
     .sort((a, b) => {
       // Sorting logic
-      if (sortBy === 'date') return b.received_at - a.received_at;
-      if (sortBy === 'subject') return (a.subject || '').localeCompare(b.subject || '');
-      return 0;
+      switch (sortBy) {
+        case 'newest':
+          return b.received_at - a.received_at;
+        case 'oldest':
+          return a.received_at - b.received_at;
+        case 'senderNameAsc':
+          return (a.from_name || '').localeCompare(b.from_name || '');
+        case 'senderNameDesc':
+          return (b.from_name || '').localeCompare(a.from_name || '');
+        case 'senderEmailAsc':
+          return (a.from || '').localeCompare(b.from || '');
+        case 'senderEmailDesc':
+          return (b.from || '').localeCompare(a.from || '');
+        case 'subjectAsc':
+          return (a.subject || '').localeCompare(b.subject || '');
+        case 'subjectDesc':
+          return (b.subject || '').localeCompare(a.subject || '');
+        default:
+          return b.received_at - a.received_at; // Default to newest
+      }
     });
 }
 

@@ -9,43 +9,43 @@ import type {
 } from '@/utils/types.js';
 
 // WXT provides 'browser' global; fall back to chrome in non-WXT contexts
-// biome-ignore lint/suspicious/noExplicitAny: Fallback for non-WXT contexts
+// biome-ignore lint/suspicious/noExplicitAny: Cross-browser API compatibility requires any type
 declare const browser: any;
-// biome-ignore lint/suspicious/noExplicitAny: Fallback for non-WXT contexts
+// biome-ignore lint/suspicious/noExplicitAny: Cross-browser API compatibility requires any type
 declare const chrome: any;
 const _ext = typeof browser !== 'undefined' ? browser : chrome;
 
 async function exportData(): Promise<ExportResult> {
   try {
-    const raw = (await _ext.storage.local.get([
+    const result = (await browser.storage.local.get([
       'emailHistory',
-      'credentialsHistory',
+      'loginInfo',
       'darkMode',
       'inboxes',
       'activeInboxId',
     ])) as {
       emailHistory?: EmailHistoryItem[];
-      credentialsHistory?: CredentialsHistoryItem[];
-      darkMode?: boolean;
+      loginInfo?: CredentialsHistoryItem[];
+      darkMode?: string;
       inboxes?: Account[];
       activeInboxId?: string;
     };
     const {
       emailHistory = [],
-      credentialsHistory = [],
-      darkMode = false,
+      loginInfo = [],
+      darkMode = '',
       inboxes = [],
       activeInboxId,
-    } = raw;
+    } = result;
 
     const exportData: ExportData = {
       version: '3.0',
       exportDate: new Date().toISOString(),
       data: {
         emailHistory,
-        credentialsHistory,
+        loginInfo,
         settings: {
-          darkMode,
+          darkMode: darkMode === 'true',
           activeAccountId: activeInboxId,
         },
         accounts: inboxes,
@@ -79,33 +79,20 @@ async function importData(file: File): Promise<ImportResult> {
       throw new Error('Invalid backup file format');
     }
 
-    const {
-      emailHistory = [],
-      credentialsHistory = [],
-      settings = {},
-      accounts = [],
-    } = importedData.data;
+    const { emailHistory = [], loginInfo = [], settings = {}, accounts = [] } = importedData.data;
 
-    if (
-      !Array.isArray(emailHistory) ||
-      !Array.isArray(credentialsHistory) ||
-      !Array.isArray(accounts)
-    ) {
+    if (!Array.isArray(emailHistory) || !Array.isArray(loginInfo) || !Array.isArray(accounts)) {
       throw new Error('Invalid data format in backup file');
     }
 
-    const raw2 = (await _ext.storage.local.get([
-      'emailHistory',
-      'credentialsHistory',
-      'inboxes',
-    ])) as {
+    const raw2 = (await _ext.storage.local.get(['emailHistory', 'loginInfo', 'inboxes'])) as {
       emailHistory?: EmailHistoryItem[];
-      credentialsHistory?: CredentialsHistoryItem[];
+      loginInfo?: CredentialsHistoryItem[];
       inboxes?: Account[];
     };
     const {
       emailHistory: existingEmails = [],
-      credentialsHistory: existingCreds = [],
+      loginInfo: existingCreds = [],
       inboxes: existingInboxes = [],
     } = raw2;
 
@@ -117,7 +104,7 @@ async function importData(file: File): Promise<ImportResult> {
     });
 
     const mergedCreds = [...existingCreds];
-    credentialsHistory.forEach((newCred: CredentialsHistoryItem) => {
+    loginInfo.forEach((newCred: CredentialsHistoryItem) => {
       if (
         !mergedCreds.some(
           (existing: CredentialsHistoryItem) =>
@@ -138,9 +125,9 @@ async function importData(file: File): Promise<ImportResult> {
     const s = settings as { darkMode?: boolean; activeAccountId?: string };
     await _ext.storage.local.set({
       emailHistory: mergedEmails,
-      credentialsHistory: mergedCreds,
+      loginInfo: mergedCreds,
       inboxes: mergedInboxes,
-      darkMode: s.darkMode,
+      darkMode: s.darkMode ? 'true' : 'false',
       activeInboxId: s.activeAccountId,
     });
 

@@ -9,6 +9,7 @@ import IconFlame from '@/components/icons/IconFlame.svelte';
 import IconLock from '@/components/icons/IconLock.svelte';
 import IconPlus from '@/components/icons/IconPlus.svelte';
 import IconShield from '@/components/icons/IconShield.svelte';
+import FaviconImage from '@/components/ui/FaviconImage.svelte';
 import LanguageSwitcher from '@/components/ui/LanguageSwitcher.svelte';
 import Tutorial from '@/components/ui/Tutorial.svelte';
 import { handleCreateInbox } from '@/features/onboarding/onboarding-actions.js';
@@ -43,8 +44,8 @@ async function createFirstInbox(provider: string) {
   showTutorial = true;
 }
 
-// Tutorial steps
-let tutorialSteps = [
+// Tutorial steps — $derived so they update when i18n loads asynchronously
+let tutorialSteps = $derived([
   {
     title: $t('tutorial.step1Title') || 'Welcome to your new inbox',
     description:
@@ -63,7 +64,7 @@ let tutorialSteps = [
       $t('tutorial.step3Description') ||
       'Create as many inboxes as you need. Archive old ones or switch between them easily.',
   },
-];
+]);
 
 let currentTutorialStep = $state(0);
 
@@ -136,7 +137,7 @@ function completeTutorial() {
     </div>
 
     <button
-      class="w-full px-4 py-2 text-sm font-semibold rounded-xl bg-md-primary text-md-on-primary hover:bg-md-primary/90 transition-colors"
+      class="w-full px-4 py-2 text-sm font-semibold rounded-xl bg-md-primary text-md-on-primary hover:bg-md-primary/90 transition-colors flex items-center justify-center gap-1.5"
       onclick={() => step = 2}
     >
       {$t('onboarding.continue')}
@@ -159,18 +160,13 @@ function completeTutorial() {
     <!-- Provider selection -->
     <div class="w-full flex flex-col gap-3">
       {#each providers as provider}
+        {@const domain = provider.websiteUrl ? new URL(provider.websiteUrl).hostname : ''}
         <button
           class="flex items-center gap-4 w-full rounded-xl px-4 py-3 border-2 transition-all {selectedProvider === provider.id ? 'border-md-primary bg-md-primary/5' : 'border-md-outline-variant bg-md-surface-container-low hover:border-md-outline-variant/20'}"
           onclick={() => selectedProvider = provider.id}
         >
-          <div class="w-9 h-9 rounded-lg {provider.ui?.color?.replace('text-', 'bg-') || 'bg-md-primary/10'} flex items-center justify-center shrink-0">
-            {#if provider.ui?.icon === 'envelope'}
-              <IconEnvelope class="w-5 h-5 {provider.ui?.color || 'text-md-primary'}" />
-            {:else if provider.ui?.icon === 'flame'}
-              <IconFlame class="w-5 h-5 {provider.ui?.color || 'text-md-primary'}" />
-            {:else}
-              <IconEnvelope class="w-5 h-5 text-md-primary" />
-            {/if}
+          <div class="w-9 h-9 rounded-lg flex items-center justify-center shrink-0 overflow-hidden">
+            <FaviconImage {domain} size={32} class="w-6 h-6 object-contain" fallbackLetter={provider.displayName.charAt(0).toUpperCase()} fallbackColor={provider.ui?.color?.replace('text-', 'bg-') || 'bg-md-primary'} />
           </div>
           <div class="text-left flex-1">
             <p class="text-sm font-semibold text-md-on-surface">{provider.displayName}</p>
@@ -185,7 +181,7 @@ function completeTutorial() {
 
     <div class="w-full flex flex-col gap-2">
       <button
-        class="w-full px-4 py-2 text-sm font-semibold rounded-xl bg-md-primary text-md-on-primary hover:bg-md-primary/90 transition-colors"
+        class="w-full px-4 py-2 text-sm font-semibold rounded-xl bg-md-primary text-md-on-primary hover:bg-md-primary/90 transition-colors flex items-center justify-center gap-1.5"
         onclick={() => createFirstInbox(selectedProvider)}
       >
         <IconEnvelope class="w-4 h-4" />

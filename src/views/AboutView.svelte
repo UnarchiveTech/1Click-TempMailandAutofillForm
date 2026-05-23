@@ -3,6 +3,7 @@ import { browser } from 'wxt/browser';
 import AppLogo from '@/components/icons/AppLogo.svelte';
 import IconGitHub from '@/components/icons/IconGitHub.svelte';
 import IconWarning from '@/components/icons/IconWarning.svelte';
+import { GITHUB_ISSUES_URL, GITHUB_REPO_URL } from '@/utils/constants.js';
 
 interface Props {
   context?: 'popup' | 'sidepanel' | 'app';
@@ -23,7 +24,7 @@ let { context = 'popup', version }: Props = $props();
     </p>
     <div class="flex flex-col gap-2 w-full">
       <a
-        href="https://github.com/UnarchiveTech/1Click-TempMailwithAutofill"
+        href={GITHUB_REPO_URL}
         target="_blank"
         rel="noopener noreferrer"
         class="w-full px-3 py-1.5 text-sm rounded-lg border border-md-primary text-md-primary hover:bg-md-primary/10 transition-colors flex items-center justify-center gap-2"
@@ -33,7 +34,7 @@ let { context = 'popup', version }: Props = $props();
       </a>
       <button
         class="w-full px-3 py-1.5 text-sm rounded-lg bg-md-error/10 text-md-error hover:bg-md-error/20 transition-colors flex items-center justify-center gap-2"
-        onclick={() => browser.tabs.create({ url: 'https://github.com/UnarchiveTech/1Click-TempMailwithAutofill/issues/new' })}
+        onclick={() => browser.tabs.create({ url: GITHUB_ISSUES_URL })}
       >
         <IconWarning class="w-4 h-4" />
         Report an Issue

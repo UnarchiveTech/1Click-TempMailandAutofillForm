@@ -1,5 +1,4 @@
 import type { browser } from 'wxt/browser';
-import { DEFAULT_PROVIDER } from '@/utils/email-service.js';
 import { ApiError } from '@/utils/errors.js';
 import { logDebug, logError } from '@/utils/logger.js';
 import { formatDate, formatTimeLeft, getEmailStatus, timeAgo } from '@/utils/time.js';
@@ -54,7 +53,7 @@ export async function loadInboxes(
     const allInboxes = inboxes.map((inbox: Account) => ({
       id: inbox.id,
       address: inbox.address,
-      provider: inbox.provider || DEFAULT_PROVIDER, // Default to burner if not set
+      provider: inbox.provider,
       status: getEmailStatus(inbox),
       autoExtend: inbox.autoExtend || false,
       expiry: inbox.autoExtend
@@ -70,13 +69,16 @@ export async function loadInboxes(
       token: inbox.token,
       tag: inbox.tag || '',
       tagColor: inbox.tagColor,
-      archived: inbox.archived || false,
-      deleted: inbox.deleted || false,
+      accountStatus: inbox.accountStatus || 'active',
       createdAt: inbox.createdAt,
     }));
 
     setters.setAllInboxes(allInboxes);
-    setters.setAccounts(allInboxes.filter((inbox: Account) => !inbox.archived && !inbox.deleted));
+    setters.setAccounts(
+      allInboxes.filter(
+        (inbox: Account) => inbox.accountStatus !== 'archived' && inbox.accountStatus !== 'deleted'
+      )
+    );
 
     if (!skipEmailSelection) {
       const activeById = allInboxes.find((a) => a.id === activeId);
@@ -117,7 +119,8 @@ export async function checkMessages(
           m.from ||
           m.from_name ||
           'Unknown',
-        from_name: m.from_name || '',
+        from_name:
+          m.from_name || (m as Email & { from_address?: string }).from_address || m.from || '',
         subject: m.subject || 'No Subject',
         time: timeAgo(m.received_at),
         isOtp: !!m.otp,
@@ -126,6 +129,7 @@ export async function checkMessages(
         body_html: m.body_html,
         unread: !readEmails[m.id],
         received_at: m.received_at,
+        local_only: m.local_only,
       }));
       // Force a new array reference to trigger Svelte reactivity
       setters.setEmails([...emails]);

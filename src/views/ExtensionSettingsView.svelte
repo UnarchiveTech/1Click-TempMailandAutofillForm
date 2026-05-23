@@ -12,6 +12,7 @@ import IconSun from '@/components/icons/IconSun.svelte';
 import IconUser from '@/components/icons/IconUser.svelte';
 import IconX from '@/components/icons/IconX.svelte';
 import ConfirmDialog from '@/components/overlays/ConfirmDialog.svelte';
+import ErrorBoundary from '@/components/ui/ErrorBoundary.svelte';
 import LanguageSwitcher from '@/components/ui/LanguageSwitcher.svelte';
 import {
   getAllProviderConfigs,
@@ -19,9 +20,10 @@ import {
   type ProviderConfig,
 } from '@/utils/email-service.js';
 import { setupFocusTrap } from '@/utils/focusTrap.js';
+import { logError } from '@/utils/logger.js';
 import * as PingService from '@/utils/ping-service.js';
 import { toastStore } from '@/utils/toastStore.js';
-import type { ProviderInstance } from '@/utils/types.js';
+import type { Identity, ProviderInstance } from '@/utils/types.js';
 
 let {
   context = 'popup',
@@ -61,6 +63,14 @@ let {
   onToggleEnableLogging = () => {},
   contrastLevel = 'standard',
   onContrastLevelChange = () => {},
+  emailRetentionDays = 30,
+  onSetEmailRetentionDays = undefined,
+  faviconCaching = 'direct',
+  onSetFaviconCaching = undefined,
+  identities = [],
+  selectedIdentityId = null,
+  onSetSelectedIdentityId = undefined,
+  onNavigateToIdentities = () => {},
 }: {
   context?: 'popup' | 'sidepanel' | 'app';
   onBack?: () => void;
@@ -99,6 +109,14 @@ let {
   onToggleEnableLogging?: () => void;
   contrastLevel?: 'standard' | 'medium' | 'high';
   onContrastLevelChange?: (level: 'standard' | 'medium' | 'high') => void;
+  emailRetentionDays?: number;
+  onSetEmailRetentionDays?: (value: number) => void;
+  faviconCaching?: 'direct' | 'local';
+  onSetFaviconCaching?: (value: 'direct' | 'local') => void;
+  identities?: Identity[];
+  selectedIdentityId?: string | null;
+  onSetSelectedIdentityId?: (id: string | null) => void;
+  onNavigateToIdentities?: () => void;
 } = $props();
 
 let showCustomInstanceForm = $state(false);
@@ -111,6 +129,85 @@ let allProviders = $derived.by((): ProviderConfig[] => getAllProviderConfigs());
 // Ping state
 let providerPingResults = $state(new Map<string, Map<string, number | 'timeout'>>());
 let pinging = $state(false);
+
+// Storage usage state
+let storageUsage = $state<{
+  totalMB: number;
+  breakdown: Record<string, number>;
+  categories: { emails: number; settings: number; cached: number; other: number };
+} | null>(null);
+let loadingStorage = $state(false);
+let emailsToBeDeleted = $state<{
+  activeEmails: number;
+  archivedEmails: number;
+  totalEmails: number;
+} | null>(null);
+let loadingEmailsCount = $state(false);
+let clearingEmails = $state(false);
+
+async function loadStorageUsage() {
+  loadingStorage = true;
+  try {
+    const response = await browser.runtime.sendMessage({ action: 'getStorageUsage' });
+    if (response?.success) {
+      storageUsage = response.usage;
+    }
+  } catch (e) {
+    logError('Failed to load storage usage', e);
+  } finally {
+    loadingStorage = false;
+  }
+}
+
+async function loadEmailsToBeDeleted() {
+  loadingEmailsCount = true;
+  try {
+    const response = await browser.runtime.sendMessage({
+      action: 'getEmailsToBeDeleted',
+      retentionDays: emailRetentionDays,
+    });
+    if (response?.success) {
+      emailsToBeDeleted = response.count;
+    }
+  } catch (e) {
+    logError('Failed to load emails to be deleted', e);
+  } finally {
+    loadingEmailsCount = false;
+  }
+}
+
+async function clearOldEmails() {
+  clearingEmails = true;
+  try {
+    const response = await browser.runtime.sendMessage({
+      action: 'cleanupOldStoredEmails',
+      activeRetentionDays: emailRetentionDays,
+      archivedRetentionDays: emailRetentionDays,
+    });
+    if (response?.success) {
+      toastStore.success('Old emails cleared successfully');
+      await loadStorageUsage();
+      await loadEmailsToBeDeleted();
+    } else {
+      toastStore.error('Failed to clear old emails');
+    }
+  } catch (e) {
+    logError('Failed to clear old emails', e);
+    toastStore.error('Failed to clear old emails');
+  } finally {
+    clearingEmails = false;
+  }
+}
+
+$effect(() => {
+  loadStorageUsage();
+  loadEmailsToBeDeleted();
+});
+
+// Reload email count when retention changes
+$effect(() => {
+  loadEmailsToBeDeleted();
+});
 
 function showConfirmDialog(message: string, onConfirm: () => void) {
   confirmDialog = { message, onConfirm };
@@ -165,6 +262,65 @@ function saveCustomInstance() {
 // Dropdown state
 let providerDropdownOpen = $state(false);
 let instanceDropdownOpen = $state(false);
+let retentionDropdownOpen = $state(false);
+let faviconCachingDropdownOpen = $state(false);
+let identityDropdownOpen = $state(false);
+let faviconCacheCount = $state(0);
+let totalCacheSize = $state(0);
+
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return `${Math.round((bytes / k ** i) * 100) / 100} ${sizes[i]}`;
+}
+
+function updateFaviconCacheCount() {
+  try {
+    const cache = localStorage.getItem('favicon_success_cache');
+    if (cache) {
+      const parsed = JSON.parse(cache);
+      // Count all cached entries (both with webpDataUrl and url)
+      const cachedCount = Object.keys(parsed).length;
+      faviconCacheCount = cachedCount;
+
+      // Calculate total cache size based on localStorage item size
+      totalCacheSize = cache.length;
+    } else {
+      faviconCacheCount = 0;
+      totalCacheSize = 0;
+    }
+  } catch {
+    faviconCacheCount = 0;
+    totalCacheSize = 0;
+  }
+}
+
+// Update cache count when component mounts and when favicon caching mode changes
+$effect(() => {
+  updateFaviconCacheCount();
+});
+
+// Listen for storage changes to update cache count
+if (typeof window !== 'undefined') {
+  window.addEventListener('storage', (e) => {
+    if (e.key === 'favicon_success_cache') {
+      updateFaviconCacheCount();
+    }
+  });
+}
+
+const retentionOptions = [
+  { value: 0, label: 'Never delete' },
+  { value: 7, label: '7 days' },
+  { value: 14, label: '14 days' },
+  { value: 30, label: '30 days' },
+  { value: 60, label: '60 days' },
+  { value: 90, label: '90 days' },
+  { value: 180, label: '6 months' },
+  { value: 365, label: '1 year' },
+];
 
 // Ping all providers and instances
 async function pingAllProviders() {
@@ -220,7 +376,9 @@ $effect(() => {
     {/each}
   </div>
 {:else}
-<div class="flex-1 overflow-y-auto px-4 py-4 space-y-5 pb-20" style="scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--md-outline, #75777f) 0.2, transparent) transparent;">
+<ErrorBoundary fallback="Failed to load settings">
+  {#snippet children()}
+    <div class="flex-1 overflow-y-auto px-4 py-4 space-y-5 pb-20" style="scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--md-outline, #75777f) 0.2, transparent) transparent;">
 
   <!-- Page heading -->
   <div class="pt-1">
@@ -255,6 +413,63 @@ $effect(() => {
         <div class="relative w-9 h-5 bg-md-outline-variant peer-checked:bg-md-primary rounded-full peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all"></div>
       </label>
     </div>
+
+    <!-- Favicon Caching row -->
+    <div class="bg-md-primary-container rounded-xl px-4 py-3">
+      <div class="text-sm font-medium text-md-on-surface mb-1">Favicon Caching</div>
+      <div class="text-xs text-md-on-surface/50 mb-2">Store favicons locally as WebP images (32x32) to reduce network requests</div>
+      <div class="text-xs text-md-on-surface/60 mb-2">
+        {faviconCacheCount} favicon{faviconCacheCount === 1 ? '' : 's'} cached locally ({formatBytes(totalCacheSize)})
+      </div>
+      <div class="flex items-center justify-between">
+        <div class="text-xs text-md-on-surface/60">
+          {#if faviconCaching === 'local'}
+            Local storage (24h expiry)
+          {:else}
+            Direct from source
+          {/if}
+        </div>
+        <div class="relative">
+          <button
+            class="bg-md-secondary-container text-sm text-md-on-surface px-3 py-1.5 rounded-lg outline-none border-0 cursor-pointer font-medium flex items-center gap-2"
+            onclick={() => faviconCachingDropdownOpen = !faviconCachingDropdownOpen}
+            aria-label="Select favicon caching mode"
+          >
+            <span>{faviconCaching === 'local' ? 'Local' : 'Direct'}</span>
+            <IconChevronDown class="w-3.5 h-3.5" />
+          </button>
+          {#if faviconCachingDropdownOpen}
+            <button class="fixed inset-0 z-40 bg-transparent cursor-default" aria-label="Close dropdown" onclick={() => faviconCachingDropdownOpen = false}></button>
+            <div class="absolute top-full right-0 mt-1 bg-md-primary-container rounded-xl shadow-lg border border-md-secondary-container z-50 min-w-[130px] overflow-hidden">
+              <button
+                class="w-full px-4 py-2 text-sm text-left hover:bg-md-secondary-container {faviconCaching === 'direct' ? 'font-semibold text-md-primary' : 'text-md-on-surface'}"
+                onclick={() => {
+                  if (onSetFaviconCaching) {
+                    onSetFaviconCaching('direct');
+                    onSaveSettings();
+                  }
+                  faviconCachingDropdownOpen = false;
+                }}
+              >
+                Direct
+              </button>
+              <button
+                class="w-full px-4 py-2 text-sm text-left hover:bg-md-secondary-container {faviconCaching === 'local' ? 'font-semibold text-md-primary' : 'text-md-on-surface'}"
+                onclick={() => {
+                  if (onSetFaviconCaching) {
+                    onSetFaviconCaching('local');
+                    onSaveSettings();
+                  }
+                  faviconCachingDropdownOpen = false;
+                }}
+              >
+                Local
+              </button>
+            </div>
+          {/if}
+        </div>
+      </div>
+    </div>
   </section>
 
   <!-- ── Identity ── -->
@@ -264,48 +479,56 @@ $effect(() => {
       <span class="text-sm font-semibold text-md-on-surface">{$t('identities.title')}</span>
     </div>
 
-    <!-- Custom Password row -->
-    <div class="bg-md-primary-container rounded-xl px-4 py-3 flex items-center justify-between">
-      <div>
-        <div class="text-sm font-medium text-md-on-surface">{$t('identities.password')}</div>
-        <div class="text-xs text-md-on-surface/50">Override system credentials</div>
+    <!-- Default Identity for Autofill -->
+    <div class="bg-md-primary-container rounded-xl px-4 py-3">
+      <div class="text-sm font-medium text-md-on-surface mb-2">Default for Autofill</div>
+      <div class="relative">
+        <button
+          class="w-full bg-transparent text-sm outline-none text-md-on-surface appearance-none cursor-pointer font-medium flex items-center justify-between"
+          onclick={() => identityDropdownOpen = !identityDropdownOpen}
+          aria-label="Select default identity for autofill"
+          disabled={identities.length === 0}
+        >
+          <span class={identities.length === 0 ? 'text-md-on-surface/40' : ''}>
+            {#if identities.length === 0}
+              No identities created yet
+            {:else}
+              {identities.find(i => i.id === selectedIdentityId)?.name ?? 'None'}
+            {/if}
+          </span>
+          {#if identities.length > 0}
+            <IconChevronDown class="w-4 h-4 ml-2" />
+          {/if}
+        </button>
+        {#if identityDropdownOpen && identities.length > 0}
+          <button class="fixed inset-0 z-40 bg-transparent cursor-default" aria-label="Close dropdown" onclick={() => identityDropdownOpen = false}></button>
+          <div class="absolute top-full left-0 right-0 mt-1 bg-md-primary-container rounded-xl shadow-lg border border-md-secondary-container z-50 max-h-60 overflow-y-auto">
+            <button
+              class="w-full px-4 py-2 text-sm text-left hover:bg-md-secondary-container {!selectedIdentityId ? 'font-semibold text-md-primary' : 'text-md-on-surface'}"
+              onclick={() => { if (onSetSelectedIdentityId) onSetSelectedIdentityId(null); identityDropdownOpen = false; }}
+            >
+              None
+            </button>
+            {#each identities as identity}
+              <button
+                class="w-full px-4 py-2 text-sm text-left hover:bg-md-secondary-container {identity.id === selectedIdentityId ? 'font-semibold text-md-primary' : 'text-md-on-surface'}"
+                onclick={() => { if (onSetSelectedIdentityId) onSetSelectedIdentityId(identity.id); identityDropdownOpen = false; }}
+              >
+                {identity.name}
+              </button>
+            {/each}
+          </div>
+        {/if}
       </div>
-      <label class="cursor-pointer">
-        <input type="checkbox" class="sr-only peer" aria-label="Toggle custom password" checked={useCustomPassword} onchange={(e) => { if (onSetUseCustomPassword) onSetUseCustomPassword((e.target as HTMLInputElement).checked); onSaveSettings(); }} />
-        <div class="relative w-9 h-5 bg-md-outline-variant peer-checked:bg-md-primary rounded-full peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all"></div>
-      </label>
     </div>
-    {#if useCustomPassword}
-      <div class="bg-md-primary-container rounded-xl px-4 py-3">
-        <div class="text-[10px] font-semibold text-md-on-surface/40 uppercase tracking-wider mb-1.5">{$t('identities.customPassword')}</div>
-        <input type="text" class="w-full bg-transparent text-sm outline-none text-md-on-surface placeholder:text-md-on-surface/30" placeholder="Enter password..." aria-label="Custom password" value={customPassword} oninput={(e) => { if (onSetCustomPassword) onSetCustomPassword((e.target as HTMLInputElement).value); onSaveSettings(); }} />
-      </div>
-    {/if}
 
-    <!-- Custom Name row -->
-    <div class="bg-md-primary-container rounded-xl px-4 py-3 flex items-center justify-between">
-      <div>
-        <div class="text-sm font-medium text-md-on-surface">{$t('identities.name')}</div>
-        <div class="text-xs text-md-on-surface/50">Use for autofill forms</div>
-      </div>
-      <label class="cursor-pointer">
-        <input type="checkbox" class="sr-only peer" aria-label="Toggle custom name" checked={useCustomName} onchange={(e) => { if (onSetUseCustomName) onSetUseCustomName((e.target as HTMLInputElement).checked); onSaveSettings(); }} />
-        <div class="relative w-9 h-5 bg-md-outline-variant peer-checked:bg-md-primary rounded-full peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all"></div>
-      </label>
-    </div>
-    {#if useCustomName}
-      <div class="bg-md-primary-container rounded-xl px-4 py-3 space-y-3">
-        <div>
-          <div class="text-xs font-semibold text-md-secondary uppercase tracking-wider mb-1.5">{$t('identities.firstNames')}</div>
-          <input type="text" class="w-full bg-transparent text-sm outline-none text-md-on-surface placeholder:text-md-on-surface/30" placeholder="Alex" aria-label="First name" value={customFirstName} oninput={(e) => { if (onSetCustomFirstName) onSetCustomFirstName((e.target as HTMLInputElement).value); onSaveSettings(); }} />
-        </div>
-        <div class="border-t border-md-secondary-container"></div>
-        <div>
-          <div class="text-xs font-semibold text-md-secondary uppercase tracking-wider mb-1.5">{$t('identities.lastNames')}</div>
-          <input type="text" class="w-full bg-transparent text-sm outline-none text-md-on-surface placeholder:text-md-on-surface/30" placeholder="Editorial" aria-label="Last name" value={customLastName} oninput={(e) => { if (onSetCustomLastName) onSetCustomLastName((e.target as HTMLInputElement).value); onSaveSettings(); }} />
-        </div>
-      </div>
-    {/if}
+    <!-- View All Identities Button -->
+    <button
+      class="w-full bg-md-secondary-container hover:bg-md-secondary-container/80 text-sm font-medium text-md-on-surface rounded-xl px-4 py-3 transition-colors"
+      onclick={onNavigateToIdentities}
+    >
+      View All Identities
+    </button>
   </section>
 
   <!-- ── Mail ── -->
@@ -389,10 +612,119 @@ $effect(() => {
         aria-label="Toggle auto-renew"
         onclick={() => { if (onSetAutoRenew) onSetAutoRenew(!autoRenew); onSaveSettings(); }}
       >
-        <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-        </svg>
+        <IconRefresh class="w-5 h-5" />
       </button>
+    </div>
+
+    <!-- Email Retention row -->
+    <div class="bg-md-primary-container rounded-xl px-4 py-3">
+      <div class="flex items-center justify-between mb-2">
+        <div>
+          <div class="text-sm font-medium text-md-on-surface">{$t('settings.emailRetention')}</div>
+          <div class="text-xs text-md-on-surface/50">{$t('settings.emailRetentionDescription')}</div>
+        </div>
+        <div class="relative">
+          <button
+            class="bg-md-secondary-container text-sm text-md-on-surface px-3 py-1.5 rounded-lg outline-none border-0 cursor-pointer font-medium flex items-center gap-2"
+            onclick={() => retentionDropdownOpen = !retentionDropdownOpen}
+            aria-label="Select email retention period"
+          >
+            <span>{retentionOptions.find(o => o.value === emailRetentionDays)?.label ?? '30 days'}</span>
+            <IconChevronDown class="w-3.5 h-3.5" />
+          </button>
+          {#if retentionDropdownOpen}
+            <button class="fixed inset-0 z-40 bg-transparent cursor-default" aria-label="Close dropdown" onclick={() => retentionDropdownOpen = false}></button>
+            <div class="absolute top-full right-0 mt-1 bg-md-primary-container rounded-xl shadow-lg border border-md-secondary-container z-50 min-w-[130px] overflow-hidden">
+              {#each retentionOptions as option}
+                <button
+                  class="w-full px-4 py-2 text-sm text-left hover:bg-md-secondary-container flex items-center justify-between {option.value === emailRetentionDays ? 'font-semibold text-md-primary' : 'text-md-on-surface'}"
+                  onclick={() => {
+                    if (onSetEmailRetentionDays) {
+                      onSetEmailRetentionDays(option.value);
+                      onSaveSettings();
+                    }
+                    retentionDropdownOpen = false;
+                  }}
+                >
+                  {option.label}
+                </button>
+              {/each}
+            </div>
+          {/if}
+        </div>
+      </div>
+      {#if loadingEmailsCount}
+        <div class="text-[10px] text-md-on-surface/40">Calculating emails to be deleted...</div>
+      {:else if emailsToBeDeleted && emailRetentionDays !== 0}
+        <div class="text-[10px] text-md-on-surface/40">
+          {emailsToBeDeleted.totalEmails} email{emailsToBeDeleted.totalEmails !== 1 ? 's' : ''} will be deleted ({emailsToBeDeleted.activeEmails} active, {emailsToBeDeleted.archivedEmails} archived)
+        </div>
+      {:else if emailRetentionDays === 0}
+        <div class="text-[10px] text-md-on-surface/40">Emails will never be deleted</div>
+      {/if}
+    </div>
+
+    <!-- Storage Usage row -->
+    <div class="bg-md-primary-container rounded-xl px-4 py-3">
+      <div class="text-sm font-medium text-md-on-surface mb-1">{$t('settings.storageUsage')}</div>
+      <div class="text-xs text-md-on-surface/50 mb-2">
+        {#if loadingStorage}
+          Loading...
+        {:else if storageUsage}
+          {storageUsage.totalMB.toFixed(2)} MB used
+        {:else}
+          Unable to load
+        {/if}
+      </div>
+      {#if storageUsage && !loadingStorage}
+        <div class="w-full bg-md-secondary-container rounded-full h-2 overflow-hidden mb-3">
+          <div
+            class="bg-md-primary h-full transition-all duration-300"
+            style="width: {Math.min((storageUsage.totalMB / 10) * 100, 100)}%"
+          ></div>
+        </div>
+        <div class="text-[10px] text-md-on-surface/40 mb-3">
+          Chrome storage limit: ~10 MB
+        </div>
+        <!-- Storage breakdown -->
+        <div class="space-y-2 mb-3">
+          <div class="flex items-center justify-between text-[10px]">
+            <span class="text-md-on-surface/60">Emails</span>
+            <span class="text-md-on-surface">{storageUsage.categories.emails.toFixed(2)} MB</span>
+          </div>
+          <div class="flex items-center justify-between text-[10px]">
+            <span class="text-md-on-surface/60">Settings</span>
+            <span class="text-md-on-surface">{storageUsage.categories.settings.toFixed(2)} MB</span>
+          </div>
+          <div class="flex items-center justify-between text-[10px]">
+            <span class="text-md-on-surface/60">Cached Data</span>
+            <span class="text-md-on-surface">{storageUsage.categories.cached.toFixed(2)} MB</span>
+          </div>
+          <div class="flex items-center justify-between text-[10px]">
+            <span class="text-md-on-surface/60">Other</span>
+            <span class="text-md-on-surface">{storageUsage.categories.other.toFixed(2)} MB</span>
+          </div>
+        </div>
+        <!-- Clear old emails button -->
+        {#if emailRetentionDays !== 0}
+          <button
+            class="w-full px-3 py-2 text-xs rounded-xl bg-md-secondary text-md-on-secondary hover:bg-md-secondary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            onclick={() => {
+              if (emailsToBeDeleted?.totalEmails && emailsToBeDeleted.totalEmails > 0) {
+                showConfirmDialog(
+                  `Delete ${emailsToBeDeleted.totalEmails} email(s) older than ${emailRetentionDays} day(s)?`,
+                  clearOldEmails
+                );
+              } else {
+                clearOldEmails();
+              }
+            }}
+            disabled={clearingEmails}
+          >
+            {clearingEmails ? 'Clearing...' : 'Clear Old Emails Now'}
+          </button>
+        {/if}
+      {/if}
     </div>
 
     {#if loadProviderConfig(selectedProvider).multiInstance?.enabled}
@@ -422,9 +754,7 @@ $effect(() => {
                 {/each}
               {/if}
             </span>
-            <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 ml-2" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" />
-            </svg>
+            <IconChevronDown class="w-4 h-4 ml-2" />
           </button>
           {#if instanceDropdownOpen}
             <div class="absolute top-full left-0 right-0 mt-1 bg-md-primary-container rounded-xl shadow-lg border border-md-secondary-container z-50 max-h-60 overflow-y-auto">
@@ -463,7 +793,7 @@ $effect(() => {
       </div>
 
       {#if !showCustomInstanceForm}
-        <button class="w-full rounded-xl border-2 border-dashed border-md-primary/30 py-2.5 flex items-center justify-center gap-2 text-sm text-md-primary/70 hover:border-md-primary/60 hover:text-md-primary transition-colors" aria-label="Add custom instance" onclick={showAddCustomInstance}>
+        <button class="btn-primary w-full rounded-xl py-2.5 flex items-center justify-center gap-2 text-sm" aria-label="Add custom instance" onclick={showAddCustomInstance}>
           <IconPlus class="w-4 h-4" />
           Add instance
         </button>
@@ -479,8 +809,8 @@ $effect(() => {
             <input type="url" class="w-full bg-transparent text-sm outline-none text-md-on-surface placeholder:text-md-on-surface/30" placeholder="https://example.com/api" aria-label="Custom instance URL" bind:value={customInstanceUrl} />
           </div>
           <div class="flex gap-2 pt-1">
-            <button class="flex-1 px-3 py-1.5 text-sm rounded-xl bg-md-primary text-md-on-primary hover:bg-md-primary/90 transition-colors" onclick={saveCustomInstance}>{$t('common.save')}</button>
-            <button class="flex-1 px-3 py-1.5 text-sm rounded-xl bg-md-secondary text-md-on-secondary hover:bg-md-secondary/90 transition-colors" onclick={hideCustomInstanceForm}>{$t('common.cancel')}</button>
+            <button class="flex-1 px-3 py-1.5 text-sm rounded-xl bg-md-primary text-md-on-primary hover:bg-md-primary/90 transition-colors" aria-label="Save custom instance" onclick={saveCustomInstance}>{$t('common.save')}</button>
+            <button class="flex-1 px-3 py-1.5 text-sm rounded-xl bg-md-secondary text-md-on-secondary hover:bg-md-secondary/90 transition-colors" aria-label="Cancel custom instance" onclick={hideCustomInstanceForm}>{$t('common.cancel')}</button>
           </div>
         </div>
       {/if}
@@ -588,7 +918,9 @@ $effect(() => {
     <button class="w-full px-3 py-1.5 text-sm rounded-xl border border-md-error text-md-error hover:bg-md-error/10 mt-1 font-semibold transition-colors" aria-label="Perform hard reset" onclick={() => showConfirmDialog('Are you sure you want to perform a hard reset? This action cannot be undone.', onHardReset)}>Hard Reset</button>
   </section>
 
-</div>
+    </div>
+  {/snippet}
+</ErrorBoundary>
 {/if}
 
 <ConfirmDialog {confirmDialog} confirmDialogRef={confirmDialogRef} onClose={closeConfirmDialog} />

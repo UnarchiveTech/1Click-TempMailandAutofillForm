@@ -7,6 +7,11 @@ export interface AnalyticsData {
   emailsReceived: number;
   otpsDetected: number;
   notificationsSent: number;
+  performance?: {
+    emailFetchTimes: number[];
+    providerLatency: Record<string, number[]>;
+    uiRenderTimes: number[];
+  };
 }
 
 export interface AnalyticsState {
@@ -34,5 +39,30 @@ export async function loadAnalytics(
     logError('loadAnalytics error:', undefined, e instanceof Error ? e : new Error(String(e)));
   } finally {
     setters.setAnalyticsLoading(false);
+  }
+}
+
+export async function resetAnalytics(
+  ext: Browser,
+  _state: AnalyticsState,
+  setters: AnalyticsSetters
+) {
+  try {
+    const resetData: AnalyticsData = {
+      createdAt: Date.now(),
+      accountsCreated: 0,
+      emailsReceived: 0,
+      otpsDetected: 0,
+      notificationsSent: 0,
+      performance: {
+        emailFetchTimes: [],
+        providerLatency: {},
+        uiRenderTimes: [],
+      },
+    };
+    await ext.storage.local.set({ analytics: resetData });
+    setters.setAnalytics(resetData);
+  } catch (e: unknown) {
+    logError('resetAnalytics error:', undefined, e instanceof Error ? e : new Error(String(e)));
   }
 }

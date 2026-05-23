@@ -2,9 +2,13 @@
 import { t } from 'svelte-i18n';
 import IconBell from '@/components/icons/IconBell.svelte';
 import IconChevronDown from '@/components/icons/IconChevronDown.svelte';
+import IconClock from '@/components/icons/IconClock.svelte';
+import IconEnvelope from '@/components/icons/IconEnvelope.svelte';
 import IconFilter from '@/components/icons/IconFilter.svelte';
+import IconMail from '@/components/icons/IconMail.svelte';
 import IconRefresh from '@/components/icons/IconRefresh.svelte';
 import IconSearch from '@/components/icons/IconSearch.svelte';
+import IconUser from '@/components/icons/IconUser.svelte';
 import IconX from '@/components/icons/IconX.svelte';
 
 let {
@@ -16,7 +20,7 @@ let {
   dateFrom = '',
   dateTo = '',
   emails = [] as import('@/utils/types.js').Email[],
-  savedSearchFilters = [],
+  savedSearchFilters = [] as import('@/utils/types.js').SavedSearchFilter[],
   onSearchChange = () => {},
   onSortChange = () => {},
   onOtpOnlyChange = () => {},
@@ -25,13 +29,23 @@ let {
   onDateFromChange = () => {},
   onDateToChange = () => {},
   onClearFilters = () => {},
-  onSaveFilter = () => {},
+  onSaveFilter = (
+    _name: string,
+    _searchQuery: string,
+    _hasOTP: boolean,
+    _senderDomain: string,
+    _dateFrom: string,
+    _dateTo: string
+  ) => {},
   onLoadFilter = () => {},
   onRenameFilter = () => {},
   onDeleteFilter = () => {},
   onRefreshInbox = () => {},
   onToggleNotifications = () => {},
   notificationsEnabled = true,
+  onSearchFocus = () => {},
+  onSearchBlur = () => {},
+  onFilterClick = () => {},
 } = $props();
 
 let saveFilterName = $state('');
@@ -50,6 +64,30 @@ let filterRowRef = $state<HTMLElement | null>(null);
 let showCustomRange = $state(false);
 let datePreset = $state<string>('any');
 
+// Get display label for current sort option
+let sortLabel = $derived.by(() => {
+  switch (sortBy) {
+    case 'newest':
+      return 'Newest (Date)';
+    case 'oldest':
+      return 'Oldest (Date)';
+    case 'senderNameAsc':
+      return 'Sender Name (Ascending)';
+    case 'senderNameDesc':
+      return 'Sender Name (Descending)';
+    case 'senderEmailAsc':
+      return 'Sender Email (Ascending)';
+    case 'senderEmailDesc':
+      return 'Sender Email (Descending)';
+    case 'subjectAsc':
+      return 'Subject (Ascending)';
+    case 'subjectDesc':
+      return 'Subject (Descending)';
+    default:
+      return 'Newest (Date)';
+  }
+});
+
 // Focus action for rename input
 function focusOnMount(node: HTMLInputElement) {
   node.focus();
@@ -58,12 +96,11 @@ function focusOnMount(node: HTMLInputElement) {
 
 // Check if current filter matches any saved filter
 let currentFilterSaved = $derived(
-  (savedSearchFilters || []).some(
+  (Array.isArray(savedSearchFilters) ? savedSearchFilters : []).some(
     (f) =>
       f.searchQuery === searchQuery &&
       f.hasOTP === otpOnly &&
       f.senderDomain === senderDomain &&
-      JSON.stringify(f.selectedSenders || []) === JSON.stringify(selectedSenders) &&
       f.dateFrom === dateFrom &&
       f.dateTo === dateTo
   )
@@ -93,7 +130,6 @@ function toggleSender(email: string) {
     ? selectedSenders.filter((s) => s.toLowerCase() !== lower)
     : [...selectedSenders, email];
   onSelectedSendersChange(updated);
-  selectedSenders = updated;
 }
 
 function getInitial(email: string, name: string): string {
@@ -132,36 +168,26 @@ function applyDatePreset(preset: string) {
   if (preset === 'any') {
     onDateFromChange('');
     onDateToChange('');
-    dateFrom = '';
-    dateTo = '';
   } else if (preset === 'week') {
     const d = new Date(now);
     d.setDate(d.getDate() - 7);
     onDateFromChange('');
     onDateToChange(fmt(d));
-    dateFrom = '';
-    dateTo = fmt(d);
   } else if (preset === 'month') {
     const d = new Date(now);
     d.setMonth(d.getMonth() - 1);
     onDateFromChange('');
     onDateToChange(fmt(d));
-    dateFrom = '';
-    dateTo = fmt(d);
   } else if (preset === '6months') {
     const d = new Date(now);
     d.setMonth(d.getMonth() - 6);
     onDateFromChange('');
     onDateToChange(fmt(d));
-    dateFrom = '';
-    dateTo = fmt(d);
   } else if (preset === 'year') {
     const d = new Date(now);
     d.setFullYear(d.getFullYear() - 1);
     onDateFromChange('');
     onDateToChange(fmt(d));
-    dateFrom = '';
-    dateTo = fmt(d);
   }
   datePreset = preset;
 }
@@ -179,7 +205,7 @@ function formatDateChip(from: string, to: string): string {
 }
 </script>
 
-<div class="flex items-center gap-1.5 px-1 pt-2 pb-1 relative z-[100]">
+<div class="flex items-center gap-1.5 px-1 pb-1 relative">
   <!-- Search input with search icon left + filter button inside right -->
   <div class="relative flex-1">
     <IconSearch class="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-md-on-surface/40 pointer-events-none" />
@@ -188,32 +214,35 @@ function formatDateChip(from: string, to: string): string {
       placeholder="Search emails..."
       class="w-full pl-8 pr-8 text-sm rounded-xl border border-md-outline-variant bg-md-surface-container-low focus:bg-md-surface-container outline-none focus:border-md-primary focus:ring-1 focus:ring-md-primary transition-colors"
       aria-label="Search emails"
-      bind:value={searchQuery}
+      value={searchQuery}
       oninput={(e) => onSearchChange((e.target as HTMLInputElement).value)}
-      onfocus={() => searchFocused = true}
+      onfocus={() => { searchFocused = true; onSearchFocus(); }}
       onblur={(e) => {
         const relatedTarget = e.relatedTarget as HTMLElement;
         const isClickingFilterRow = relatedTarget && filterRowRef?.contains(relatedTarget);
         if (!isClickingFilterRow) {
-          setTimeout(() => searchFocused = false, 200);
+          setTimeout(() => { searchFocused = false; onSearchBlur(); }, 200);
         }
       }}
     />
     <!-- Filter button inside search input, right side -->
     <div class="absolute right-1.5 top-1/2 -translate-y-1/2">
       <button
+        id="button-filter"
         class="w-6 h-6 flex items-center justify-center rounded-lg transition-colors {searchFocused ? 'text-md-primary' : 'text-md-on-surface/40 hover:text-md-on-surface/70'}"
         aria-label="Filters"
-        onclick={() => searchFocused = true}
+        onclick={() => { searchFocused = true; onFilterClick(); }}
       >
-        <IconFilter class="w-4 h-4 text-md-on-surface/40" />
+        <IconFilter class="w-4 h-4 {sortBy !== 'newest' || otpOnly || dateFrom || dateTo || selectedSenders.length > 0 || searchQuery ? 'text-md-primary' : 'text-md-on-surface/40'}" />
       </button>
     </div>
   </div>
 
   <!-- Refresh button -->
   <button
+    id="button-refresh"
     class="w-8 h-8 flex items-center justify-center rounded-xl bg-md-surface hover:bg-md-surface-variant transition-colors shrink-0"
+    style="margin-top: 0px;"
     data-tip="Refresh"
     aria-label="Refresh inbox"
     onclick={() => onRefreshInbox()}
@@ -222,7 +251,9 @@ function formatDateChip(from: string, to: string): string {
   </button>
   <!-- Notifications button -->
   <button
+    id="button-notifications"
     class="w-8 h-8 flex items-center justify-center rounded-xl transition-colors shrink-0 {notificationsEnabled ? 'bg-md-warning/20 hover:bg-md-warning/30' : 'bg-md-surface hover:bg-md-surface-variant'}"
+    style="margin-top: 0px;"
     data-tip="{notificationsEnabled ? 'Disable Notifications' : 'Enable Notifications'}"
     aria-label="Notifications"
     onclick={() => onToggleNotifications()}
@@ -233,25 +264,64 @@ function formatDateChip(from: string, to: string): string {
 
 <!-- Inline filter row (appears when search is focused) -->
 {#if searchFocused}
-  <div bind:this={filterRowRef} class="flex items-center gap-2 px-1 pb-2 pt-0.5 overflow-x-auto relative z-[100]" style="scrollbar-width: thin; scrollbar-color: var(--md-primary) transparent;">
+  <div bind:this={filterRowRef} class="flex flex-col gap-2 px-1 pb-2 pt-0.5 relative">
+    <!-- First row: filter chips -->
+    <div class="flex items-center gap-1 flex-wrap">
 
     <!-- Sort chip -->
     <div class="relative shrink-0">
       <button
-        class="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full border transition-colors {sortBy !== 'newest' ? 'border-md-primary bg-md-primary/10 text-md-primary' : 'border-md-outline-variant bg-transparent text-md-on-surface/80 hover:bg-md-surface-variant'}"
+        id="button-sort"
+        class="flex items-center gap-1.5 px-2 py-1.5 text-xs rounded-full border transition-colors {sortBy !== 'newest' ? 'border-md-primary bg-md-primary/10 text-md-primary' : 'border-md-outline-variant bg-transparent text-md-on-surface/80 hover:bg-md-surface-variant'}"
         aria-label="Sort by"
         onclick={() => { sortDropdownOpen = !sortDropdownOpen; dateDropdownOpen = false; savedFiltersDropdownOpen = false; fromDropdownOpen = false; }}
       >
-        Sort: {sortBy === 'date' ? 'Date' : sortBy === 'sender' ? 'Sender' : 'Newest'}
+        Sort: {sortLabel}
         <IconChevronDown class="w-3 h-3" />
       </button>
       {#if sortDropdownOpen}
-        <div class="absolute top-full left-0 mt-1 bg-md-surface border border-md-outline-variant rounded-xl shadow-lg z-[200] overflow-hidden min-w-[120px]">
-          {#each [['newest', 'Newest'], ['date', 'Date'], ['sender', 'Sender']] as [val, label]}
+        <div class="absolute top-full left-0 mt-1 bg-md-surface border border-md-outline-variant rounded-xl shadow-lg z-[200] overflow-hidden min-w-[200px]">
+          <!-- Date -->
+          {#each [['newest', 'Newest (Date)'], ['oldest', 'Oldest (Date)']] as [val, label]}
             <button
-              class="w-full px-3 py-2 text-left text-xs hover:bg-md-surface-variant transition-colors {sortBy === val ? 'text-md-primary font-medium' : 'text-md-on-surface'}"
-              onclick={() => { onSortChange(val); sortBy = val; sortDropdownOpen = false; }}
+              id="button-sort-{val}"
+              class="w-full px-3 py-2 text-left text-xs hover:bg-md-surface-variant transition-colors {sortBy === val ? 'text-md-primary font-medium' : 'text-md-on-surface'} flex items-center gap-2"
+              onclick={() => { onSortChange(val); sortDropdownOpen = false; }}
             >
+              <IconClock class="w-3.5 h-3.5 shrink-0" />
+              {label}
+            </button>
+          {/each}
+          <!-- Sender Name -->
+          {#each [['senderNameAsc', 'Sender Name (Ascending)'], ['senderNameDesc', 'Sender Name (Descending)']] as [val, label]}
+            <button
+              id="button-sort-{val}"
+              class="w-full px-3 py-2 text-left text-xs hover:bg-md-surface-variant transition-colors {sortBy === val ? 'text-md-primary font-medium' : 'text-md-on-surface'} flex items-center gap-2"
+              onclick={() => { onSortChange(val); sortDropdownOpen = false; }}
+            >
+              <IconUser class="w-3.5 h-3.5 shrink-0" />
+              {label}
+            </button>
+          {/each}
+          <!-- Sender Email -->
+          {#each [['senderEmailAsc', 'Sender Email (Ascending)'], ['senderEmailDesc', 'Sender Email (Descending)']] as [val, label]}
+            <button
+              id="button-sort-{val}"
+              class="w-full px-3 py-2 text-left text-xs hover:bg-md-surface-variant transition-colors {sortBy === val ? 'text-md-primary font-medium' : 'text-md-on-surface'} flex items-center gap-2"
+              onclick={() => { onSortChange(val); sortDropdownOpen = false; }}
+            >
+              <IconEnvelope class="w-3.5 h-3.5 shrink-0" />
+              {label}
+            </button>
+          {/each}
+          <!-- Subject -->
+          {#each [['subjectAsc', 'Subject (Ascending)'], ['subjectDesc', 'Subject (Descending)']] as [val, label]}
+            <button
+              id="button-sort-{val}"
+              class="w-full px-3 py-2 text-left text-xs hover:bg-md-surface-variant transition-colors {sortBy === val ? 'text-md-primary font-medium' : 'text-md-on-surface'} flex items-center gap-2"
+              onclick={() => { onSortChange(val); sortDropdownOpen = false; }}
+            >
+              <IconMail class="w-3.5 h-3.5 shrink-0" />
               {label}
             </button>
           {/each}
@@ -263,6 +333,7 @@ function formatDateChip(from: string, to: string): string {
     {#if savedSearchFilters.length > 0}
       <div class="relative shrink-0">
         <button
+          id="button-saved-filters"
           class="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full border transition-colors border-md-outline-variant bg-transparent text-md-on-surface/80 hover:bg-md-surface-variant"
           aria-label="Saved filters"
           onclick={() => { savedFiltersDropdownOpen = !savedFiltersDropdownOpen; sortDropdownOpen = false; dateDropdownOpen = false; fromDropdownOpen = false; manageFiltersOpen = false; }}
@@ -274,8 +345,18 @@ function formatDateChip(from: string, to: string): string {
           <div class="absolute top-full left-0 mt-1 bg-md-surface border border-md-outline-variant rounded-xl shadow-lg z-[200] overflow-hidden min-w-[150px]">
             {#each savedSearchFilters as filter}
               <button
+                id="button-load-filter-{filter.id}"
                 class="w-full px-3 py-2 text-left text-xs hover:bg-md-surface-variant transition-colors text-md-on-surface"
-                onclick={() => { onLoadFilter(filter); savedFiltersDropdownOpen = false; }}
+                onclick={() => {
+                  onSearchChange(filter.searchQuery);
+                  onSortChange('newest');
+                  onOtpOnlyChange(filter.hasOTP);
+                  onDateFromChange(filter.dateFrom);
+                  onDateToChange(filter.dateTo);
+                  datePreset = 'any';
+                  onLoadFilter(filter);
+                  savedFiltersDropdownOpen = false;
+                }}
               >
                 {filter.name}
               </button>
@@ -288,6 +369,7 @@ function formatDateChip(from: string, to: string): string {
     <!-- Manage Filters chip -->
     {#if savedSearchFilters.length > 0}
       <button
+        id="button-manage-filters"
         class="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full border transition-colors border-md-outline-variant bg-transparent text-md-on-surface/80 hover:bg-md-surface-variant shrink-0"
         aria-label="Manage filters"
         onclick={() => { manageFiltersOpen = true; savedFiltersDropdownOpen = false; sortDropdownOpen = false; dateDropdownOpen = false; fromDropdownOpen = false; }}
@@ -298,16 +380,18 @@ function formatDateChip(from: string, to: string): string {
 
     <!-- OTP chip -->
     <button
+      id="button-otp-only"
       class="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full border transition-colors shrink-0 {otpOnly ? 'border-md-primary bg-md-primary/10 text-md-primary' : 'border-md-outline-variant bg-transparent text-md-on-surface/80 hover:bg-md-surface-variant'}"
       aria-label="Show only OTP emails"
-      onclick={() => { onOtpOnlyChange(!otpOnly); otpOnly = !otpOnly; }}
+      onclick={() => { onOtpOnlyChange(!otpOnly); }}
     >
-      OTP only
+      has OTP
     </button>
 
     <!-- From chip -->
     <div class="relative shrink-0">
       <button
+        id="button-from-filter"
         class="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full border transition-colors {selectedSenders.length > 0 ? 'border-md-primary bg-md-primary/10 text-md-primary' : 'border-md-outline-variant bg-transparent text-md-on-surface/80 hover:bg-md-surface-variant'}"
         aria-label="Filter by sender"
         onclick={() => { fromDropdownOpen = !fromDropdownOpen; sortDropdownOpen = false; dateDropdownOpen = false; savedFiltersDropdownOpen = false; }}
@@ -326,7 +410,7 @@ function formatDateChip(from: string, to: string): string {
           <!-- Header -->
           <div class="flex items-center justify-between px-4 py-3 border-b border-md-outline-variant/30">
             <span class="text-sm font-semibold text-md-on-surface">From</span>
-            <button class="w-5 h-5 flex items-center justify-center text-md-on-surface/60 hover:text-md-on-surface transition-colors" aria-label="Close from filter" onclick={() => fromDropdownOpen = false}>
+            <button id="button-close-from-filter" class="w-5 h-5 flex items-center justify-center text-md-on-surface/60 hover:text-md-on-surface transition-colors" aria-label="Close from filter" onclick={() => fromDropdownOpen = false}>
               <IconX class="w-3.5 h-3.5" />
             </button>
           </div>
@@ -339,7 +423,7 @@ function formatDateChip(from: string, to: string): string {
                     {getInitial(sender, '')}
                   </span>
                   <span class="max-w-[120px] truncate">{sender}</span>
-                  <button onclick={() => toggleSender(sender)} aria-label="Remove sender" class="ml-0.5 text-md-on-surface/50 hover:text-md-on-surface">
+                  <button id="button-remove-sender-{sender}" onclick={() => toggleSender(sender)} aria-label="Remove sender" class="ml-0.5 text-md-on-surface/50 hover:text-md-on-surface">
                     <IconX class="w-2.5 h-2.5" />
                   </button>
                 </div>
@@ -350,6 +434,7 @@ function formatDateChip(from: string, to: string): string {
           <!-- Search input -->
           <div class="px-4 pt-3 pb-2">
             <input
+              id="input-from-search"
               type="text"
               placeholder="Type a name or email address"
               class="w-full bg-transparent border-b border-md-outline-variant/50 pb-1 text-sm text-md-on-surface placeholder:text-md-on-surface/40 outline-none focus:border-md-primary transition-colors"
@@ -367,6 +452,7 @@ function formatDateChip(from: string, to: string): string {
             {#each senderSuggestions as suggestion}
               {@const isSelected = selectedSenders.some((s) => s.toLowerCase() === suggestion.email.toLowerCase())}
               <button
+                id="button-select-sender-{suggestion.email}"
                 class="w-full flex items-center gap-3 px-4 py-2.5 hover:bg-md-surface-variant/50 transition-colors text-left"
                 onclick={() => toggleSender(suggestion.email)}
               >
@@ -393,6 +479,7 @@ function formatDateChip(from: string, to: string): string {
     <!-- Date chip -->
     <div class="relative shrink-0">
       <button
+        id="button-date-filter"
         class="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full border transition-colors {(dateFrom || dateTo) ? 'border-md-primary bg-md-primary/10 text-md-primary' : 'border-md-outline-variant bg-transparent text-md-on-surface/80 hover:bg-md-surface-variant'}"
         aria-label="Filter by date"
         onclick={() => { dateDropdownOpen = !dateDropdownOpen; sortDropdownOpen = false; showCustomRange = false; savedFiltersDropdownOpen = false; fromDropdownOpen = false; }}
@@ -405,7 +492,7 @@ function formatDateChip(from: string, to: string): string {
           <!-- Header -->
           <div class="flex items-center justify-between px-4 py-3 border-b border-md-outline-variant/30">
             <span class="text-sm font-semibold text-md-on-surface">Date</span>
-            <button class="w-5 h-5 flex items-center justify-center text-md-on-surface/60 hover:text-md-on-surface transition-colors" aria-label="Close date filter" onclick={() => { dateDropdownOpen = false; showCustomRange = false; }}>
+            <button id="button-close-date-filter" class="w-5 h-5 flex items-center justify-center text-md-on-surface/60 hover:text-md-on-surface transition-colors" aria-label="Close date filter" onclick={() => { dateDropdownOpen = false; showCustomRange = false; }}>
               <IconX class="w-3.5 h-3.5" />
             </button>
           </div>
@@ -419,42 +506,45 @@ function formatDateChip(from: string, to: string): string {
                       <span class="w-2 h-2 rounded-full bg-md-primary"></span>
                     {/if}
                   </span>
-                  <input type="radio" class="sr-only" name="date-preset" value={preset.value} checked={datePreset === preset.value} onchange={() => { applyDatePreset(preset.value); if (preset.value !== 'custom') dateDropdownOpen = false; }} />
+                  <input id="radio-date-preset-{preset.value}" type="radio" class="sr-only" name="date-preset" value={preset.value} checked={datePreset === preset.value} onchange={() => { applyDatePreset(preset.value); if (preset.value !== 'custom') dateDropdownOpen = false; }} />
                   <span class="text-sm text-md-on-surface">{preset.label}</span>
                 </label>
               {/each}
             </div>
             <!-- Custom range link -->
             <div class="px-4 py-2 border-t border-md-outline-variant/30">
-              <button class="text-sm text-md-primary hover:underline" onclick={() => showCustomRange = true}>Custom range</button>
+              <button id="button-custom-date-range" class="text-sm text-md-primary hover:underline" aria-label="Select custom date range" onclick={() => showCustomRange = true}>Custom range</button>
             </div>
           {:else}
             <!-- Custom range picker -->
             <div class="p-4 space-y-3">
-              <button class="text-xs text-md-on-surface/50 hover:text-md-on-surface flex items-center gap-1" onclick={() => showCustomRange = false}>
+              <button id="button-back-custom-date" class="text-xs text-md-on-surface/50 hover:text-md-on-surface flex items-center gap-1" onclick={() => showCustomRange = false}>
                 ← Back
               </button>
               <div class="flex flex-col gap-1">
                 <span class="text-xs text-md-on-surface/50">From</span>
                 <input
+                  id="input-date-from"
                   type="date"
                   class="w-full px-2 py-1 rounded border border-md-outline-variant text-xs bg-md-surface-container-low outline-none focus:border-md-primary focus:ring-1 focus:ring-md-primary"
                   aria-label="Filter emails from this date"
-                  bind:value={dateFrom}
+                  value={dateFrom}
                   onchange={(e) => { onDateFromChange((e.target as HTMLInputElement).value); datePreset = 'custom'; }}
                 />
               </div>
               <div class="flex flex-col gap-1">
                 <span class="text-xs text-md-on-surface/50">To</span>
                 <input
+                  id="input-date-to"
                   type="date"
                   class="w-full px-2 py-1 rounded border border-md-outline-variant text-xs bg-md-surface-container-low outline-none focus:border-md-primary focus:ring-1 focus:ring-md-primary"
                   aria-label="Filter emails until this date"
-                  bind:value={dateTo}
+                  value={dateTo}
                   onchange={(e) => { onDateToChange((e.target as HTMLInputElement).value); datePreset = 'custom'; }}
                 />
               </div>
               <button
+                id="button-apply-date-range"
                 class="w-full px-3 py-1.5 text-xs rounded-xl bg-md-primary text-md-on-primary hover:bg-md-primary/90 transition-colors"
                 onclick={() => dateDropdownOpen = false}
               >
@@ -469,9 +559,10 @@ function formatDateChip(from: string, to: string): string {
     <!-- Clear all chip (only shown if any filter is active) -->
     {#if sortBy !== 'newest' || otpOnly || dateFrom || dateTo || selectedSenders.length > 0}
       <button
+        id="button-clear-filters"
         class="flex items-center gap-1 px-3 py-1.5 text-xs rounded-full border border-md-error/50 bg-transparent text-md-error hover:bg-md-error/10 transition-colors shrink-0"
         aria-label="Clear all filters"
-        onclick={() => { onClearFilters(); sortBy = 'newest'; otpOnly = false; dateFrom = ''; dateTo = ''; onSelectedSendersChange([]); selectedSenders = []; }}
+        onclick={() => { onClearFilters(); onSortChange('newest'); onOtpOnlyChange(false); onDateFromChange(''); onDateToChange(''); onSelectedSendersChange([]); }}
       >
         <IconX class="w-3 h-3" />
         Clear
@@ -481,6 +572,7 @@ function formatDateChip(from: string, to: string): string {
     <!-- Save as filter button (only shown if current filter is not saved and has active filters) -->
     {#if !currentFilterSaved && (sortBy !== 'newest' || otpOnly || dateFrom || dateTo || selectedSenders.length > 0 || searchQuery !== '')}
       <button
+        id="button-save-as-filter"
         class="flex items-center gap-1 px-3 py-1.5 text-xs rounded-full border border-md-primary bg-transparent text-md-primary hover:bg-md-primary/10 transition-colors shrink-0"
         aria-label="Save as filter"
         onclick={() => { showSaveFilter = true; }}
@@ -491,13 +583,14 @@ function formatDateChip(from: string, to: string): string {
         Save as filter
       </button>
     {/if}
+    </div>
   </div>
 {/if}
 
 <!-- Save Filter Dialog -->
 {#if showSaveFilter}
   <div class="fixed inset-0 z-[300] flex items-center justify-center p-4">
-    <button class="absolute inset-0 bg-black/50 cursor-default" aria-label="Close" onclick={() => showSaveFilter = false}></button>
+    <button id="button-close-save-filter-dialog" class="absolute inset-0 bg-black/50 cursor-default" aria-label="Close" onclick={() => showSaveFilter = false}></button>
     <div class="relative bg-md-surface rounded-2xl shadow-2xl max-w-sm w-full overflow-hidden flex flex-col">
       <!-- Header -->
       <div class="flex items-center justify-between px-6 py-4 border-b border-md-outline-variant">
@@ -510,6 +603,7 @@ function formatDateChip(from: string, to: string): string {
       <!-- Content -->
       <div class="p-4 space-y-3">
         <input
+          id="input-save-filter-name"
           type="text"
           placeholder="Filter name"
           class="w-full px-3 py-2 rounded-lg border border-md-outline-variant bg-md-surface-container-low text-sm outline-none focus:border-md-primary focus:ring-1 focus:ring-md-primary"
@@ -518,7 +612,7 @@ function formatDateChip(from: string, to: string): string {
           onkeydown={(e) => {
             if (e.key === 'Enter') {
               if (saveFilterName.trim()) {
-                onSaveFilter(saveFilterName.trim());
+                onSaveFilter(saveFilterName.trim(), searchQuery, otpOnly, senderDomain, dateFrom, dateTo);
                 saveFilterName = '';
                 showSaveFilter = false;
               }
@@ -528,11 +622,13 @@ function formatDateChip(from: string, to: string): string {
         />
         <div class="flex gap-2">
           <button
+            id="button-save-filter-confirm"
             class="flex-1 px-3 py-2 rounded-lg bg-md-primary text-md-on-primary text-sm font-medium hover:bg-md-primary/90 transition-colors"
             aria-label="Save filter"
             onclick={() => {
               if (saveFilterName.trim()) {
-                onSaveFilter(saveFilterName.trim());
+                console.log('[FilterList] saving filter - sq:', searchQuery, 'otp:', otpOnly, 'sd:', senderDomain, 'df:', dateFrom, 'dt:', dateTo);
+                onSaveFilter(saveFilterName.trim(), searchQuery, otpOnly, senderDomain, dateFrom, dateTo);
                 saveFilterName = '';
                 showSaveFilter = false;
               }
@@ -541,6 +637,7 @@ function formatDateChip(from: string, to: string): string {
             Save
           </button>
           <button
+            id="button-cancel-save-filter"
             class="flex-1 px-3 py-2 rounded-lg bg-transparent hover:bg-md-surface-variant text-sm transition-colors"
             aria-label="Cancel saving filter"
             onclick={() => { saveFilterName = ''; showSaveFilter = false; }}
@@ -556,12 +653,12 @@ function formatDateChip(from: string, to: string): string {
 <!-- Manage Filters Dialog -->
 {#if manageFiltersOpen}
   <div class="fixed inset-0 z-[300] flex items-center justify-center p-4">
-    <button class="absolute inset-0 bg-black/50 cursor-default" aria-label="Close" onclick={() => manageFiltersOpen = false}></button>
+    <button id="button-close-manage-filters-dialog" class="absolute inset-0 bg-black/50 cursor-default" aria-label="Close" onclick={() => manageFiltersOpen = false}></button>
     <div class="relative bg-md-surface rounded-2xl shadow-2xl max-w-md w-full max-h-[80vh] overflow-hidden flex flex-col">
       <!-- Header -->
       <div class="flex items-center justify-between px-6 py-4 border-b border-md-outline-variant">
         <h3 class="text-lg font-semibold text-md-on-surface">Manage Filters</h3>
-        <button class="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-md-surface-variant transition-colors" aria-label="Close" onclick={() => manageFiltersOpen = false}>
+        <button id="button-close-manage-filters-header" class="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-md-surface-variant transition-colors" aria-label="Close" onclick={() => manageFiltersOpen = false}>
           <IconX class="w-5 h-5 text-md-on-surface/60" />
         </button>
       </div>
@@ -573,6 +670,7 @@ function formatDateChip(from: string, to: string): string {
             {#if renamingFilterId === filter.id}
               <!-- Rename mode -->
               <input
+                id="input-rename-filter-{filter.id}"
                 type="text"
                 class="flex-1 px-3 py-2 rounded-lg border border-md-primary bg-md-surface text-sm outline-none focus:ring-1 focus:ring-md-primary"
                 bind:value={renameFilterName}
@@ -591,6 +689,7 @@ function formatDateChip(from: string, to: string): string {
                 use:focusOnMount
               />
               <button
+                id="button-confirm-rename-{filter.id}"
                 class="px-3 py-2 rounded-lg bg-md-primary text-md-on-primary text-sm font-medium hover:bg-md-primary/90 transition-colors"
                 onclick={() => {
                   if (renameFilterName.trim()) {
@@ -603,6 +702,7 @@ function formatDateChip(from: string, to: string): string {
                 Save
               </button>
               <button
+                id="button-cancel-rename-{filter.id}"
                 class="px-3 py-2 rounded-lg bg-transparent hover:bg-md-surface-variant text-sm transition-colors"
                 onclick={() => { renamingFilterId = null; renameFilterName = ''; }}
               >
@@ -612,6 +712,7 @@ function formatDateChip(from: string, to: string): string {
               <!-- View mode -->
               <span class="flex-1 text-sm font-medium text-md-on-surface truncate">{filter.name}</span>
               <button
+                id="button-rename-{filter.id}"
                 class="p-2 rounded-lg hover:bg-md-surface-variant transition-colors"
                 aria-label="Rename filter"
                 onclick={() => { renamingFilterId = filter.id; renameFilterName = filter.name; }}
@@ -621,6 +722,7 @@ function formatDateChip(from: string, to: string): string {
                 </svg>
               </button>
               <button
+                id="button-delete-filter-{filter.id}"
                 class="p-2 rounded-lg hover:bg-md-error/10 transition-colors"
                 aria-label="Delete filter"
                 onclick={() => onDeleteFilter(filter.id)}

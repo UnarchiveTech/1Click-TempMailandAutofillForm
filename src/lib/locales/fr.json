@@ -18,7 +18,8 @@
     "yes": "Oui",
     "no": "Non",
     "archive": "Archiver",
-    "unarchive": "Désarchiver"
+    "unarchive": "Désarchiver",
+    "restore": "Restaurer"
   },
   "inbox": {
     "title": "Boîte de réception",
@@ -45,17 +46,20 @@
     "autoCopyDescription": "Copier dans le presse-papier après génération",
     "autoRenew": "Renouvellement automatique",
     "autoRenewDescription": "Renouveler automatiquement avant expiration",
+    "emailRetention": "Conservation des e-mails",
+    "emailRetentionDescription": "Durée de conservation locale des e-mails",
+    "storageUsage": "Utilisation du stockage",
     "appearance": "Apparence",
     "theme": "Thème",
     "light": "Clair",
     "dark": "Sombre",
     "system": "Système",
     "developer": "Développeur",
-    "dataExport": "Exportation de données",
-    "dataImport": "Importation de données",
+    "dataExport": "Exportation des données",
+    "dataImport": "Importation des données",
     "dangerZone": "Zone de danger",
     "clearAllData": "Effacer toutes les données",
-    "clearDataWarning": "Cela supprimera définitivement toutes vos données. Cette action ne peut être annulée."
+    "clearDataWarning": "Cela supprimera définitivement toutes vos données. Cette action ne peut pas être annulée."
   },
   "identities": {
     "title": "Identités",

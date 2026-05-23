@@ -50,3 +50,14 @@ export async function addToastNotification(
     toastType,
   });
 }
+
+export async function addAutoExtendEvent(inboxAddress: string, provider?: string): Promise<void> {
+  await addActivityEvent('auto_extend', {
+    inboxAddress,
+    ...(provider && { provider }),
+  });
+}
+
+export async function addHardResetEvent(): Promise<void> {
+  await addActivityEvent('hard_reset', {});
+}

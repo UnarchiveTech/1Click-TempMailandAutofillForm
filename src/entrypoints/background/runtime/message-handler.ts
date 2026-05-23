@@ -3,6 +3,7 @@
  */
 
 import { DEFAULT_PROVIDER, EmailService, loadProviderConfig } from '@/utils/email-service.js';
+import { getErrorMessage } from '@/utils/errors.js';
 import {
   addCustomProviderInstance,
   getProviderInstances,
@@ -10,12 +11,18 @@ import {
   initializeDefaultProvider,
   removeCustomProviderInstance,
 } from '@/utils/instance-manager.js';
-import { logError, logInfo } from '@/utils/logger.js';
-import type { Account, ProviderInstance } from '@/utils/types.js';
+import { logError, logInfo, logWarn } from '@/utils/logger.js';
+import type { Account, ProviderInstance, RuntimeMessageSender } from '@/utils/types.js';
 import { validateCustomInstanceName, validateCustomInstanceUrl } from '@/utils/validation.js';
 import { handleUpdateSessionCredentials } from '../credentials/session-credentials.js';
-import { getAnalytics } from '../inbox/analytics.js';
-import { archiveInboxEmails, getArchivedEmails } from '../inbox/email-storage.js';
+import { getAnalytics, recordUIRenderTime } from '../inbox/analytics.js';
+import {
+  cleanupOldStoredEmails,
+  clearStoredEmails,
+  getArchivedEmails,
+  getEmailsToBeDeleted,
+  getStorageUsage,
+} from '../inbox/email-storage.js';
 import {
   checkNewEmails,
   createInbox,
@@ -26,8 +33,8 @@ import {
 
 export function registerMessageHandler(): void {
   browser.runtime.onMessage.addListener(
-    // biome-ignore lint/suspicious/noExplicitAny: Chrome runtime message types
-    (message: any, sender: any, sendResponse: (response: any) => void) => {
+    // biome-ignore lint/suspicious/noExplicitAny: Chrome runtime message listener requires any for discriminated union
+    (message: any, sender: RuntimeMessageSender, sendResponse: (response: unknown) => void) => {
       logInfo('Received message:', { message });
 
       if (message.type === 'createInbox') {
@@ -42,8 +49,7 @@ export function registerMessageHandler(): void {
             const inbox = await createInbox(provider, instanceId, message.emailUser);
             sendResponse({ success: true, inbox });
           } catch (error: unknown) {
-            const msg = error instanceof Error ? error.message : String(error);
-            sendResponse({ success: false, error: msg });
+            sendResponse({ success: false, error: getErrorMessage(error) });
           }
         })();
         return true;
@@ -55,8 +61,7 @@ export function registerMessageHandler(): void {
             const messages = await checkNewEmails(message.inboxId, message.filters);
             sendResponse({ success: true, messages });
           } catch (error: unknown) {
-            const msg = error instanceof Error ? error.message : String(error);
-            sendResponse({ success: false, error: msg });
+            sendResponse({ success: false, error: getErrorMessage(error) });
           }
         })();
         return true;
@@ -68,8 +73,31 @@ export function registerMessageHandler(): void {
             const result = await deleteInbox(message.inboxId);
             sendResponse(result);
           } catch (error: unknown) {
-            const msg = error instanceof Error ? error.message : String(error);
-            sendResponse({ success: false, error: msg });
+            sendResponse({ success: false, error: getErrorMessage(error) });
+          }
+        })();
+        return true;
+      }
+
+      if (message.type === 'restoreInbox') {
+        (async () => {
+          try {
+            const { inboxes = [] } = (await browser.storage.local.get(['inboxes'])) as {
+              inboxes?: Account[];
+            };
+            const inbox = inboxes.find((i) => i.id === message.inboxId);
+            if (!inbox) {
+              sendResponse({ success: false, error: 'Inbox not found' });
+              return;
+            }
+            const updatedInboxes = inboxes.map((i) =>
+              i.id === message.inboxId ? { ...i, accountStatus: 'active' as const } : i
+            );
+            await browser.storage.local.set({ inboxes: updatedInboxes });
+            sendResponse({ success: true });
+          } catch (e) {
+            logError('restoreInbox error:', e);
+            sendResponse({ success: false, error: 'Failed to restore inbox' });
           }
         })();
         return true;
@@ -83,8 +111,7 @@ export function registerMessageHandler(): void {
             };
             sendResponse({ success: true, inboxes });
           } catch (error: unknown) {
-            const msg = error instanceof Error ? error.message : String(error);
-            sendResponse({ success: false, error: msg });
+            sendResponse({ success: false, error: getErrorMessage(error) });
           }
         })();
         return true;
@@ -96,8 +123,7 @@ export function registerMessageHandler(): void {
             await browser.storage.local.set({ selectedProvider: message.provider });
             sendResponse({ success: true });
           } catch (error: unknown) {
-            const msg = error instanceof Error ? error.message : String(error);
-            sendResponse({ success: false, error: msg });
+            sendResponse({ success: false, error: getErrorMessage(error) });
           }
         })();
         return true;
@@ -119,8 +145,7 @@ export function registerMessageHandler(): void {
             await browser.storage.local.set({ inboxes });
             sendResponse({ success: true });
           } catch (error: unknown) {
-            const msg = error instanceof Error ? error.message : String(error);
-            sendResponse({ success: false, error: msg });
+            sendResponse({ success: false, error: getErrorMessage(error) });
           }
         })();
         return true;
@@ -137,9 +162,9 @@ export function registerMessageHandler(): void {
               sendResponse({ success: false, error: 'Inbox not found' });
               return;
             }
-            await archiveInboxEmails(inbox.address);
+            await clearStoredEmails(inbox.address);
             const updatedInboxes = inboxes.map((i) =>
-              i.id === message.inboxId ? { ...i, archived: true } : i
+              i.id === message.inboxId ? { ...i, accountStatus: 'archived' as const } : i
             );
             await browser.storage.local.set({ inboxes: updatedInboxes });
             sendResponse({ success: true });
@@ -163,7 +188,7 @@ export function registerMessageHandler(): void {
               return;
             }
             const updatedInboxes = inboxes.map((i) =>
-              i.id === message.inboxId ? { ...i, archived: false } : i
+              i.id === message.inboxId ? { ...i, accountStatus: 'active' as const } : i
             );
             await browser.storage.local.set({ inboxes: updatedInboxes });
             sendResponse({ success: true });
@@ -183,8 +208,7 @@ export function registerMessageHandler(): void {
             ])) as { selectedProvider?: string };
             sendResponse({ success: true, provider: selectedProvider });
           } catch (error: unknown) {
-            const msg = error instanceof Error ? error.message : String(error);
-            sendResponse({ success: false, error: msg });
+            sendResponse({ success: false, error: getErrorMessage(error) });
           }
         })();
         return true;
@@ -196,8 +220,7 @@ export function registerMessageHandler(): void {
             await browser.storage.session.remove('sessionCredentials');
             sendResponse({ success: true });
           } catch (error: unknown) {
-            const msg = error instanceof Error ? error.message : String(error);
-            sendResponse({ success: false, error: msg });
+            sendResponse({ success: false, error: getErrorMessage(error) });
           }
         })();
         return true;
@@ -209,8 +232,7 @@ export function registerMessageHandler(): void {
             const result = await handleUpdateSessionCredentials(message, sender);
             sendResponse(result);
           } catch (error: unknown) {
-            const msg = error instanceof Error ? error.message : String(error);
-            sendResponse({ success: false, error: msg });
+            sendResponse({ success: false, error: getErrorMessage(error) });
           }
         })();
         return true;
@@ -222,8 +244,19 @@ export function registerMessageHandler(): void {
             const analytics = await getAnalytics();
             sendResponse({ success: true, analytics });
           } catch (error: unknown) {
-            const msg = error instanceof Error ? error.message : String(error);
-            sendResponse({ success: false, error: msg });
+            sendResponse({ success: false, error: getErrorMessage(error) });
+          }
+        })();
+        return true;
+      }
+
+      if (message.type === 'recordUIRenderTime') {
+        (async () => {
+          try {
+            await recordUIRenderTime(message.renderTime);
+            sendResponse({ success: true });
+          } catch (error: unknown) {
+            sendResponse({ success: false, error: getErrorMessage(error) });
           }
         })();
         return true;
@@ -235,8 +268,46 @@ export function registerMessageHandler(): void {
             const archivedEmails = await getArchivedEmails(message.inboxAddress);
             sendResponse({ success: true, archivedEmails });
           } catch (error: unknown) {
-            const msg = error instanceof Error ? error.message : String(error);
-            sendResponse({ success: false, error: msg });
+            sendResponse({ success: false, error: getErrorMessage(error) });
+          }
+        })();
+        return true;
+      }
+
+      if (message.action === 'getStorageUsage') {
+        (async () => {
+          try {
+            const usage = await getStorageUsage();
+            sendResponse({ success: true, usage });
+          } catch (error: unknown) {
+            sendResponse({ success: false, error: getErrorMessage(error) });
+          }
+        })();
+        return true;
+      }
+
+      if (message.action === 'getEmailsToBeDeleted') {
+        (async () => {
+          try {
+            const count = await getEmailsToBeDeleted(message.retentionDays || 30);
+            sendResponse({ success: true, count });
+          } catch (error: unknown) {
+            sendResponse({ success: false, error: getErrorMessage(error) });
+          }
+        })();
+        return true;
+      }
+
+      if (message.action === 'cleanupOldStoredEmails') {
+        (async () => {
+          try {
+            await cleanupOldStoredEmails(
+              message.activeRetentionDays || 30,
+              message.archivedRetentionDays || 90
+            );
+            sendResponse({ success: true });
+          } catch (error: unknown) {
+            sendResponse({ success: false, error: getErrorMessage(error) });
           }
         })();
         return true;
@@ -262,8 +333,7 @@ export function registerMessageHandler(): void {
             setupInboxExpiryCheck();
             sendResponse({ success: true });
           } catch (error: unknown) {
-            const msg = error instanceof Error ? error.message : String(error);
-            sendResponse({ success: false, error: msg });
+            sendResponse({ success: false, error: getErrorMessage(error) });
           }
         })();
         return true;
@@ -276,8 +346,7 @@ export function registerMessageHandler(): void {
             const instances = await getProviderInstances(provider);
             sendResponse({ success: true, instances });
           } catch (error: unknown) {
-            const msg = error instanceof Error ? error.message : String(error);
-            sendResponse({ success: false, error: msg });
+            sendResponse({ success: false, error: getErrorMessage(error) });
           }
         })();
         return true;
@@ -353,8 +422,7 @@ export function registerMessageHandler(): void {
 
             sendResponse({ success: true });
           } catch (error: unknown) {
-            const msg = error instanceof Error ? error.message : String(error);
-            sendResponse({ success: false, error: msg });
+            sendResponse({ success: false, error: getErrorMessage(error) });
           }
         })();
         return true;
@@ -367,8 +435,7 @@ export function registerMessageHandler(): void {
             const instances = await getProviderInstances(provider);
             sendResponse({ success: true, instances });
           } catch (error: unknown) {
-            const msg = error instanceof Error ? error.message : String(error);
-            sendResponse({ success: false, error: msg });
+            sendResponse({ success: false, error: getErrorMessage(error) });
           }
         })();
         return true;
@@ -385,8 +452,7 @@ export function registerMessageHandler(): void {
             await addCustomProviderInstance(provider, instance);
             sendResponse({ success: true });
           } catch (error: unknown) {
-            const msg = error instanceof Error ? error.message : String(error);
-            sendResponse({ success: false, error: msg });
+            sendResponse({ success: false, error: getErrorMessage(error) });
           }
         })();
         return true;
@@ -400,8 +466,7 @@ export function registerMessageHandler(): void {
             await removeCustomProviderInstance(provider, message.instanceId as string);
             sendResponse({ success: true });
           } catch (error: unknown) {
-            const msg = error instanceof Error ? error.message : String(error);
-            sendResponse({ success: false, error: msg });
+            sendResponse({ success: false, error: getErrorMessage(error) });
           }
         })();
         return true;
@@ -415,8 +480,7 @@ export function registerMessageHandler(): void {
             const instance = await getSelectedProviderInstance(provider);
             sendResponse({ success: true, instance });
           } catch (error: unknown) {
-            const msg = error instanceof Error ? error.message : String(error);
-            sendResponse({ success: false, error: msg });
+            sendResponse({ success: false, error: getErrorMessage(error) });
           }
         })();
         return true;
@@ -428,8 +492,7 @@ export function registerMessageHandler(): void {
             await browser.storage.local.set({ selectedInstance: message.instanceId });
             sendResponse({ success: true });
           } catch (error: unknown) {
-            const msg = error instanceof Error ? error.message : String(error);
-            sendResponse({ success: false, error: msg });
+            sendResponse({ success: false, error: getErrorMessage(error) });
           }
         })();
         return true;
@@ -446,8 +509,7 @@ export function registerMessageHandler(): void {
             await addCustomProviderInstance(provider, instance);
             sendResponse({ success: true });
           } catch (error: unknown) {
-            const msg = error instanceof Error ? error.message : String(error);
-            sendResponse({ success: false, error: msg });
+            sendResponse({ success: false, error: getErrorMessage(error) });
           }
         })();
         return true;
@@ -461,8 +523,7 @@ export function registerMessageHandler(): void {
             await removeCustomProviderInstance(provider, message.instanceId as string);
             sendResponse({ success: true });
           } catch (error: unknown) {
-            const msg = error instanceof Error ? error.message : String(error);
-            sendResponse({ success: false, error: msg });
+            sendResponse({ success: false, error: getErrorMessage(error) });
           }
         })();
         return true;
@@ -476,8 +537,7 @@ export function registerMessageHandler(): void {
             const instance = await getSelectedProviderInstance(provider);
             sendResponse({ success: true, instance });
           } catch (error: unknown) {
-            const msg = error instanceof Error ? error.message : String(error);
-            sendResponse({ success: false, error: msg });
+            sendResponse({ success: false, error: getErrorMessage(error) });
           }
         })();
         return true;
@@ -492,8 +552,7 @@ export function registerMessageHandler(): void {
             await browser.storage.local.set({ [storageKey]: message.instanceId });
             sendResponse({ success: true });
           } catch (error: unknown) {
-            const msg = error instanceof Error ? error.message : String(error);
-            sendResponse({ success: false, error: msg });
+            sendResponse({ success: false, error: getErrorMessage(error) });
           }
         })();
         return true;
@@ -505,8 +564,7 @@ export function registerMessageHandler(): void {
             await initializeDefaultProvider();
             sendResponse({ success: true });
           } catch (error: unknown) {
-            const msg = error instanceof Error ? error.message : String(error);
-            sendResponse({ success: false, error: msg });
+            sendResponse({ success: false, error: getErrorMessage(error) });
           }
         })();
         return true;
@@ -523,8 +581,7 @@ export function registerMessageHandler(): void {
             });
             sendResponse({ success: true, data });
           } catch (error: unknown) {
-            const msg = error instanceof Error ? error.message : String(error);
-            sendResponse({ success: false, error: msg });
+            sendResponse({ success: false, error: getErrorMessage(error) });
           }
         })();
         return true;
@@ -534,38 +591,38 @@ export function registerMessageHandler(): void {
         (async () => {
           try {
             const { url } = message as { url: string };
-            console.log('fetchFavicon requested:', url);
+            logInfo('fetchFavicon requested', { url });
             const response = await fetch(url);
-            console.log('fetchFavicon response status:', response.status);
+            logInfo('fetchFavicon response status', { status: response.status });
             if (!response.ok) {
               sendResponse({ success: false, error: `HTTP ${response.status}` });
               return;
             }
             const buffer = await response.arrayBuffer();
             const uint8 = new Uint8Array(buffer);
-            console.log('fetchFavicon buffer size:', uint8.length);
+            logInfo('fetchFavicon buffer size', { size: uint8.length });
             // Compute SHA-256 hash in background (MD5 not supported by Web Crypto)
             const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
             const hashArray = Array.from(new Uint8Array(hashBuffer));
             const hash = hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
-            console.log('fetchFavicon hash:', hash);
+            logInfo('fetchFavicon hash', { hash });
             // Convert to base64 for transfer
             let binary = '';
             for (let i = 0; i < uint8.length; i++) binary += String.fromCharCode(uint8[i]);
             const base64 = btoa(binary);
             const contentType = response.headers.get('content-type') || 'image/x-icon';
-            console.log('fetchFavicon success, sending response');
+            logInfo('fetchFavicon success, sending response');
             sendResponse({ success: true, base64, contentType, hash });
           } catch (error: unknown) {
             const msg = error instanceof Error ? error.message : String(error);
-            console.error('fetchFavicon error:', msg);
+            logError('fetchFavicon error', msg);
             sendResponse({ success: false, error: msg });
           }
         })();
         return true;
       }
 
-      console.warn('Unknown message type:', message.type);
+      logWarn('Unknown message type', { type: message.type });
       return false;
     }
   );

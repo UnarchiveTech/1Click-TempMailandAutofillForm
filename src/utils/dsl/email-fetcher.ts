@@ -6,6 +6,10 @@
 
 import { browser } from 'wxt/browser';
 import {
+  recordEmailFetchTime,
+  recordProviderLatency,
+} from '@/entrypoints/background/inbox/analytics.js';
+import {
   applyFiltersAndProcessMessages,
   storeNewMessages,
 } from '@/entrypoints/background/inbox/email-storage.js';
@@ -305,8 +309,11 @@ export async function fetchEmails(
     return [];
   }
 
+  const startTime = performance.now();
+
+  let result: Email[];
   if (emailFetchingConfig.type === 'single_step') {
-    return fetchEmailsSingleStep(
+    result = await fetchEmailsSingleStep(
       config,
       inbox,
       executeOperation,
@@ -315,11 +322,23 @@ export async function fetchEmails(
       emailFetchingConfig
     );
   } else if (emailFetchingConfig.type === 'multi_step') {
-    return fetchEmailsMultiStep(config, inbox, executeOperation, emailFetchingConfig, filters);
+    result = await fetchEmailsMultiStep(
+      config,
+      inbox,
+      executeOperation,
+      emailFetchingConfig,
+      filters
+    );
+  } else {
+    log(`Unknown email fetching type: ${emailFetchingConfig.type}`);
+    return [];
   }
 
-  log(`Unknown email fetching type: ${emailFetchingConfig.type}`);
-  return [];
+  const fetchTime = performance.now() - startTime;
+  await recordEmailFetchTime(fetchTime);
+  log(`Email fetch completed in ${fetchTime.toFixed(2)}ms for provider ${config.id}`);
+
+  return result;
 }
 
 /**
@@ -357,7 +376,10 @@ async function fetchEmailsSingleStep(
     }
   }
 
+  const apiStartTime = performance.now();
   const response = await executeOperation(operationName, context);
+  const apiLatency = performance.now() - apiStartTime;
+  await recordProviderLatency(config.id, apiLatency);
 
   log(`API response:`, JSON.stringify(response).substring(0, 200));
 
@@ -431,6 +453,14 @@ async function fetchEmailsSingleStep(
   (messages as Email[]).forEach((msg: Email) => {
     const otp = extractOTP(msg.subject || '', msg.body_html || msg.body_plain || '');
     msg.otp = otp || undefined;
+
+    // Extract sender name from from field if it contains "Name <email>" format
+    if (!msg.from_name && msg.from) {
+      const match = msg.from.match(/^(.+?)\s*<[^>]+>$/);
+      if (match) {
+        msg.from_name = match[1].trim();
+      }
+    }
   });
 
   return applyFiltersAndProcessMessages(messages as Email[], filters, inbox);
@@ -512,7 +542,10 @@ async function fetchEmailsMultiStep(
             variables: { [detailItemIdParam]: String(msg[listItemIdField]) },
           };
 
+      const detailApiStartTime = performance.now();
       const emailData = await executeOperation(detailOperation, detailContext);
+      const detailApiLatency = performance.now() - detailApiStartTime;
+      await recordProviderLatency(_config.id, detailApiLatency);
 
       // Map response fields to internal format
       const mapped: Record<string, unknown> = {};
@@ -539,9 +572,21 @@ async function fetchEmailsMultiStep(
         String(mapped.body_html || mapped.body_plain || '')
       );
 
+      // Extract sender name from from field if it contains "Name <email>" format
+      let senderName = String(mapped.from_name || '');
+      if (!senderName && mapped.from) {
+        const fromValue = String(mapped.from);
+        // Check if from field contains "Name <email>" format
+        const match = fromValue.match(/^(.+?)\s*<[^>]+>$/);
+        if (match) {
+          senderName = match[1].trim();
+        }
+      }
+
       return {
         id: String(mapped.id || msg[listItemIdField]),
-        from_name: String(mapped.from_name || ''),
+        from_name: senderName,
+        from: String(mapped.from || mapped.from_name || ''),
         subject: String(mapped.subject || ''),
         body_html: String(mapped.body_html || ''),
         body_plain: String(mapped.body_plain || ''),
@@ -627,7 +672,9 @@ function parseTimestamp(
  */
 function parseDateString(dateStr: string): Date | null {
   if (dateStr.includes('-') && dateStr.includes(' ')) {
-    const parsedDate = new Date(dateStr);
+    const utcStr =
+      dateStr.includes('Z') || dateStr.includes('+') ? dateStr : `${dateStr.replace(' ', 'T')}Z`;
+    const parsedDate = new Date(utcStr);
     if (!Number.isNaN(parsedDate.getTime())) {
       return parsedDate;
     }
@@ -636,12 +683,14 @@ function parseDateString(dateStr: string): Date | null {
     const [hours, minutes, seconds] = dateStr.split(':').map(Number);
     if (!Number.isNaN(hours) && !Number.isNaN(minutes)) {
       const emailDate = new Date(
-        today.getFullYear(),
-        today.getMonth(),
-        today.getDate(),
-        hours,
-        minutes,
-        seconds || 0
+        Date.UTC(
+          today.getUTCFullYear(),
+          today.getUTCMonth(),
+          today.getUTCDate(),
+          hours,
+          minutes,
+          seconds || 0
+        )
       );
       if (!Number.isNaN(emailDate.getTime())) {
         return emailDate;

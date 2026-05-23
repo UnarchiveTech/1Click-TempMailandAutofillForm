@@ -3,25 +3,25 @@ import { onMount } from 'svelte';
 import { isRTL, locale, setLanguage } from '@/lib/i18n';
 
 const languages = [
-  { code: 'en', name: 'English', flag: '🇬🇧' },
-  { code: 'es', name: 'Español', flag: '🇪🇸' },
-  { code: 'fr', name: 'Français', flag: '🇫🇷' },
-  { code: 'de', name: 'Deutsch', flag: '🇩🇪' },
-  { code: 'ja', name: '日本語', flag: '🇯🇵' },
-  { code: 'zh', name: '中文', flag: '🇨🇳' },
-  { code: 'ar', name: 'العربية', flag: '🇸🇦' },
+  { code: 'en', name: 'English', country: 'gb' },
+  { code: 'es', name: 'Español', country: 'es' },
+  { code: 'fr', name: 'Français', country: 'fr' },
+  { code: 'de', name: 'Deutsch', country: 'de' },
+  { code: 'ja', name: '日本語', country: 'jp' },
+  { code: 'zh', name: '中文', country: 'cn' },
+  { code: 'ar', name: 'العربية', country: 'sa' },
 ];
 
 let isOpen = $state(false);
 let currentLanguage = $state('en');
 
 onMount(() => {
-  // Subscribe to locale changes
+  // Subscribe to locale changes (already auto-detected by i18n.ts)
   const unsubscribe = locale.subscribe((value) => {
     currentLanguage = value || 'en';
   });
 
-  // Load saved language from storage
+  // Priority: saved storage > auto-detected (already in locale store)
   const savedLang = localStorage.getItem('preferredLanguage');
   if (savedLang && languages.some((lang) => lang.code === savedLang)) {
     setLanguage(savedLang);
@@ -57,7 +57,12 @@ function toggleDropdown() {
     onclick={toggleDropdown}
     aria-label="Change language"
   >
-    <span class="text-lg">{languages.find(lang => lang.code === currentLanguage)?.flag}</span>
+    <img
+      src="https://flagcdn.com/w40/{languages.find(lang => lang.code === currentLanguage)?.country}.png"
+      alt=""
+      class="w-6 h-4 rounded-sm object-cover"
+      loading="lazy"
+    />
     <span class="text-sm font-medium">{languages.find(lang => lang.code === currentLanguage)?.name}</span>
     <svg
       xmlns="http://www.w3.org/2000/svg"
@@ -80,7 +85,12 @@ function toggleDropdown() {
           aria-label="Switch to {lang.name}"
           aria-current={currentLanguage === lang.code ? 'true' : undefined}
         >
-          <span class="text-lg">{lang.flag}</span>
+          <img
+            src="https://flagcdn.com/w40/{lang.country}.png"
+            alt=""
+            class="w-6 h-4 rounded-sm object-cover"
+            loading="lazy"
+          />
           <span class="text-sm font-medium">{lang.name}</span>
           {#if currentLanguage === lang.code}
             <svg

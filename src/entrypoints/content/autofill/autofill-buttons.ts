@@ -15,9 +15,9 @@ import {
 } from './form-filler.js';
 import { generatePhoneNumber, generateUsername, generateWebsiteUrl } from './generators.js';
 
-// Default colors matching the extension's theme
-const DEFAULT_PRIMARY_COLOR = 'var(--md-primary, #3b82f6)';
-const DEFAULT_PRIMARY_HOVER = 'var(--md-primary, #2563eb)';
+// Default colors matching the extension's theme (#4c662b is the default --md-primary seed color)
+const DEFAULT_PRIMARY_COLOR = '#4c662b';
+const DEFAULT_PRIMARY_HOVER = '#3a4e20';
 
 // Cached colors to avoid repeated storage reads
 let cachedPrimaryColor: string | null = null;

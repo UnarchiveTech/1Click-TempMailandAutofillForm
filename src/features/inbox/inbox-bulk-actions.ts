@@ -48,7 +48,7 @@ export async function archiveSelected(
     const inboxes = result.inboxes || [];
     const archivedInboxes = inboxes.filter((i: Account) => state.selectedAddresses.has(i.id));
     const updated = inboxes.map((i) =>
-      state.selectedAddresses.has(i.id) ? { ...i, archived: true } : i
+      state.selectedAddresses.has(i.id) ? { ...i, accountStatus: 'archived' as const } : i
     );
     await ext.storage.local.set({ inboxes: updated });
     await setters.loadInboxes();
@@ -58,8 +58,8 @@ export async function archiveSelected(
       const currentResult = (await ext.storage.local.get(['inboxes'])) as { inboxes?: Account[] };
       const currentInboxes = currentResult.inboxes || [];
       const restored = currentInboxes.map((i: Account) => {
-        const archived = archivedInboxes.find((a) => a.id === i.id);
-        return archived ? { ...i, archived: false } : i;
+        const wasArchived = archivedInboxes.find((a) => a.id === i.id);
+        return wasArchived ? { ...i, accountStatus: 'active' as const } : i;
       });
       await ext.storage.local.set({ inboxes: restored });
       await setters.loadInboxes();
@@ -104,7 +104,9 @@ export async function unarchiveSelected(
       );
     }
 
-    const updated = inboxes.map((i) => (canUnarchiveIds.has(i.id) ? { ...i, archived: false } : i));
+    const updated = inboxes.map((i) =>
+      canUnarchiveIds.has(i.id) ? { ...i, accountStatus: 'active' as const } : i
+    );
     await ext.storage.local.set({ inboxes: updated });
     await setters.loadInboxes();
     setters.setSelectedAddresses(new Set());

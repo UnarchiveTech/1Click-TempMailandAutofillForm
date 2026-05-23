@@ -22,7 +22,59 @@ interface BurnerInstance {
 
 ## Required API Endpoints
 
-### 1. Fetch Messages
+### 1. Create Inbox
+
+**Endpoint:** `GET {apiUrl}/inbox`
+
+**Description:** Creates a new inbox and returns the email address, inbox ID, and authentication token.
+
+**Response Format:**
+```json
+{
+  "success": true,
+  "errors": null,
+  "result": {
+    "email": {
+      "address": "string",
+      "id": "string",
+      "created_at": number,
+      "ttl": number
+    },
+    "token": "string"
+  }
+}
+```
+
+### 2. Get Inbox Details
+
+**Endpoint:** `GET {apiUrl}/inbox/{inboxId}`
+
+**Headers:**
+```
+X-Burner-Key: {token}
+```
+
+**Description:** Retrieves details for a specific inbox.
+
+**Request Parameters:**
+- `inboxId` - The unique identifier of the inbox
+- `token` - The bearer token for the inbox (passed in header)
+
+**Response Format:**
+```json
+{
+  "success": true,
+  "errors": null,
+  "result": {
+    "address": "string",
+    "id": "string",
+    "created_at": number,
+    "ttl": number
+  }
+}
+```
+
+### 3. Fetch Messages
 
 **Endpoint:** `GET {apiUrl}/inbox/{inboxId}/messages`
 
@@ -41,16 +93,18 @@ X-Burner-Key: {token}
 ```json
 {
   "success": true,
-  "messages": [
+  "errors": null,
+  "result": [
     {
       "id": "string",
+      "received_at": number,
+      "sender": "string",
+      "from_name": "string",
+      "from_address": "string",
       "subject": "string",
-      "body": "string",
       "body_html": "string",
       "body_plain": "string",
-      "from": "string",
-      "from_name": "string",
-      "received_at": number
+      "ttl": number
     }
   ]
 }
@@ -140,15 +194,17 @@ app.get('/api/v2/inbox/:inboxId/messages', async (req, res) => {
 
   return res.json({
     success: true,
-    messages: messages.map(msg => ({
+    errors: null,
+    result: messages.map(msg => ({
       id: msg.id,
+      received_at: Math.floor(msg.createdAt.getTime() / 1000),
+      sender: msg.fromAddress,
+      from_name: msg.fromName,
+      from_address: msg.fromAddress,
       subject: msg.subject,
-      body: msg.body,
       body_html: msg.bodyHtml,
       body_plain: msg.bodyPlain,
-      from: msg.fromAddress,
-      from_name: msg.fromName,
-      received_at: Math.floor(msg.createdAt.getTime() / 1000)
+      ttl: msg.ttl
     }))
   });
 });

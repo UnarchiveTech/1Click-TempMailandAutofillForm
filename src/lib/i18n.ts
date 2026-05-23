@@ -1,5 +1,7 @@
 import { getLocaleFromNavigator, init, locale, register } from 'svelte-i18n';
 
+export { getLocaleFromNavigator };
+
 register('en', () => import('./locales/en.json'));
 register('es', () => import('./locales/es.json'));
 register('fr', () => import('./locales/fr.json'));
@@ -8,8 +10,29 @@ register('ja', () => import('./locales/ja.json'));
 register('zh', () => import('./locales/zh.json'));
 register('ar', () => import('./locales/ar.json'));
 
+// Map full browser locale codes to our supported language codes
+function mapLocale(browserLocale: string): string {
+  const supportedLocales = ['en', 'es', 'fr', 'de', 'ja', 'zh', 'ar'];
+  const langCode = browserLocale.split('-')[0].toLowerCase();
+
+  // Direct match
+  if (supportedLocales.includes(langCode)) {
+    return langCode;
+  }
+
+  // Specific mappings
+  const localeMap: Record<string, string> = {
+    zh: 'zh', // zh-CN, zh-TW, etc.
+    ja: 'ja',
+    ar: 'ar',
+  };
+
+  return localeMap[langCode] || 'en';
+}
+
 // Set locale immediately before init to prevent initialization errors
-const initialLocale = getLocaleFromNavigator() || 'en';
+const browserLocale = getLocaleFromNavigator() || 'en';
+const initialLocale = mapLocale(browserLocale);
 locale.set(initialLocale);
 
 // Initialize with the set locale

@@ -18,7 +18,8 @@
     "yes": "是",
     "no": "否",
     "archive": "归档",
-    "unarchive": "取消归档"
+    "unarchive": "取消归档",
+    "restore": "恢复"
   },
   "inbox": {
     "title": "收件箱",
@@ -45,6 +46,9 @@
     "autoCopyDescription": "生成后复制到剪贴板",
     "autoRenew": "自动续期",
     "autoRenewDescription": "在过期前自动续期",
+    "emailRetention": "邮件保留",
+    "emailRetentionDescription": "本地保留邮件的时间",
+    "storageUsage": "存储使用量",
     "appearance": "外观",
     "theme": "主题",
     "light": "浅色",

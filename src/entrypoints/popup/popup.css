@@ -27,100 +27,56 @@
 body {
   background-color: var(--md-background);
   color: var(--md-on-background);
+  font-family:
+    ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Segoe UI Emoji",
+    "Apple Color Emoji", "Noto Color Emoji", Roboto, "Helvetica Neue", Arial, sans-serif;
 }
 
-/* Dynamic action buttons - light mode (data-theme="light") */
-[data-theme="light"] .zinc-btn-copy {
-  background-color: color-mix(in srgb, var(--md-primary) 10%, white);
-  color: color-mix(in srgb, var(--md-primary) 90%, black);
+/* Dynamic action buttons - using Material Design color tokens */
+.btn-primary {
+  background-color: var(--md-primary);
+  color: var(--md-on-primary);
 }
-[data-theme="light"] .zinc-btn-copy:hover {
-  background-color: color-mix(in srgb, var(--md-primary) 20%, white);
+.btn-primary:hover {
+  filter: brightness(1.1);
 }
-[data-theme="light"] .zinc-btn-copy .zinc-btn-icon svg {
-  stroke: color-mix(in srgb, var(--md-primary) 90%, black);
-}
-[data-theme="light"] .zinc-btn-qr {
-  background-color: color-mix(in srgb, var(--md-primary) 20%, white);
-  color: color-mix(in srgb, var(--md-primary) 80%, black);
-}
-[data-theme="light"] .zinc-btn-qr:hover {
-  background-color: color-mix(in srgb, var(--md-primary) 40%, white);
-}
-[data-theme="light"] .zinc-btn-qr .zinc-btn-icon svg {
-  stroke: color-mix(in srgb, var(--md-primary) 80%, black);
-}
-[data-theme="light"] .zinc-btn-forget {
-  background-color: color-mix(in srgb, var(--md-primary) 40%, white);
-  color: color-mix(in srgb, var(--md-primary) 70%, black);
-}
-[data-theme="light"] .zinc-btn-forget:hover {
-  background-color: color-mix(in srgb, var(--md-primary) 70%, white);
-}
-[data-theme="light"] .zinc-btn-forget .zinc-btn-icon svg {
-  stroke: color-mix(in srgb, var(--md-primary) 70%, black);
-}
-[data-theme="light"] .zinc-btn-archive {
-  background-color: color-mix(in srgb, var(--md-primary) 70%, white);
-  color: white;
-}
-[data-theme="light"] .zinc-btn-archive:hover {
-  background-color: color-mix(in srgb, var(--md-primary) 85%, white);
-}
-[data-theme="light"] .zinc-btn-archive .zinc-btn-icon-inv svg {
-  stroke: white;
-}
-[data-theme="light"] .zinc-btn-icon {
-  background-color: rgba(0, 0, 0, 0.08);
-}
-[data-theme="light"] .zinc-btn-icon-inv {
-  background-color: rgba(255, 255, 255, 0.25);
+.btn-primary .btn-icon svg {
+  stroke: var(--md-on-primary);
 }
 
-/* Dynamic action buttons - dark mode (data-theme="dark") */
-[data-theme="dark"] .zinc-btn-copy {
-  background-color: color-mix(in srgb, var(--md-primary) 90%, black);
-  color: white;
+.btn-secondary {
+  background-color: var(--md-secondary);
+  color: var(--md-on-secondary);
 }
-[data-theme="dark"] .zinc-btn-copy:hover {
-  background-color: color-mix(in srgb, var(--md-primary) 70%, black);
+.btn-secondary:hover {
+  filter: brightness(1.1);
 }
-[data-theme="dark"] .zinc-btn-copy .zinc-btn-icon svg {
-  stroke: white;
+.btn-secondary .btn-icon svg {
+  stroke: var(--md-on-secondary);
 }
-[data-theme="dark"] .zinc-btn-qr {
-  background-color: color-mix(in srgb, var(--md-primary) 70%, black);
-  color: white;
+
+.btn-tertiary {
+  background-color: var(--md-tertiary);
+  color: var(--md-on-tertiary);
 }
-[data-theme="dark"] .zinc-btn-qr:hover {
-  background-color: color-mix(in srgb, var(--md-primary) 50%, black);
+.btn-tertiary:hover {
+  filter: brightness(1.1);
 }
-[data-theme="dark"] .zinc-btn-qr .zinc-btn-icon svg {
-  stroke: white;
+.btn-tertiary .btn-icon svg {
+  stroke: var(--md-on-tertiary);
 }
-[data-theme="dark"] .zinc-btn-forget {
-  background-color: color-mix(in srgb, var(--md-primary) 50%, black);
-  color: white;
+
+.btn-error {
+  background-color: var(--md-error);
+  color: var(--md-on-error);
 }
-[data-theme="dark"] .zinc-btn-forget:hover {
-  background-color: color-mix(in srgb, var(--md-primary) 30%, black);
+.btn-error:hover {
+  filter: brightness(1.1);
 }
-[data-theme="dark"] .zinc-btn-forget .zinc-btn-icon svg {
-  stroke: white;
+.btn-error .btn-icon svg {
+  stroke: var(--md-on-error);
 }
-[data-theme="dark"] .zinc-btn-archive {
-  background-color: color-mix(in srgb, var(--md-primary) 30%, black);
-  color: white;
-}
-[data-theme="dark"] .zinc-btn-archive:hover {
-  background-color: color-mix(in srgb, var(--md-primary) 15%, black);
-}
-[data-theme="dark"] .zinc-btn-archive .zinc-btn-icon-inv svg {
-  stroke: white;
-}
-[data-theme="dark"] .zinc-btn-icon {
-  background-color: rgba(255, 255, 255, 0.12);
-}
-[data-theme="dark"] .zinc-btn-icon-inv {
+
+.btn-icon {
   background-color: rgba(255, 255, 255, 0.2);
 }

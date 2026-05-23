@@ -5,7 +5,6 @@
 import { browser } from 'wxt/browser';
 import { addActivityEvent } from '@/utils/activity-tracker.js';
 import { DEBUG, MAX_STORED_EMAILS_PER_INBOX } from '@/utils/constants.js';
-// biome-ignore lint/correctness/noUnusedImports: log is used in the file
 import { log, logError } from '@/utils/logger.js';
 import type {
   Account,
@@ -42,51 +41,118 @@ function playNotificationSound() {
   }
 }
 
-const ACTIVE_EMAIL_RETENTION_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
-const ARCHIVED_EMAIL_RETENTION_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
+const _ACTIVE_EMAIL_RETENTION_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+const _ARCHIVED_EMAIL_RETENTION_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
+
+// Check if storage quota is exceeded
+async function isQuotaExceeded(error: unknown): Promise<boolean> {
+  if (error instanceof DOMException) {
+    return error.name === 'QuotaExceededError' || error.code === 22;
+  }
+  if (error instanceof Error && error.message.includes('quota')) {
+    return true;
+  }
+  return false;
+}
 
 export async function getStoredEmails(inboxAddress: string): Promise<Email[]> {
-  const { storedEmails = {} } = (await browser.storage.local.get('storedEmails')) as {
-    storedEmails?: Record<string, Email[]>;
-  };
-  return storedEmails[inboxAddress] || [];
+  try {
+    const { storedEmails = {} } = (await browser.storage.local.get('storedEmails')) as {
+      storedEmails?: Record<string, Email[]>;
+    };
+    return storedEmails[inboxAddress] || [];
+  } catch (error: unknown) {
+    if (await isQuotaExceeded(error)) {
+      logError('Storage quota exceeded, attempting to clean up old emails', { inboxAddress });
+      // Try to clean up old emails based on retention settings
+      const { emailRetentionDays = 30 } = (await browser.storage.local.get([
+        'emailRetentionDays',
+      ])) as {
+        emailRetentionDays?: number;
+      };
+      await cleanupOldStoredEmails(emailRetentionDays, emailRetentionDays * 3);
+      // Retry getting stored emails
+      try {
+        const { storedEmails = {} } = (await browser.storage.local.get('storedEmails')) as {
+          storedEmails?: Record<string, Email[]>;
+        };
+        return storedEmails[inboxAddress] || [];
+      } catch (retryError: unknown) {
+        if (await isQuotaExceeded(retryError)) {
+          logError('Storage quota still exceeded after cleanup', { inboxAddress });
+          return [];
+        } else {
+          throw retryError;
+        }
+      }
+    } else {
+      throw error;
+    }
+  }
 }
 
 export async function clearStoredEmails(inboxAddress: string): Promise<void> {
-  const { storedEmails = {} } = (await browser.storage.local.get('storedEmails')) as {
-    storedEmails?: Record<string, Email[]>;
-  };
-  delete storedEmails[inboxAddress];
-  await browser.storage.local.set({ storedEmails });
-  log(`Cleared stored emails for ${inboxAddress}`);
-}
+  try {
+    const { storedEmails = {}, archivedEmails = {} } = (await browser.storage.local.get([
+      'storedEmails',
+      'archivedEmails',
+    ])) as {
+      storedEmails?: Record<string, Email[]>;
+      archivedEmails?: Record<string, Email[]>;
+    };
 
-export async function archiveInboxEmails(inboxAddress: string): Promise<void> {
-  const { storedEmails = {}, archivedEmails = {} } = (await browser.storage.local.get([
-    'storedEmails',
-    'archivedEmails',
-  ])) as {
-    storedEmails?: Record<string, Email[]>;
-    archivedEmails?: Record<string, Email[]>;
-  };
+    if (storedEmails[inboxAddress] && storedEmails[inboxAddress].length > 0) {
+      if (!archivedEmails[inboxAddress]) {
+        archivedEmails[inboxAddress] = [];
+      }
 
-  if (storedEmails[inboxAddress] && storedEmails[inboxAddress].length > 0) {
-    if (!archivedEmails[inboxAddress]) {
-      archivedEmails[inboxAddress] = [];
+      const emailsToArchive = storedEmails[inboxAddress].map((email: Email) => ({
+        ...email,
+        archived: true,
+        archived_at: Date.now(),
+        original_inbox: inboxAddress,
+      }));
+
+      archivedEmails[inboxAddress].push(...emailsToArchive);
+      delete storedEmails[inboxAddress];
+
+      await browser.storage.local.set({ storedEmails, archivedEmails });
+      log(`Archived ${emailsToArchive.length} emails for expired inbox: ${inboxAddress}`);
     }
-
-    const emailsToArchive = storedEmails[inboxAddress].map((email: Email) => ({
-      ...email,
-      archived: true,
-      archived_at: Date.now(),
-      original_inbox: inboxAddress,
-    }));
-
-    archivedEmails[inboxAddress].push(...emailsToArchive);
-    delete storedEmails[inboxAddress];
-
-    await browser.storage.local.set({ storedEmails, archivedEmails });
-    log(`Archived ${emailsToArchive.length} emails for expired inbox: ${inboxAddress}`);
+  } catch (error: unknown) {
+    if (await isQuotaExceeded(error)) {
+      logError('Storage quota exceeded during archive, attempting cleanup', { inboxAddress });
+      const { emailRetentionDays = 30 } = (await browser.storage.local.get([
+        'emailRetentionDays',
+      ])) as {
+        emailRetentionDays?: number;
+      };
+      await cleanupOldStoredEmails(emailRetentionDays, emailRetentionDays * 3);
+      // Retry archiving
+      const { storedEmails = {}, archivedEmails = {} } = (await browser.storage.local.get([
+        'storedEmails',
+        'archivedEmails',
+      ])) as {
+        storedEmails?: Record<string, Email[]>;
+        archivedEmails?: Record<string, Email[]>;
+      };
+      if (storedEmails[inboxAddress] && storedEmails[inboxAddress].length > 0) {
+        if (!archivedEmails[inboxAddress]) {
+          archivedEmails[inboxAddress] = [];
+        }
+        const emailsToArchive = storedEmails[inboxAddress].map((email: Email) => ({
+          ...email,
+          archived: true,
+          archived_at: Date.now(),
+          original_inbox: inboxAddress,
+        }));
+        archivedEmails[inboxAddress].push(...emailsToArchive);
+        delete storedEmails[inboxAddress];
+        await browser.storage.local.set({ storedEmails, archivedEmails });
+      }
+    } else {
+      throw error;
+    }
   }
 }
 
@@ -111,7 +177,15 @@ export async function getArchivedEmails(inboxAddress?: string): Promise<Email[]>
   );
 }
 
-export async function cleanupOldStoredEmails(): Promise<void> {
+export async function cleanupOldStoredEmails(
+  activeRetentionDays: number = 30,
+  archivedRetentionDays: number = 90
+): Promise<void> {
+  // If retention is 0, never delete
+  if (activeRetentionDays === 0 && archivedRetentionDays === 0) {
+    return;
+  }
+
   const { storedEmails = {}, archivedEmails = {} } = (await browser.storage.local.get([
     'storedEmails',
     'archivedEmails',
@@ -119,8 +193,11 @@ export async function cleanupOldStoredEmails(): Promise<void> {
     storedEmails?: Record<string, Email[]>;
     archivedEmails?: Record<string, Email[]>;
   };
-  const activeThreshold = Date.now() - ACTIVE_EMAIL_RETENTION_MS;
-  const archivedThreshold = Date.now() - ARCHIVED_EMAIL_RETENTION_MS;
+
+  const activeThreshold =
+    activeRetentionDays === 0 ? 0 : Date.now() - activeRetentionDays * 24 * 60 * 60 * 1000;
+  const archivedThreshold =
+    archivedRetentionDays === 0 ? 0 : Date.now() - archivedRetentionDays * 24 * 60 * 60 * 1000;
   let totalCleaned = 0;
 
   for (const [address, emails] of Object.entries(storedEmails)) {
@@ -208,7 +285,7 @@ export async function applyFiltersAndProcessMessages(
 
     if (latestNewMessageWithOtp) {
       try {
-        // biome-ignore lint/suspicious/noExplicitAny: Chrome tabs API type
+        // biome-ignore lint/suspicious/noExplicitAny: Chrome tabs API callback type not fully typed in WXT
         browser.tabs.query({ active: true, currentWindow: true }, (tabs: any[]) => {
           if (tabs.length > 0 && tabs[0].id) {
             browser.tabs
@@ -356,4 +433,109 @@ export async function applyFiltersAndProcessMessages(
   });
 
   return filteredMessages;
+}
+
+export async function getStorageUsage(): Promise<{
+  totalBytes: number;
+  totalMB: number;
+  breakdown: Record<string, number>;
+  categories: { emails: number; settings: number; cached: number; other: number };
+}> {
+  const result = await browser.storage.local.get(null);
+  let totalBytes = 0;
+  const breakdown: Record<string, number> = {};
+  let emailsBytes = 0;
+  let settingsBytes = 0;
+  let cachedBytes = 0;
+  let otherBytes = 0;
+
+  for (const [key, value] of Object.entries(result)) {
+    const size = new Blob([JSON.stringify(value)]).size;
+    totalBytes += size;
+    breakdown[key] = size;
+
+    // Categorize by key prefix
+    if (key === 'storedEmails' || key === 'archivedEmails') {
+      emailsBytes += size;
+    } else if (
+      key.startsWith('settings_') ||
+      key === 'identities' ||
+      key === 'selectedIdentityId' ||
+      key === 'autoCopy' ||
+      key === 'autoRenew' ||
+      key === 'selectedProvider' ||
+      key === 'developerSettings' ||
+      key === 'enableLogging' ||
+      key === 'emailRetentionDays' ||
+      key === 'useCustomPassword' ||
+      key === 'customPassword' ||
+      key === 'useCustomName' ||
+      key === 'customFirstName' ||
+      key === 'customLastName' ||
+      key === 'customColor' ||
+      key === 'contrastLevel'
+    ) {
+      settingsBytes += size;
+    } else if (key === 'favicon_success_cache' || key === 'providerInstances') {
+      cachedBytes += size;
+    } else {
+      otherBytes += size;
+    }
+  }
+
+  return {
+    totalBytes,
+    totalMB: totalBytes / (1024 * 1024),
+    breakdown,
+    categories: {
+      emails: emailsBytes / (1024 * 1024),
+      settings: settingsBytes / (1024 * 1024),
+      cached: cachedBytes / (1024 * 1024),
+      other: otherBytes / (1024 * 1024),
+    },
+  };
+}
+
+export async function getEmailsToBeDeleted(
+  retentionDays: number
+): Promise<{ activeEmails: number; archivedEmails: number; totalEmails: number }> {
+  // If retention is 0, no emails will be deleted
+  if (retentionDays === 0) {
+    return { activeEmails: 0, archivedEmails: 0, totalEmails: 0 };
+  }
+
+  const { storedEmails = {}, archivedEmails = {} } = (await browser.storage.local.get([
+    'storedEmails',
+    'archivedEmails',
+  ])) as {
+    storedEmails?: Record<string, Email[]>;
+    archivedEmails?: Record<string, Email[]>;
+  };
+
+  const threshold = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+  let activeEmailsToDelete = 0;
+  let archivedEmailsToDelete = 0;
+
+  for (const [_address, emails] of Object.entries(storedEmails)) {
+    const filteredEmails = emails.filter((email: Email & { stored_at?: number }) => {
+      const emailAge = email.stored_at || email.received_at * 1000;
+      return emailAge <= threshold;
+    });
+    activeEmailsToDelete += filteredEmails.length;
+  }
+
+  for (const [_address, emails] of Object.entries(archivedEmails)) {
+    const filteredEmails = emails.filter((email: Email & { archived_at?: number }) => {
+      const emailAge =
+        (email as Email & { archived_at?: number }).archived_at || email.received_at * 1000;
+      return emailAge <= threshold;
+    });
+    archivedEmailsToDelete += filteredEmails.length;
+  }
+
+  return {
+    activeEmails: activeEmailsToDelete,
+    archivedEmails: archivedEmailsToDelete,
+    totalEmails: activeEmailsToDelete + archivedEmailsToDelete,
+  };
 }

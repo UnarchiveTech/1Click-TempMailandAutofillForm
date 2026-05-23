@@ -13,9 +13,9 @@ let {
   showIcon?: boolean;
 }>();
 
-const buttonClass = $derived(() => {
+const buttonClass = $derived.by(() => {
   const base =
-    'text-[10px] font-semibold tracking-wider px-2 py-0.5 rounded-full w-fit text-left transition-all duration-200 flex items-center gap-1.5 cursor-pointer';
+    'text-[11px] font-semibold tracking-wider px-2 py-0.5 rounded-full w-fit text-left transition-all duration-200 flex items-center gap-1.5 cursor-pointer';
 
   if (tagColor) {
     return `${base} text-white ${showIcon ? 'border border-md-outline-variant' : ''}`;
@@ -28,7 +28,7 @@ const buttonClass = $derived(() => {
   return `${base} bg-md-surface-variant/5 text-md-on-surface/40 italic hover:bg-md-surface-variant/10 ${showIcon ? 'border border-md-outline-variant bg-md-surface-variant' : ''}`;
 });
 
-const iconClass = $derived(() => {
+const iconClass = $derived.by(() => {
   return tagColor ? 'w-3 h-3 text-white/70' : 'w-3 h-3 text-md-on-surface/50';
 });
 
@@ -41,7 +41,7 @@ function handleKeyDown(e: KeyboardEvent) {
 </script>
 
 <button
-  class={buttonClass()}
+  class={buttonClass}
   style:background-color={tagColor}
   style:transition="background-color 0.2s ease"
   onclick={onClick}
@@ -50,7 +50,7 @@ function handleKeyDown(e: KeyboardEvent) {
   title={tag ? `Tag: ${tag}` : 'Add a tag'}
 >
   {#if showIcon}
-    <IconTag class={iconClass()} />
+    <IconTag class={iconClass} />
   {/if}
   {tag || 'Add a tag'}
 </button>

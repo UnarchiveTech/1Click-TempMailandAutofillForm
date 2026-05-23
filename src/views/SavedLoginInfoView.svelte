@@ -2,7 +2,7 @@
 import IconCopy from '@/components/icons/IconCopy.svelte';
 import IconLock from '@/components/icons/IconLock.svelte';
 import IconTrash from '@/components/icons/IconTrash.svelte';
-import type { SavedLogin } from '@/utils/types.js';
+import type { CredentialsHistoryItem } from '@/utils/types.js';
 
 let {
   context = 'popup',
@@ -12,7 +12,7 @@ let {
 } = $props<{
   context?: 'popup' | 'sidepanel' | 'app';
   onBack?: () => void;
-  savedLogins?: SavedLogin[];
+  savedLogins?: CredentialsHistoryItem[];
   onDelete?: (id: string) => void;
 }>();
 
@@ -33,9 +33,9 @@ function copyToClipboard(text: string) {
         <div class="p-3">
           <div class="flex justify-between items-start">
             <div class="flex-1 space-y-2">
-              <div class="font-semibold text-sm">{login.website}</div>
+              <div class="font-semibold text-sm">{login.domain}</div>
               <div class="flex items-center gap-2 text-xs text-md-on-surface/60">
-                <span>Email: {login.email}</span>
+                <span>Email: {login.email || 'N/A'}</span>
                 <button class="w-5 h-5 flex items-center justify-center rounded-lg bg-transparent hover:bg-md-secondary-container transition-colors" aria-label="Copy email" onclick={() => copyToClipboard(login.email)}>
                   <IconCopy class="w-3 h-3" />
                 </button>

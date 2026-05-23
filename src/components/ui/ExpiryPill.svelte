@@ -25,7 +25,11 @@ let timeText = $state('');
 $effect(() => {
   const h = Math.floor(expiryTime / 60);
   const m = expiryTime % 60;
-  timeText = h > 0 ? `${h}:${m.toString().padStart(2, '0')}` : `${Math.ceil(expiryTime)}m`;
+  if (h > 0) {
+    timeText = m > 0 ? `${h}h ${m}m` : `${h}h`;
+  } else {
+    timeText = `${Math.ceil(expiryTime)}m`;
+  }
 });
 
 // Status text based on auto-renew state
@@ -121,6 +125,7 @@ const borderGradient = $derived(
       <button
         class="clock-button {iconColorClass}"
         onclick={onToggleAutoRenew}
+        aria-label={autoRenew ? 'Disable auto-renew' : 'Enable auto-renew'}
         title={autoRenew ? 'Disable auto-renew' : 'Enable auto-renew'}
       >
         <IconAutoRenew />

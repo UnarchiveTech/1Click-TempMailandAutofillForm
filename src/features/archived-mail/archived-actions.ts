@@ -42,10 +42,10 @@ export async function restoreArchivedInbox(
 ) {
   try {
     const result = (await ext.storage.local.get(['inboxes'])) as {
-      inboxes?: Array<{ id: string; archived: boolean }>;
+      inboxes?: Array<{ id: string; accountStatus?: string }>;
     };
     const inboxes = result.inboxes || [];
-    const updated = inboxes.map((i) => (i.id === email.id ? { ...i, archived: false } : i));
+    const updated = inboxes.map((i) => (i.id === email.id ? { ...i, accountStatus: 'active' } : i));
     await ext.storage.local.set({ inboxes: updated });
     setters.setArchivedEmails(state.archivedEmails.filter((e) => e.id !== email.id));
     setters.setShowToast('Email restored');

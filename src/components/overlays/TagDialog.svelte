@@ -1,4 +1,5 @@
 <script lang="ts">
+import IconX from '@/components/icons/IconX.svelte';
 import { setupFocusTrap } from '@/utils/focusTrap.js';
 
 interface Props {
@@ -53,6 +54,10 @@ $effect(() => {
 
 function handleSave() {
   const tagToSave = selectedExistingTag || tagInput.trim();
+  if (!tagToSave) {
+    onSave('', '');
+    return;
+  }
   const colorToSave =
     selectedExistingTag && tagColors[selectedExistingTag]
       ? tagColors[selectedExistingTag]
@@ -85,13 +90,12 @@ function clearSelection() {
     ></div>
 
     <button
+      id="button-close-dialog"
       class="absolute top-4 right-4 z-10 w-9 h-9 rounded-full bg-md-surface hover:bg-md-surface-variant flex items-center justify-center shadow-md transition-colors"
       aria-label="Close dialog"
       onclick={onClose}
     >
-      <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 text-md-on-surface/70" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
-        <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
-      </svg>
+      <IconX class="w-4 h-4 text-md-on-surface/70" />
     </button>
 
     <div
@@ -107,10 +111,12 @@ function clearSelection() {
       <!-- Input field -->
       <div class="flex items-center gap-2">
         <input
+          id="input-tag-name"
           type="text"
           class="flex-1 px-3 py-2 rounded-lg border border-md-outline-variant text-sm bg-md-surface-container-low outline-none focus:border-md-primary focus:ring-1 focus:ring-md-primary"
           placeholder="Enter tag name..."
           aria-label="Tag name"
+          maxlength="12"
           bind:value={tagInput}
           oninput={() => {
             // Clear selected existing tag when user types in input or clears it
@@ -125,13 +131,12 @@ function clearSelection() {
         />
         {#if selectedExistingTag || tagInput}
           <button
+            id="button-clear-tag"
             class="w-8 h-8 flex items-center justify-center rounded-lg bg-transparent hover:bg-md-surface-variant transition-colors"
             aria-label="Clear"
             onclick={clearSelection}
           >
-            <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 text-md-on-surface/60" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
-            </svg>
+            <IconX class="w-4 h-4 text-md-on-surface/60" />
           </button>
         {/if}
       </div>
@@ -142,6 +147,7 @@ function clearSelection() {
         <div class="flex items-center gap-2 flex-wrap">
           {#each ['#6366F1', '#EF4444', '#F59E0B', '#10B981', '#3B82F6', '#8B5CF6', '#EC4899', '#64748B'] as color}
             <button
+              id="button-color-{color.replace('#', '')}"
               class="w-6 h-6 rounded-full border-2 {selectedColor === color ? 'border-md-secondary-container scale-110' : 'border-transparent'} transition-all"
               style="background-color: {color};"
               onclick={() => selectedColor = color}
@@ -158,6 +164,7 @@ function clearSelection() {
           <div class="flex flex-wrap gap-2 max-h-40 overflow-y-auto" style="scrollbar-width: thin; scrollbar-color: var(--md-primary) transparent;">
             {#each existingTags as tag}
               <button
+                id="button-select-tag-{tag}"
                 class="px-2 py-1 text-xs rounded-full flex items-center gap-1 {selectedExistingTag === tag ? 'bg-md-primary text-md-on-primary' : 'bg-transparent hover:bg-md-surface-variant'} transition-colors"
                 onclick={() => selectExistingTag(tag)}
                 aria-label="Select tag {tag}"
@@ -175,6 +182,7 @@ function clearSelection() {
       <!-- Action buttons -->
       <div class="flex gap-2 pt-2">
         <button
+          id="button-cancel-tag"
           class="flex-1 px-3 py-1.5 text-sm rounded-xl bg-md-secondary text-md-on-secondary hover:bg-md-secondary/90 transition-colors"
           aria-label="Cancel"
           onclick={onClose}
@@ -182,6 +190,7 @@ function clearSelection() {
           Cancel
         </button>
         <button
+          id="button-save-tag"
           class="flex-1 px-3 py-1.5 text-sm rounded-xl bg-md-primary text-md-on-primary hover:bg-md-primary/90 transition-colors"
           aria-label="Save tag"
           onclick={handleSave}

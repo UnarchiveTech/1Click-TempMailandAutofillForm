@@ -56,6 +56,7 @@ export interface ProviderConfig {
   name: string;
   displayName: string;
   apiUrl: string;
+  websiteUrl?: string;
   auth: {
     type: 'query_parameter' | 'header';
     paramName?: string;
@@ -94,6 +95,10 @@ export interface ProviderConfig {
   customEmail?: {
     supported: boolean;
     operation?: string;
+  };
+  multiDomain?: {
+    enabled: boolean;
+    domains: string[];
   };
   ui?: {
     canUnarchive: boolean | 'ifNotExpired';

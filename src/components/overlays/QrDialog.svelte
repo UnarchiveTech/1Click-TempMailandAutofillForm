@@ -1,6 +1,8 @@
 <script lang="ts">
 import QRCode from 'qrcode';
 import { onMount } from 'svelte';
+import { rgbToHex } from '@/utils/color-utils.js';
+import { setupFocusTrap } from '@/utils/focusTrap.js';
 import { logError } from '@/utils/logger.js';
 
 interface Props {
@@ -23,27 +25,61 @@ let {
 }: Props = $props();
 
 let localCanvas: HTMLCanvasElement | null = null;
+let cleanupFocusTrap: (() => void) | null = null;
+
+// Setup focus trap when dialog opens
+$effect(() => {
+  if (open && qrDialogElement) {
+    setTimeout(() => {
+      if (qrDialogElement) {
+        cleanupFocusTrap = setupFocusTrap(qrDialogElement);
+      }
+    }, 50);
+  }
+  return () => {
+    if (cleanupFocusTrap) {
+      cleanupFocusTrap();
+      cleanupFocusTrap = null;
+    }
+  };
+});
 
 async function generateQR() {
-  if (!localCanvas || !selectedEmail) return;
+  if (!localCanvas || !selectedEmail) {
+    logError('QR error: Missing canvas or email', {
+      canvas: !!localCanvas,
+      email: !!selectedEmail,
+    });
+    return;
+  }
   try {
     const primaryColor =
       getComputedStyle(document.documentElement).getPropertyValue('--md-primary').trim() ||
       getComputedStyle(document.documentElement).getPropertyValue('--md-primary').trim() ||
       '#000000';
+
+    // Convert RGB to hex if necessary
+    const darkColor = rgbToHex(primaryColor);
+    const lightColor = rgbToHex(
+      getComputedStyle(document.documentElement).getPropertyValue('--md-surface').trim() ||
+        getComputedStyle(document.documentElement).getPropertyValue('--md-background').trim() ||
+        '#ffffff'
+    );
+
     await QRCode.toCanvas(localCanvas, selectedEmail, {
       width: 160,
       margin: 2,
       color: {
-        dark: primaryColor,
-        light:
-          getComputedStyle(document.documentElement).getPropertyValue('--md-surface').trim() ||
-          getComputedStyle(document.documentElement).getPropertyValue('--md-background').trim() ||
-          '#ffffff',
+        dark: darkColor,
+        light: lightColor,
       },
     });
   } catch (e) {
-    logError('QR error:', e);
+    logError('QR error: Failed to generate QR code', {
+      error: e instanceof Error ? e.message : String(e),
+      email: selectedEmail.substring(0, 50),
+      canvas: !!localCanvas,
+    });
   }
 }
 

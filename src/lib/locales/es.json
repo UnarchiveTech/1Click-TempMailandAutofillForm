@@ -18,7 +18,8 @@
     "yes": "Sí",
     "no": "No",
     "archive": "Archivar",
-    "unarchive": "Desarchivar"
+    "unarchive": "Desarchivar",
+    "restore": "Restaurar"
   },
   "inbox": {
     "title": "Bandeja de entrada",
@@ -45,6 +46,9 @@
     "autoCopyDescription": "Copiar al portapapeles después de generar",
     "autoRenew": "Renovación automática",
     "autoRenewDescription": "Renovar automáticamente antes de la expiración",
+    "emailRetention": "Retención de correos",
+    "emailRetentionDescription": "Cuánto tiempo mantener correos localmente",
+    "storageUsage": "Uso de almacenamiento",
     "appearance": "Apariencia",
     "theme": "Tema",
     "light": "Claro",

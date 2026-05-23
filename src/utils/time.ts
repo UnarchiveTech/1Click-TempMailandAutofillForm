@@ -31,8 +31,8 @@ export function formatTimeLeft(ms: number): string {
 }
 
 export function getEmailStatus(inbox: Account): string {
-  if (inbox.archived) return 'archived';
-  if (inbox.deleted) return 'deleted';
+  if (inbox.accountStatus === 'deleted') return 'deleted';
+  if (inbox.accountStatus === 'archived') return 'archived';
   if (Date.now() > (inbox.expiresAt || 0)) return 'expired';
   return 'active';
 }

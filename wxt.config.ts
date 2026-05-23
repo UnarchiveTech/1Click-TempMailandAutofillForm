@@ -10,6 +10,9 @@ export default defineConfig({
         '@': '/src',
       },
     },
+    build: {
+      chunkSizeWarningLimit: 600,
+    },
   }),
   manifestVersion: 3,
   srcDir: 'src',

@@ -1,4 +1,5 @@
 import QRCode from 'qrcode';
+import { rgbToHex } from '@/utils/color-utils.js';
 import { logError } from '@/utils/logger.js';
 
 export interface QRState {
@@ -47,25 +48,38 @@ export function closeQrDialog(
 }
 
 export async function generateQRCode(canvas: HTMLCanvasElement, text: string, customColor: string) {
-  if (!canvas || !text) return;
+  if (!canvas || !text) {
+    logError('QR error: Missing canvas or text', { canvas: !!canvas, text });
+    return;
+  }
   try {
     // Get the primary color from CSS variable or use custom color
     const primaryColor =
       customColor ||
       getComputedStyle(document.documentElement).getPropertyValue('--md-primary').trim() ||
       'var(--md-primary)';
+
+    // Convert RGB to hex if necessary
+    const darkColor = rgbToHex(primaryColor);
+    const lightColor = rgbToHex(
+      getComputedStyle(document.documentElement).getPropertyValue('--md-surface').trim() ||
+        'var(--md-surface)'
+    );
+
     await QRCode.toCanvas(canvas, text, {
       width: 160,
       margin: 2,
       color: {
-        dark: primaryColor,
-        light:
-          getComputedStyle(document.documentElement).getPropertyValue('--md-surface').trim() ||
-          'var(--md-surface)',
+        dark: darkColor,
+        light: lightColor,
       },
     });
   } catch (e) {
-    logError('QR error:', e);
+    logError('QR error: Failed to generate QR code', {
+      error: e instanceof Error ? e.message : String(e),
+      text: text.substring(0, 50),
+      canvas: !!canvas,
+    });
   }
 }
 

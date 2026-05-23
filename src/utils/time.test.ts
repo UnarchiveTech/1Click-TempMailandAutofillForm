@@ -89,7 +89,7 @@ describe('getEmailStatus', () => {
       provider: 'test',
       createdAt: Date.now(),
       expiresAt: Date.now() + 3600000,
-      archived: true,
+      accountStatus: 'archived',
     };
     expect(getEmailStatus(inbox)).toBe('archived');
   });
@@ -101,7 +101,6 @@ describe('getEmailStatus', () => {
       provider: 'test',
       createdAt: Date.now(),
       expiresAt: Date.now() - 3600000,
-      archived: false,
     };
     expect(getEmailStatus(inbox)).toBe('expired');
   });
@@ -113,7 +112,6 @@ describe('getEmailStatus', () => {
       provider: 'test',
       createdAt: Date.now(),
       expiresAt: Date.now() + 3600000,
-      archived: false,
     };
     expect(getEmailStatus(inbox)).toBe('active');
   });

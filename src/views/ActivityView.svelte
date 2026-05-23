@@ -1,12 +1,15 @@
 <script lang="ts">
 import { onDestroy, onMount } from 'svelte';
+import { browser } from 'wxt/browser';
 import IconBarChart from '@/components/icons/IconBarChart.svelte';
 import IconBell from '@/components/icons/IconBell.svelte';
+import IconChevronDown from '@/components/icons/IconChevronDown.svelte';
 import IconClock from '@/components/icons/IconClock.svelte';
 import IconEnvelope from '@/components/icons/IconEnvelope.svelte';
 import IconMail from '@/components/icons/IconMail.svelte';
 import IconRefresh from '@/components/icons/IconRefresh.svelte';
-import { getActivityEvents } from '@/utils/activity-tracker.js';
+import IconTrash from '@/components/icons/IconTrash.svelte';
+import { clearActivityEvents, getActivityEvents } from '@/utils/activity-tracker.js';
 import type { ActivityEvent, Analytics } from '@/utils/types.js';
 
 let {
@@ -21,25 +24,88 @@ let {
   },
   loading = false,
   onLoadAnalytics = () => {},
+  onResetAnalytics = () => {},
 } = $props<{
   context?: 'popup' | 'sidepanel' | 'app';
   onBack?: () => void;
   analytics?: Analytics;
   loading?: boolean;
   onLoadAnalytics?: () => void;
+  onResetAnalytics?: () => void;
 }>();
 
 let refreshInterval: ReturnType<typeof setInterval> | null = null;
 let activityEvents = $state<ActivityEvent[]>([]);
 let loadingEvents = $state(false);
 
+// Filter states
+let activityTypeFilter = $state<string>('all');
+let addressFilter = $state<string>('all');
+let actionTypeDropdownOpen = $state(false);
+let fromDropdownOpen = $state(false);
+let fromSearch = $state('');
+
+// Reset confirmation dialog
+let resetDialogOpen = $state(false);
+
+async function handleReset() {
+  await clearActivityEvents();
+  await onResetAnalytics();
+  await loadActivityEvents();
+  resetDialogOpen = false;
+}
+
+// Derived filtered events
+let filteredEvents = $derived.by(() => {
+  return activityEvents.filter((event) => {
+    // Filter by activity type
+    if (activityTypeFilter !== 'all') {
+      if (activityTypeFilter === 'auto_extend' && event.type !== 'auto_extend') return false;
+      if (activityTypeFilter === 'inbox_created' && event.type !== 'account_created') return false;
+      if (activityTypeFilter === 'hard_reset' && event.type !== 'hard_reset') return false;
+      if (
+        activityTypeFilter === 'notification' &&
+        event.type !== 'notification_sent' &&
+        event.type !== 'toast_notification'
+      )
+        return false;
+    }
+    // Filter by address
+    if (addressFilter !== 'all' && event.data.inboxAddress !== addressFilter) return false;
+    return true;
+  });
+});
+
+// Get unique email addresses from events for From filter
+let uniqueAddresses = $derived.by(() => {
+  const addresses = new Set<string>();
+  activityEvents.forEach((event) => {
+    if (event.data.inboxAddress) {
+      addresses.add(event.data.inboxAddress);
+    }
+  });
+  return Array.from(addresses).sort();
+});
+
+async function recordRenderTime(renderTime: number) {
+  try {
+    await browser.runtime.sendMessage({ type: 'recordUIRenderTime', renderTime });
+  } catch (error) {
+    console.error('Failed to record UI render time:', error);
+  }
+}
+
 async function loadActivityEvents() {
+  const startTime = performance.now();
   loadingEvents = true;
   activityEvents = await getActivityEvents();
   loadingEvents = false;
+  const renderTime = performance.now() - startTime;
+  await recordRenderTime(renderTime);
 }
 
 onMount(() => {
+  const mountStartTime = performance.now();
   // Auto-refresh analytics every 30 seconds
   refreshInterval = setInterval(() => {
     onLoadAnalytics();
@@ -48,6 +114,8 @@ onMount(() => {
   // Load immediately on mount
   onLoadAnalytics();
   loadActivityEvents();
+  const mountRenderTime = performance.now() - mountStartTime;
+  recordRenderTime(mountRenderTime);
 });
 
 onDestroy(() => {
@@ -72,6 +140,10 @@ function getEventIcon(type: ActivityEvent['type']) {
       return IconClock;
     case 'toast_notification':
       return IconBell;
+    case 'auto_extend':
+      return IconRefresh;
+    case 'hard_reset':
+      return IconRefresh;
     default:
       return IconMail;
   }
@@ -93,6 +165,10 @@ function getEventTitle(type: ActivityEvent['type'], data: ActivityEvent['data'])
       return `Auto-filled OTP for ${data.website}`;
     case 'toast_notification':
       return data.message || 'Notification';
+    case 'auto_extend':
+      return `Auto-extended: ${data.inboxAddress}`;
+    case 'hard_reset':
+      return `Hard reset performed`;
     default:
       return 'Unknown event';
   }
@@ -114,6 +190,10 @@ function getEventSubtitle(type: ActivityEvent['type'], data: ActivityEvent['data
       return data.website;
     case 'toast_notification':
       return data.toastType || 'info';
+    case 'auto_extend':
+      return data.inboxAddress;
+    case 'hard_reset':
+      return 'All data cleared';
     default:
       return '';
   }
@@ -178,11 +258,128 @@ function formatTime(timestamp: number) {
     </div>
   </section>
 
+  <!-- ── Performance Metrics ── -->
+  {#if analytics.performance}
+    <section class="space-y-2">
+      <div class="flex items-center gap-2 mb-1">
+        <IconClock class="w-4 h-4 text-md-primary" />
+        <span class="text-sm font-semibold text-md-on-surface">Performance</span>
+      </div>
+
+      <div class="bg-md-primary-container rounded-xl px-4 py-3 space-y-3">
+        <!-- Email Fetch Time -->
+        <div class="flex items-center justify-between">
+          <div class="text-xs text-md-on-surface/70">Avg Email Fetch</div>
+          <div class="text-sm font-semibold text-md-primary">
+            {analytics.performance.emailFetchTimes.length > 0
+              ? `${(analytics.performance.emailFetchTimes.reduce((a: number, b: number) => a + b, 0) / analytics.performance.emailFetchTimes.length).toFixed(0)}ms`
+              : 'N/A'}
+          </div>
+        </div>
+
+        <!-- UI Render Time -->
+        <div class="flex items-center justify-between">
+          <div class="text-xs text-md-on-surface/70">Avg UI Render</div>
+          <div class="text-sm font-semibold text-md-secondary">
+            {analytics.performance.uiRenderTimes.length > 0
+              ? `${(analytics.performance.uiRenderTimes.reduce((a: number, b: number) => a + b, 0) / analytics.performance.uiRenderTimes.length).toFixed(0)}ms`
+              : 'N/A'}
+          </div>
+        </div>
+
+        <!-- Provider Latency -->
+        {#if Object.keys(analytics.performance.providerLatency).length > 0}
+          <div class="pt-2 border-t border-md-outline-variant/30">
+            <div class="text-xs text-md-on-surface/70 mb-2">Provider Latency</div>
+            {#each Object.entries(analytics.performance.providerLatency) as [provider, latencies]}
+              <div class="flex items-center justify-between mb-1 last:mb-0">
+                <div class="text-xs text-md-on-surface/60 capitalize">{provider}</div>
+                <div class="text-xs font-medium text-md-tertiary">
+                  {Array.isArray(latencies) && latencies.length > 0
+                    ? `${(latencies.reduce((a: number, b: number) => a + b, 0) / latencies.length).toFixed(0)}ms`
+                    : 'N/A'}
+                </div>
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </div>
+    </section>
+  {/if}
+
   <!-- ── Activity Timeline ── -->
   <section class="space-y-2">
     <div class="flex items-center gap-2 mb-1">
       <IconClock class="w-4 h-4 text-md-primary" />
       <span class="text-sm font-semibold text-md-on-surface">Recent Activity</span>
+    </div>
+
+    <!-- Filter pills -->
+    <div class="flex items-center gap-2 flex-wrap">
+      <!-- Action Type filter -->
+      <div class="relative shrink-0">
+        <button
+          class="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full border transition-colors {activityTypeFilter !== 'all' ? 'border-md-primary bg-md-primary/10 text-md-primary' : 'border-md-outline-variant bg-transparent text-md-on-surface/80 hover:bg-md-surface-variant'}"
+          aria-label="Filter by action type"
+          onclick={() => { actionTypeDropdownOpen = !actionTypeDropdownOpen; fromDropdownOpen = false; }}
+        >
+          Action: {activityTypeFilter === 'all' ? 'All' : activityTypeFilter === 'auto_extend' ? 'Auto-extend' : activityTypeFilter === 'inbox_created' ? 'New Inbox' : activityTypeFilter === 'hard_reset' ? 'Hard Reset' : activityTypeFilter === 'notification' ? 'Notification' : 'All'}
+          <IconChevronDown class="w-3 h-3" />
+        </button>
+        {#if actionTypeDropdownOpen}
+          <div class="absolute top-full left-0 mt-1 bg-md-surface border border-md-outline-variant rounded-xl shadow-lg z-[200] overflow-hidden min-w-[140px]">
+            {#each [['all', 'All'], ['auto_extend', 'Auto-extend'], ['inbox_created', 'New Inbox'], ['hard_reset', 'Hard Reset'], ['notification', 'Notification']] as [val, label]}
+              <button
+                class="w-full px-3 py-2 text-left text-xs hover:bg-md-surface-variant transition-colors {activityTypeFilter === val ? 'text-md-primary font-medium' : 'text-md-on-surface'}"
+                onclick={() => { activityTypeFilter = val; actionTypeDropdownOpen = false; }}
+              >
+                {label}
+              </button>
+            {/each}
+          </div>
+        {/if}
+      </div>
+
+      <!-- From filter -->
+      <div class="relative shrink-0">
+        <button
+          class="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full border transition-colors {addressFilter !== 'all' ? 'border-md-primary bg-md-primary/10 text-md-primary' : 'border-md-outline-variant bg-transparent text-md-on-surface/80 hover:bg-md-surface-variant'}"
+          aria-label="Filter by email address"
+          onclick={() => { fromDropdownOpen = !fromDropdownOpen; actionTypeDropdownOpen = false; }}
+        >
+          From: {addressFilter === 'all' ? 'All' : addressFilter.length > 20 ? addressFilter.slice(0, 20) + '...' : addressFilter}
+          <IconChevronDown class="w-3 h-3" />
+        </button>
+        {#if fromDropdownOpen}
+          <div class="absolute top-full left-0 mt-1 bg-md-surface border border-md-outline-variant rounded-xl shadow-lg z-[200] overflow-hidden min-w-[200px] max-h-64 overflow-y-auto">
+            <!-- Search input -->
+            <div class="p-2 border-b border-md-outline-variant/30">
+              <input
+                type="text"
+                placeholder="Search addresses..."
+                class="w-full px-2 py-1 text-xs border border-md-outline-variant rounded-md bg-md-surface focus:outline-none focus:border-md-primary"
+                bind:value={fromSearch}
+              />
+            </div>
+            <!-- All option -->
+            <button
+              class="w-full px-3 py-2 text-left text-xs hover:bg-md-surface-variant transition-colors {addressFilter === 'all' ? 'text-md-primary font-medium' : 'text-md-on-surface'}"
+              onclick={() => { addressFilter = 'all'; fromDropdownOpen = false; fromSearch = ''; }}
+            >
+              All
+            </button>
+            <!-- Address options -->
+            {#each uniqueAddresses.filter(addr => fromSearch === '' || addr.toLowerCase().includes(fromSearch.toLowerCase())) as addr}
+              <button
+                class="w-full px-3 py-2 text-left text-xs hover:bg-md-surface-variant transition-colors {addressFilter === addr ? 'text-md-primary font-medium' : 'text-md-on-surface'}"
+                onclick={() => { addressFilter = addr; fromDropdownOpen = false; fromSearch = ''; }}
+              >
+                {addr.length > 30 ? addr.slice(0, 30) + '...' : addr}
+              </button>
+            {/each}
+          </div>
+        {/if}
+      </div>
     </div>
 
     {#if loadingEvents}
@@ -194,13 +391,13 @@ function formatTime(timestamp: number) {
           </div>
         {/each}
       </div>
-    {:else if activityEvents.length === 0}
+    {:else if filteredEvents.length === 0}
       <div class="bg-md-primary-container rounded-xl px-4 py-6 text-center">
-        <div class="text-sm text-md-on-surface/50">No activity yet</div>
+        <div class="text-sm text-md-on-surface/50">{activityEvents.length === 0 ? 'No activity yet' : 'No matching activity'}</div>
       </div>
     {:else}
       <div class="space-y-2">
-        {#each activityEvents as event}
+        {#each filteredEvents as event}
           {#if event.type === 'email_received'}
             <div class="bg-md-primary-container rounded-xl px-4 py-3 flex items-start gap-3">
               <div class="mt-0.5">
@@ -335,10 +532,55 @@ function formatTime(timestamp: number) {
   {/if}
 
   <!-- ── Refresh Button ── -->
-  <button class="w-full h-12 px-4 text-sm font-semibold rounded-xl border border-md-primary text-md-primary hover:bg-md-primary/10 transition-colors" onclick={() => { onLoadAnalytics(); loadActivityEvents(); }}>
-    <IconRefresh class="w-4 h-4 mr-2" />
+  <button class="w-full h-12 px-4 text-sm font-semibold rounded-xl border border-md-primary text-md-primary hover:bg-md-primary/10 transition-colors flex items-center justify-center gap-2" onclick={() => { onLoadAnalytics(); loadActivityEvents(); }}>
+    <IconRefresh class="w-4 h-4" />
     Refresh
   </button>
+
+  <!-- ── Reset Button ── -->
+  <button class="w-full h-12 px-4 text-sm font-semibold rounded-xl border border-md-error text-md-error hover:bg-md-error/10 transition-colors flex items-center justify-center gap-2" onclick={() => { resetDialogOpen = true; }}>
+    <IconTrash class="w-4 h-4" />
+    Reset Activity
+  </button>
+
+  <!-- ── Reset Confirmation Dialog ── -->
+  {#if resetDialogOpen}
+    <div
+      class="fixed inset-0 bg-black/50 flex items-center justify-center z-[300]"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="reset-dialog-title"
+      tabindex="-1"
+      onclick={() => resetDialogOpen = false}
+      onkeydown={(e) => { if (e.key === 'Escape') resetDialogOpen = false; }}
+    >
+      <div
+        class="bg-md-surface rounded-xl p-6 max-w-sm mx-4 shadow-xl"
+        role="document"
+      >
+        <h3 id="reset-dialog-title" class="text-lg font-semibold text-md-on-surface mb-2">Reset Activity?</h3>
+        <p class="text-sm text-md-on-surface/70 mb-4">
+          This will permanently delete all activity events and reset all stats (inboxes, emails, OTPs, notifications). Tracking will start fresh from this moment.
+        </p>
+        <div class="flex gap-2">
+          <button
+            class="flex-1 h-10 px-4 text-sm font-semibold rounded-xl border border-md-outline-variant text-md-on-surface hover:bg-md-surface-variant transition-colors"
+            onclick={() => resetDialogOpen = false}
+            type="button"
+          >
+            Cancel
+          </button>
+          <button
+            class="flex-1 h-10 px-4 text-sm font-semibold rounded-xl bg-md-error text-md-on-error hover:bg-md-error/90 transition-colors"
+            onclick={handleReset}
+            type="button"
+          >
+            Reset
+          </button>
+        </div>
+      </div>
+    </div>
+  {/if}
 
 </div>
 {/if}

@@ -29,8 +29,8 @@ export async function checkInboxExpiry(): Promise<void> {
         if (inbox.autoExtend) {
           const providerConfig = loadProviderConfig(inbox.provider);
           if (!providerConfig.expiry?.renewable) {
-            // Provider doesn't support renewal, mark as archived but keep emails in storage
-            updatedInboxes[i] = { ...inbox, archived: true };
+            // Provider doesn't support renewal, keep as expired (don't auto-archive)
+            // The inbox will show as "Expired" in the UI
 
             if (notificationSettings?.enabled) {
               browser.notifications.create({
@@ -103,10 +103,11 @@ export async function checkInboxExpiry(): Promise<void> {
               });
             }
           } catch (renewError: unknown) {
-            console.error('Failed to auto-renew inbox:', inbox.address, renewError);
-            // Mark inbox as archived but keep emails in storage
-            updatedInboxes[i] = { ...inbox, archived: true };
-
+            logError('Failed to auto-renew inbox', {
+              inboxAddress: inbox.address,
+              error: renewError,
+            });
+            // Keep as expired (don't auto-archive)
             if (notificationSettings?.enabled) {
               browser.notifications.create({
                 type: 'basic',
@@ -119,9 +120,7 @@ export async function checkInboxExpiry(): Promise<void> {
             continue;
           }
         } else {
-          // Mark inbox as archived but keep emails in storage
-          updatedInboxes[i] = { ...inbox, archived: true };
-
+          // Keep as expired (don't auto-archive)
           if (notificationSettings?.enabled) {
             browser.notifications.create({
               type: 'basic',

@@ -1,5 +1,7 @@
 import { browser } from 'wxt/browser';
 import { defineContentScript } from 'wxt/utils/define-content-script';
+import { getErrorMessage } from '@/utils/errors.js';
+import { logError } from '@/utils/logger.js';
 import { injectAutoFillButtons, removeInjectedButtons } from './autofill/autofill-buttons.js';
 import { findSignupForm } from './autofill/form-detector.js';
 import { fillSignupForm } from './autofill/form-filler.js';
@@ -11,7 +13,7 @@ export default defineContentScript({
   main() {
     browser.runtime
       .sendMessage({ type: 'clearSessionCredentials' })
-      .catch((e: Error) => console.error('Could not send clear session message:', e));
+      .catch((e: Error) => logError('Could not send clear session message', e));
 
     const autoFillButtonsInjected = { value: false };
     const injectedButtons: HTMLElement[] = [];
@@ -26,7 +28,7 @@ export default defineContentScript({
           credentials: credentialsToUpdate,
         });
       } catch (error: unknown) {
-        console.error('Error sending update credentials message:', error);
+        logError('Error sending update credentials message', error);
       }
     }
 
@@ -43,7 +45,7 @@ export default defineContentScript({
           );
         }
       } catch (error: unknown) {
-        console.error('Error scanning for forms:', error);
+        logError('Error scanning for forms', error);
       }
     }
 
@@ -74,7 +76,7 @@ export default defineContentScript({
     });
 
     browser.runtime.onMessage.addListener(
-      // biome-ignore lint/suspicious/noExplicitAny: Chrome runtime message types
+      // biome-ignore lint/suspicious/noExplicitAny: Chrome runtime message listener requires any for discriminated union
       (message: any, _sender: any, sendResponse: (r: unknown) => void) => {
         if (message.action === 'startSignup') {
           (async () => {
@@ -126,9 +128,8 @@ export default defineContentScript({
                 browser.runtime.sendMessage({ status: 'Failed to fill form', isError: true });
               }
             } catch (error: unknown) {
-              const errorMessage = error instanceof Error ? error.message : 'Unknown error';
               browser.runtime.sendMessage({
-                status: `Error during signup process: ${errorMessage}`,
+                status: `Error during signup process: ${getErrorMessage(error)}`,
                 isError: true,
               });
             }
@@ -140,8 +141,8 @@ export default defineContentScript({
           (async () => {
             try {
               await fillOtp(message.otp);
-            } catch (error) {
-              console.error('Error filling OTP:', error);
+            } catch (error: unknown) {
+              logError('Error filling OTP', error);
             }
           })();
           sendResponse({ success: true });

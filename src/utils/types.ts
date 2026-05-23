@@ -53,6 +53,7 @@ export interface StoredSettings {
   notificationSettings?: NotificationSettings;
   themeMode?: 'light' | 'dark' | 'system';
   developerSettings?: DeveloperSettings;
+  faviconCaching?: 'direct' | 'local';
 }
 
 export interface ProviderInstance {
@@ -69,6 +70,12 @@ export interface Analytics {
   emailsReceived: number;
   otpsDetected: number;
   notificationsSent: number;
+  // Performance metrics
+  performance?: {
+    emailFetchTimes: number[]; // Array of fetch times in milliseconds
+    providerLatency: Record<string, number[]>; // Provider -> array of latency times in ms
+    uiRenderTimes: number[]; // Array of UI render times in milliseconds
+  };
 }
 
 export type ActivityEventType =
@@ -78,7 +85,9 @@ export type ActivityEventType =
   | 'account_created'
   | 'account_deleted'
   | 'auto_fill'
-  | 'toast_notification';
+  | 'toast_notification'
+  | 'auto_extend'
+  | 'hard_reset';
 
 export interface ActivityEvent {
   id: string;
@@ -98,6 +107,8 @@ export interface ActivityEvent {
 
 // ---- Domain Types ----
 
+export type AccountStatus = 'active' | 'archived' | 'deleted';
+
 export interface Account {
   id: string;
   /** The full email address, e.g. "foo@bar.com" */
@@ -112,14 +123,13 @@ export interface Account {
   autoExtend?: boolean;
   tag?: string;
   tagColor?: string;
-  archived?: boolean;
-  deleted?: boolean;
+  accountStatus?: AccountStatus; // Mutually exclusive: active | archived | deleted
   instanceUrl?: string; // For multi-instance providers
   // UI-specific properties
   expiry?: string; // Formatted expiry string
   received?: number; // Email count
   lastUsed?: string; // Formatted last used string
-  status?: string; // Formatted status string
+  status?: string; // Computed display status: active | archived | deleted | expired
   emailUser?: string;
 }
 
@@ -335,7 +345,7 @@ export interface ExportData {
   exportDate: string;
   data: {
     emailHistory: EmailHistoryItem[];
-    credentialsHistory: CredentialsHistoryItem[];
+    loginInfo: CredentialsHistoryItem[];
     settings: {
       darkMode: boolean;
       activeAccountId?: string;
@@ -362,23 +372,38 @@ export interface DataManager {
 // ---- Background message shapes ----
 
 export type BackgroundMessage =
-  | { type: 'createInbox'; provider?: MailProvider; user?: string; instanceId?: string }
+  | {
+      type: 'createInbox';
+      provider?: MailProvider;
+      user?: string;
+      instanceId?: string;
+      emailUser?: string;
+    }
   | { type: 'checkEmails'; inboxId: string; filters?: EmailFilters }
   | { type: 'deleteInbox'; inboxId: string }
+  | { type: 'restoreInbox'; inboxId: string }
   | { type: 'getInboxes' }
   | { type: 'setProvider'; provider: MailProvider }
+  | { type: 'updateInboxTag'; inboxId: string; tag: string; color?: string | null }
+  | { type: 'archiveInbox'; inboxId: string }
+  | { type: 'unarchiveInbox'; inboxId: string }
   | { type: 'getProvider' }
   | { type: 'clearSessionCredentials' }
   | { type: 'updateSessionCredentials'; credentials: Partial<SessionCredentials> }
   | { type: 'getAnalytics' }
   | { type: 'renewInbox'; inboxId: string }
+  | { type: 'fetchFavicon'; url: string }
   | { action: 'hardReset' }
-  | { action: 'getProviderInstances' }
+  | { action: 'getProviderInstances'; provider?: string }
   | { action: 'addCustomInstance'; instance: Omit<ProviderInstance, 'id' | 'isCustom'> }
   | { action: 'removeCustomInstance'; instanceId: string }
   | { action: 'getSelectedInstance' }
   | { action: 'setSelectedInstance'; instanceId: string }
   | { action: 'setInstance'; instanceId: string }
+  | { action: 'addCustomBurnerInstance'; instance: Omit<ProviderInstance, 'id' | 'isCustom'> }
+  | { action: 'removeCustomProviderInstance'; instanceId: string }
+  | { action: 'getSelectedProviderInstance' }
+  | { action: 'setSelectedProviderInstance'; instanceId: string }
   | { action: 'initializeDefaultProvider' }
   | {
       action: 'providerApiCall';
@@ -387,7 +412,28 @@ export type BackgroundMessage =
       params?: Record<string, unknown>;
       sidToken?: string;
     }
-  | { action: 'getArchivedEmails'; inboxAddress?: string };
+  | { action: 'getArchivedEmails'; inboxAddress?: string }
+  | { action: 'getStorageUsage' }
+  | { action: 'getEmailsToBeDeleted'; retentionDays?: number }
+  | {
+      action: 'cleanupOldStoredEmails';
+      activeRetentionDays?: number;
+      archivedRetentionDays?: number;
+    };
+
+// ---- Content script message shapes ----
+
+export type ContentMessage =
+  | { type: 'clearSessionCredentials' }
+  | { type: 'updateSessionCredentials'; credentials: Partial<SessionCredentials> }
+  | { type: 'fillOTP'; otp: string }
+  | { type: 'checkFormDetected' }
+  | { type: 'autofillForm' }
+  | { action: 'startSignup' };
+
+// ---- Combined message type for runtime ----
+
+export type RuntimeMessage = BackgroundMessage | ContentMessage;
 
 // ---- Browser Runtime Types ----
 

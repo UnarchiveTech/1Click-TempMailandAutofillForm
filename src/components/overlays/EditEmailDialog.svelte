@@ -1,4 +1,6 @@
 <script lang="ts">
+import { setupFocusTrap } from '@/utils/focusTrap.js';
+
 interface Props {
   open: boolean;
   currentUsername: string;
@@ -10,12 +12,31 @@ interface Props {
 let { open, currentUsername, domain, onClose, onSave }: Props = $props();
 
 let usernameInput = $state('');
+let dialogRef = $state<HTMLElement | null>(null);
+let cleanupFocusTrap: (() => void) | null = null;
 
 // Initialize with current username when dialog opens
 $effect(() => {
   if (open) {
     usernameInput = currentUsername;
   }
+});
+
+// Setup focus trap when dialog opens
+$effect(() => {
+  if (open && dialogRef) {
+    setTimeout(() => {
+      if (dialogRef) {
+        cleanupFocusTrap = setupFocusTrap(dialogRef);
+      }
+    }, 50);
+  }
+  return () => {
+    if (cleanupFocusTrap) {
+      cleanupFocusTrap();
+      cleanupFocusTrap = null;
+    }
+  };
 });
 
 function handleSave() {
@@ -50,6 +71,7 @@ function handleSave() {
       <div
         class="relative z-10 bg-md-surface rounded-xl shadow-2xl p-5 flex flex-col gap-4 w-96"
         tabindex="-1"
+        bind:this={dialogRef}
       >
         <div>
           <h3 class="font-bold text-base mb-1">Edit Email Address</h3>

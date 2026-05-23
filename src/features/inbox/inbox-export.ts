@@ -1,4 +1,5 @@
 import type { Browser } from 'wxt/browser';
+import { logError } from '@/utils/logger.js';
 import type { Account, Email } from '@/utils/types.js';
 
 export interface ExportState {
@@ -10,6 +11,12 @@ export interface ExportSetters {
   loadInboxes: () => Promise<void>;
 }
 
+/**
+ * Export account emails
+ * @param ext - Browser extension API
+ * @param account - Account to export emails for
+ * @param setters - Export setter functions
+ */
 export async function exportAccountEmails(ext: Browser, account: Account, setters: ExportSetters) {
   try {
     const response = await ext.runtime.sendMessage({
@@ -29,6 +36,10 @@ export async function exportAccountEmails(ext: Browser, account: Account, setter
   }
 }
 
+/**
+ * Show export format dialog
+ * @returns Promise that resolves to selected format or null if cancelled
+ */
 export function showExportFormatDialog(): Promise<string | null> {
   return new Promise((resolve) => {
     const dialog = document.createElement('div');
@@ -38,12 +49,12 @@ export function showExportFormatDialog(): Promise<string | null> {
           <div>
             <h3 class="font-bold text-base mb-1 text-md-on-surface">Select Export Format</h3>
             <div class="flex flex-col gap-2 mt-4">
-              <button class="px-3 py-2 text-sm rounded-xl border border-md-outline-variant bg-transparent text-md-on-surface hover:bg-md-secondary-container transition-colors format-btn" data-format="json">JSON Format</button>
-              <button class="px-3 py-2 text-sm rounded-xl border border-md-outline-variant bg-transparent text-md-on-surface hover:bg-md-secondary-container transition-colors format-btn" data-format="eml">EML Format</button>
-              <button class="px-3 py-2 text-sm rounded-xl border border-md-outline-variant bg-transparent text-md-on-surface hover:bg-md-secondary-container transition-colors format-btn" data-format="mbox">MBOX Format</button>
+              <button class="px-3 py-2 text-sm rounded-xl border border-md-outline-variant bg-transparent text-md-on-surface hover:bg-md-secondary-container transition-colors format-btn" data-format="json" aria-label="Export as JSON">JSON Format</button>
+              <button class="px-3 py-2 text-sm rounded-xl border border-md-outline-variant bg-transparent text-md-on-surface hover:bg-md-secondary-container transition-colors format-btn" data-format="eml" aria-label="Export as EML">EML Format</button>
+              <button class="px-3 py-2 text-sm rounded-xl border border-md-outline-variant bg-transparent text-md-on-surface hover:bg-md-secondary-container transition-colors format-btn" data-format="mbox" aria-label="Export as MBOX">MBOX Format</button>
             </div>
             <div class="flex gap-2 pt-4 justify-end mt-2">
-              <button class="px-4 py-2 text-sm rounded-xl bg-transparent text-md-on-surface/80 hover:bg-md-surface-variant transition-colors cancel-btn">Cancel</button>
+              <button class="px-4 py-2 text-sm rounded-xl bg-transparent text-md-on-surface/80 hover:bg-md-surface-variant transition-colors cancel-btn" aria-label="Cancel export">Cancel</button>
             </div>
           </div>
         </div>
@@ -126,7 +137,7 @@ export async function exportEmailsWithFormat(account: Account, msgs: Email[], fo
     a.click();
     URL.revokeObjectURL(url);
   } catch (e) {
-    console.error('Error exporting emails:', e);
+    logError('Error exporting emails', e);
     throw e;
   }
 }
@@ -216,7 +227,7 @@ export async function exportMultipleEMLAsZip(
     a.click();
     URL.revokeObjectURL(url);
   } catch (e) {
-    console.error('Error creating ZIP file:', e);
+    logError('Error creating ZIP file', e);
     // Fallback to text format if fflate fails
     let archiveContent = '# EML Archive - Multiple Email Export\n';
     archiveContent += `# Generated on: ${new Date().toISOString()}\n`;

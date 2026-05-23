@@ -4,6 +4,7 @@ import IconTrash from '@/components/icons/IconTrash.svelte';
 import ExpiryPill from '@/components/ui/ExpiryPill.svelte';
 import TagPill from '@/components/ui/TagPill.svelte';
 import { loadProviderConfig } from '@/utils/email-service.js';
+import { useCurrentTime } from '@/utils/time-store.js';
 import type { Account } from '@/utils/types.js';
 
 let {
@@ -16,6 +17,7 @@ let {
   onUnarchiveAccount = () => {},
   onEditAccount = () => {},
   onRemoveAccount = () => {},
+  onRestoreAccount = () => {},
   onTagAccount = () => {},
   isInAvailable = false,
   isInUnavailable = false,
@@ -35,6 +37,7 @@ let {
   onUnarchiveAccount?: (account: Account) => void;
   onEditAccount?: (account: Account) => void;
   onRemoveAccount?: (address: string) => void;
+  onRestoreAccount?: (address: string) => void;
   onTagAccount?: (account: Account) => void;
   isInAvailable?: boolean;
   isInUnavailable?: boolean;
@@ -46,24 +49,36 @@ let {
   isDropTarget?: boolean;
 }>();
 
-let currentTime = $state(Date.now());
+// Use shared time store
+const timeStore = useCurrentTime();
+let currentTime = $state(timeStore.currentTime);
 
-// Update current time every second for live countdown
+// Subscribe to time updates
 $effect(() => {
-  const interval = setInterval(() => {
-    currentTime = Date.now();
-  }, 1000);
-  return () => clearInterval(interval);
+  const unsubscribe = timeStore.subscribe(() => {
+    currentTime = timeStore.currentTime;
+  });
+  return unsubscribe;
 });
 
-const expiryTimeMinutes = $derived(() => {
+// Format time duration with hours if applicable
+function formatTimeRemaining(minutes: number): string {
+  if (minutes >= 60) {
+    const hours = Math.floor(minutes / 60);
+    const mins = minutes % 60;
+    return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`;
+  }
+  return `${minutes}m`;
+}
+
+const expiryTimeMinutes = $derived.by(() => {
   const expires = account.expiresAt || currentTime + 1000;
   const remainingMs = expires - currentTime;
   return Math.max(0, Math.ceil(remainingMs / (60 * 1000)));
 });
 
 // Get status tag for the account
-const statusTag = $derived(() => {
+const statusTag = $derived.by(() => {
   if (account.status === 'archived')
     return { label: 'Archived', color: 'bg-md-surface-variant/20 text-md-on-surface/60' };
   if (account.status === 'deleted')
@@ -74,7 +89,7 @@ const statusTag = $derived(() => {
 });
 
 // Check if auto-renew is available for this account
-const isAutoRenewAvailable = $derived(() => {
+const isAutoRenewAvailable = $derived.by(() => {
   const isExpired = currentTime >= (account.expiresAt || currentTime);
   const isAutoExtendDisabled = !account.autoExtend;
 
@@ -88,7 +103,7 @@ const isAutoRenewAvailable = $derived(() => {
 });
 
 // Check if provider supports auto-renew at all
-const supportsAutoRenew = $derived(() => {
+const supportsAutoRenew = $derived.by(() => {
   try {
     const config = loadProviderConfig(account.provider);
     return config.expiry?.renewable || false;
@@ -113,6 +128,7 @@ const supportsAutoRenew = $derived(() => {
       <!-- Email address with status tag -->
       <div class="flex items-center gap-1">
         <button
+          id="button-select-inbox-{account.id}"
           class="flex items-center text-left min-w-0 cursor-pointer bg-transparent border-0 p-0 overflow-hidden focus:outline-none focus:ring-2 focus:ring-md-primary/20 rounded"
           aria-label={`Select inbox ${account.address}`}
           onclick={() => onSelectAccount(account.address)}
@@ -121,16 +137,17 @@ const supportsAutoRenew = $derived(() => {
             {account.address}
           </span>
         </button>
-        {#if statusTag()}
-          <span class="text-[9px] px-1.5 py-0.5 rounded-full {statusTag()!.color} shrink-0">{statusTag()!.label}</span>
+        {#if statusTag}
+          <span class="text-[9px] px-1.5 py-0.5 rounded-full {statusTag!.color} shrink-0">{statusTag!.label}</span>
         {/if}
       </div>
 
       <!-- Toggle button with time and tag pill -->
       <div class="flex items-center gap-1 flex-wrap w-fit shrink-0">
-        <div class="flex items-center gap-1 rounded-full zinc-btn-copy border border-md-secondary-container/10">
-          {#if supportsAutoRenew()}
+        <div class="flex items-center gap-1 rounded-full btn-primary border border-md-secondary-container/10">
+          {#if supportsAutoRenew}
             <button
+              id="button-toggle-auto-renew-{account.id}"
               class="inline-flex items-center justify-between h-5 w-[90px] rounded-full {account.autoExtend ? 'pl-2 pr-0' : 'pl-0 pr-2'} transition-colors duration-200 {account.autoExtend ? 'bg-md-primary' : 'bg-md-surface-variant/30'}"
               aria-label="Toggle auto-renew"
               onclick={(e) => { e.stopPropagation(); onToggleAutoExtend(account); }}
@@ -145,17 +162,17 @@ const supportsAutoRenew = $derived(() => {
             </button>
           {/if}
           <span class="text-[10px] font-medium text-md-on-surface/60 whitespace-nowrap pr-1">
-            {#if supportsAutoRenew()}
-              {#if expiryTimeMinutes() >= 60}
-                In {Math.floor(expiryTimeMinutes() / 60)}:{expiryTimeMinutes() % 60}m
+            {#if supportsAutoRenew}
+              {#if expiryTimeMinutes >= 60}
+                In {formatTimeRemaining(expiryTimeMinutes)}
               {:else}
-                In {expiryTimeMinutes()}m
+                In {expiryTimeMinutes}m
               {/if}
             {:else}
-              {#if expiryTimeMinutes() >= 60}
-                Expires in {Math.floor(expiryTimeMinutes() / 60)}:{expiryTimeMinutes() % 60}m
+              {#if expiryTimeMinutes >= 60}
+                Expires in {formatTimeRemaining(expiryTimeMinutes)}
               {:else}
-                Expires in {expiryTimeMinutes()}m
+                Expires in {expiryTimeMinutes}m
               {/if}
             {/if}
           </span>
@@ -174,16 +191,18 @@ const supportsAutoRenew = $derived(() => {
     <div class="flex flex-col gap-1 shrink-0">
       {#if account.status === 'deleted'}
         <button
-          class="text-[10px] px-2 py-1 rounded-full zinc-btn-archive flex items-center justify-center gap-1"
+          id="button-restore-{account.id}"
+          class="text-[10px] px-2 py-1 rounded-full btn-error flex items-center justify-center gap-1"
           aria-label="Restore inbox {account.address}"
-          onclick={(e) => { e.stopPropagation(); onRemoveAccount(account.address); }}
+          onclick={(e) => { e.stopPropagation(); onRestoreAccount(account.address); }}
         >
           <IconArchive class="w-3 h-3" />
           <span>Restore</span>
         </button>
       {:else}
         <button
-          class="text-[10px] px-2 py-1 rounded-full zinc-btn-forget flex items-center justify-center gap-1"
+          id="button-delete-{account.id}"
+          class="text-[10px] px-2 py-1 rounded-full btn-tertiary flex items-center justify-center gap-1"
           aria-label="Delete inbox {account.address}"
           onclick={(e) => { e.stopPropagation(); onRemoveAccount(account.address); }}
         >
@@ -193,18 +212,20 @@ const supportsAutoRenew = $derived(() => {
       {/if}
       {#if account.status === 'archived'}
         <button
-          class="text-[10px] px-2 py-1 rounded-full zinc-btn-archive flex items-center justify-center gap-1"
+          id="button-unarchive-{account.id}"
+          class="text-[10px] px-2 py-1 rounded-full btn-error flex items-center justify-center gap-1"
           aria-label="Unarchive inbox {account.address}"
-          onclick={(e) => { e.stopPropagation(); onUnarchiveAccount(); }}
+          onclick={(e) => { e.stopPropagation(); onUnarchiveAccount(account); }}
         >
           <IconArchive class="w-3 h-3" />
           <span>Unarchive</span>
         </button>
       {:else}
         <button
-          class="text-[10px] px-2 py-1 rounded-full zinc-btn-archive flex items-center justify-center gap-1"
+          id="button-archive-{account.id}"
+          class="text-[10px] px-2 py-1 rounded-full btn-error flex items-center justify-center gap-1"
           aria-label="Archive inbox {account.address}"
-          onclick={(e) => { e.stopPropagation(); onArchiveAccount(); }}
+          onclick={(e) => { e.stopPropagation(); onArchiveAccount(account); }}
         >
           <IconArchive class="w-3 h-3" />
           <span>Archive</span>
