@@ -6,14 +6,22 @@ import IconPlus from '@/components/icons/IconPlus.svelte';
 import IconTrash from '@/components/icons/IconTrash.svelte';
 import IconUser from '@/components/icons/IconUser.svelte';
 import IconX from '@/components/icons/IconX.svelte';
+import FaviconImage from '@/components/ui/FaviconImage.svelte';
 import {
   deleteIdentity,
   loadIdentities,
   saveIdentity,
   selectIdentity,
 } from '@/features/identities/identity-actions.js';
+import { getErrorMessage } from '@/utils/errors.js';
 import { logError } from '@/utils/logger.js';
-import type { Identity } from '@/utils/types.js';
+import type { CredentialsHistoryItem, Identity } from '@/utils/types.js';
+import {
+  validateOTP,
+  validatePassword,
+  validatePhoneNumber,
+  validateTextInput,
+} from '@/utils/validation.js';
 
 const DEFAULT_FIRST_NAMES = [
   'James',
@@ -61,9 +69,14 @@ const DEFAULT_LAST_NAMES = [
   'Harris',
 ];
 
-let { context = 'popup', onBack = () => {} } = $props<{
+let {
+  context = 'popup',
+  onBack = () => {},
+  savedLogins = [] as CredentialsHistoryItem[],
+} = $props<{
   context?: 'popup' | 'sidepanel' | 'app';
   onBack?: () => void;
+  savedLogins?: CredentialsHistoryItem[];
 }>();
 
 let identities = $state<Identity[]>([]);
@@ -72,6 +85,11 @@ let editingIdentity = $state<Identity | null>(null);
 let showCreateDialog = $state(false);
 let showIdentityDropdown = $state(false);
 
+// Multi-select state
+let selectionMode = $state(false);
+let selectedIds = $state<Set<string>>(new Set());
+let holdTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
 let newIdentityFirstNames = $state('');
 let newIdentityLastNames = $state('');
 let newIdentityName = $state('');
@@ -79,6 +97,7 @@ let newIdentityUseRandomPassword = $state(true);
 let newIdentityCustomPassword = $state('');
 let newIdentityPhone = $state('');
 let newIdentityPin = $state('');
+let validationError = $state('');
 
 const identitySetters = {
   setIdentities: (ids: Identity[]) => {
@@ -113,24 +132,42 @@ function closeIdentityEditor() {
   newIdentityCustomPassword = '';
   newIdentityPhone = '';
   newIdentityPin = '';
+  validationError = '';
 }
 
 async function saveIdentityChanges() {
   if (!editingIdentity) return;
 
-  const updatedIdentity: Identity = {
-    ...editingIdentity,
-    name: newIdentityName,
-    firstNames: newIdentityFirstNames,
-    lastNames: newIdentityLastNames,
-    useRandomPassword: newIdentityUseRandomPassword,
-    customPassword: newIdentityCustomPassword || undefined,
-    phone: newIdentityPhone || undefined,
-    pin: newIdentityPin || undefined,
-  };
+  try {
+    const trimmedName = validateTextInput(newIdentityName, 'Identity name', 64);
 
-  await saveIdentity(browser, updatedIdentity, identitySetters);
-  closeIdentityEditor();
+    // Check for duplicate name (excluding the identity being edited)
+    const isDuplicateName = identities.some(
+      (i) => i.id !== editingIdentity!.id && i.name.toLowerCase() === trimmedName.toLowerCase()
+    );
+    if (isDuplicateName) {
+      validationError = `An identity named "${trimmedName}" already exists. Please choose a different name.`;
+      return;
+    }
+
+    const updatedIdentity: Identity = {
+      ...editingIdentity,
+      name: trimmedName,
+      firstNames: validateTextInput(newIdentityFirstNames, 'First names', 500),
+      lastNames: validateTextInput(newIdentityLastNames, 'Last names', 500),
+      useRandomPassword: newIdentityUseRandomPassword,
+      customPassword: newIdentityUseRandomPassword
+        ? undefined
+        : validateOptionalPassword(newIdentityCustomPassword),
+      phone: validateOptionalPhone(newIdentityPhone),
+      pin: validateOptionalPin(newIdentityPin),
+    };
+
+    await saveIdentity(browser, updatedIdentity, identitySetters);
+    closeIdentityEditor();
+  } catch (error) {
+    validationError = getErrorMessage(error);
+  }
 }
 
 async function deleteIdentityHandler(identityId: string) {
@@ -138,6 +175,47 @@ async function deleteIdentityHandler(identityId: string) {
   if (confirm(`${$t('identities.delete')}?`)) {
     await deleteIdentity(browser, identityId, identitySetters);
   }
+}
+
+function startHold(id: string) {
+  holdTimers.set(
+    id,
+    setTimeout(() => {
+      selectionMode = true;
+      selectedIds = new Set([id]);
+      holdTimers.delete(id);
+    }, 500)
+  );
+}
+
+function cancelHold(id: string) {
+  const t = holdTimers.get(id);
+  if (t !== undefined) {
+    clearTimeout(t);
+    holdTimers.delete(id);
+  }
+}
+
+function toggleSelect(id: string) {
+  const next = new Set(selectedIds);
+  if (next.has(id)) next.delete(id);
+  else next.add(id);
+  selectedIds = next;
+  if (selectedIds.size === 0) selectionMode = false;
+}
+
+function exitSelectionMode() {
+  selectionMode = false;
+  selectedIds = new Set();
+}
+
+async function deleteSelected() {
+  const ids = [...selectedIds];
+  if (!confirm(`Delete ${ids.length} identit${ids.length === 1 ? 'y' : 'ies'}?`)) return;
+  for (const id of ids) {
+    await deleteIdentity(browser, id, identitySetters);
+  }
+  exitSelectionMode();
 }
 
 async function selectIdentityHandler(identityId: string) {
@@ -166,25 +244,64 @@ function closeCreateDialog() {
   newIdentityCustomPassword = '';
   newIdentityPhone = '';
   newIdentityPin = '';
+  validationError = '';
 }
 
 async function createNewIdentity() {
-  const newIdentity: Identity = {
-    id: `identity_${Date.now()}`,
-    name: newIdentityName,
-    firstNames: newIdentityFirstNames,
-    lastNames: newIdentityLastNames,
-    useRandomPassword: newIdentityUseRandomPassword,
-    customPassword: newIdentityCustomPassword || undefined,
-    phone: newIdentityPhone || undefined,
-    pin: newIdentityPin || undefined,
-    isDefault: false,
-    createdAt: Date.now(),
-  };
+  try {
+    const trimmedName = validateTextInput(newIdentityName, 'Identity name', 64);
 
-  await saveIdentity(browser, newIdentity, identitySetters);
-  await selectIdentity(browser, newIdentity.id, identitySetters);
-  closeCreateDialog();
+    // Check for duplicate name
+    const isDuplicateName = identities.some(
+      (i) => i.name.toLowerCase() === trimmedName.toLowerCase()
+    );
+    if (isDuplicateName) {
+      validationError = `An identity named "${trimmedName}" already exists. Please choose a different name.`;
+      return;
+    }
+
+    const newIdentity: Identity = {
+      id: `identity_${Date.now()}`,
+      name: trimmedName,
+      firstNames: validateTextInput(newIdentityFirstNames, 'First names', 500),
+      lastNames: validateTextInput(newIdentityLastNames, 'Last names', 500),
+      useRandomPassword: newIdentityUseRandomPassword,
+      customPassword: newIdentityUseRandomPassword
+        ? undefined
+        : validateOptionalPassword(newIdentityCustomPassword),
+      phone: validateOptionalPhone(newIdentityPhone),
+      pin: validateOptionalPin(newIdentityPin),
+      isDefault: false,
+      createdAt: Date.now(),
+    };
+
+    await saveIdentity(browser, newIdentity, identitySetters);
+    await selectIdentity(browser, newIdentity.id, identitySetters);
+    closeCreateDialog();
+  } catch (error) {
+    validationError = getErrorMessage(error);
+  }
+}
+
+function validateOptionalPassword(value: string): string | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  validatePassword(trimmed);
+  return trimmed;
+}
+
+function validateOptionalPhone(value: string): string | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  validatePhoneNumber(trimmed);
+  return trimmed;
+}
+
+function validateOptionalPin(value: string): string | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  validateOTP(trimmed);
+  return trimmed;
 }
 
 loadIdentitiesData();
@@ -193,11 +310,29 @@ loadIdentitiesData();
 <div class="flex flex-col h-full relative">
   <!-- Header -->
   <div class="px-5 py-4 border-b border-md-secondary-container">
-    <div class="flex items-center justify-end">
-      <button class="btn-primary px-3 py-1.5 text-sm rounded-lg flex items-center gap-2" onclick={openCreateDialog}>
-        <IconPlus class="w-4 h-4" />
-        {$t('identities.create')}
-      </button>
+    <div class="flex items-center justify-end gap-2">
+      {#if selectionMode}
+        <span class="text-xs text-md-on-surface/60 mr-auto">{selectedIds.size} selected</span>
+        <button
+          class="px-3 py-1.5 text-sm rounded-lg bg-md-error text-md-on-error hover:bg-md-error/90 transition-colors flex items-center gap-2 disabled:opacity-50"
+          disabled={selectedIds.size === 0}
+          onclick={deleteSelected}
+        >
+          <IconTrash class="w-4 h-4" />
+          Delete
+        </button>
+        <button
+          class="px-3 py-1.5 text-sm rounded-lg bg-md-secondary-container text-md-on-surface hover:bg-md-secondary-container/80 transition-colors"
+          onclick={exitSelectionMode}
+        >
+          <IconX class="w-4 h-4" />
+        </button>
+      {:else}
+        <button class="btn-primary px-3 py-1.5 text-sm rounded-lg flex items-center gap-2" onclick={openCreateDialog}>
+          <IconPlus class="w-4 h-4" />
+          {$t('identities.create')}
+        </button>
+      {/if}
     </div>
   </div>
 
@@ -300,6 +435,10 @@ loadIdentitiesData();
             />
           </div>
 
+          {#if validationError}
+            <p class="text-xs text-md-error">{validationError}</p>
+          {/if}
+
           <!-- Save Button -->
           <button class="w-full px-4 py-2 text-sm rounded-lg bg-md-primary text-md-on-primary hover:bg-md-primary/90 transition-colors" onclick={saveIdentityChanges}>
             {$t('identities.save')}
@@ -310,13 +449,27 @@ loadIdentitiesData();
       <!-- Identity List -->
       <div class="p-5 space-y-3">
         {#each identities as identity}
+          {@const isChecked = selectedIds.has(identity.id)}
+          {@const linkedDomains = [...new Set(savedLogins.filter((l: CredentialsHistoryItem) => l.identityId != null && String(l.identityId) === identity.id).map((l: CredentialsHistoryItem) => {
+              try {
+                const site = (l as any).website || l.domain || '';
+                return site.startsWith('http') ? new URL(site).hostname : site;
+              } catch { return l.domain || ''; }
+            }).filter(Boolean))].slice(0, 5)}
           <div
-            class="bg-md-tertiary-container rounded-xl px-4 py-3 flex items-center justify-between {selectedIdentityId === identity.id ? 'ring-2 ring-md-primary' : ''}"
-            onclick={() => openIdentityEditor(identity)}
+            class="bg-md-tertiary-container rounded-xl px-4 py-3 flex items-center justify-between transition-all {selectedIdentityId === identity.id && !selectionMode ? 'ring-2 ring-md-primary' : ''} {selectionMode && isChecked ? 'ring-2 ring-md-secondary' : ''}"
+            onclick={() => {
+              if (selectionMode) { toggleSelect(identity.id); }
+              else { openIdentityEditor(identity); }
+            }}
+            onpointerdown={() => { if (!selectionMode) startHold(identity.id); }}
+            onpointerup={() => cancelHold(identity.id)}
+            onpointerleave={() => cancelHold(identity.id)}
             onkeydown={(e) => {
               if (e.key === 'Enter' || e.key === ' ') {
                 e.preventDefault();
-                openIdentityEditor(identity);
+                if (selectionMode) toggleSelect(identity.id);
+                else openIdentityEditor(identity);
               }
             }}
             role="button"
@@ -324,10 +477,15 @@ loadIdentitiesData();
             aria-label={`Edit identity: ${identity.name}`}
           >
             <div class="flex items-center gap-3">
-              <div
-                class="w-10 h-10 rounded-full bg-md-primary/10 flex items-center justify-center">
-                <IconUser class="w-5 h-5 text-md-primary" />
-              </div>
+              {#if selectionMode}
+                <div class="w-5 h-5 rounded-full border-2 flex items-center justify-center shrink-0 {isChecked ? 'bg-md-secondary border-md-secondary' : 'border-md-outline-variant'}">
+                  {#if isChecked}<span class="text-md-on-secondary text-[10px] font-bold">✓</span>{/if}
+                </div>
+              {:else}
+                <div class="w-10 h-10 rounded-full bg-md-primary/10 flex items-center justify-center">
+                  <IconUser class="w-5 h-5 text-md-primary" />
+                </div>
+              {/if}
               <div>
                 <div class="font-medium text-sm">{identity.name}</div>
                 <div class="text-xs text-md-on-surface/50">
@@ -336,25 +494,43 @@ loadIdentitiesData();
                     • Phone: {identity.phone}
                   {/if}
                 </div>
+                {#if linkedDomains.length > 0}
+                  <div class="flex items-center gap-1 mt-1.5 flex-wrap">
+                    {#each linkedDomains as domain (domain)}
+                      {@const d = domain as string}
+                      <div class="w-5 h-5 rounded-md bg-md-secondary-container flex items-center justify-center overflow-hidden shrink-0" title={d}>
+                        <FaviconImage
+                          domain={d}
+                          size={20}
+                          class="w-4 h-4 object-contain"
+                          fallbackLetter={d.charAt(0).toUpperCase()}
+                          fallbackColor="bg-md-primary"
+                        />
+                      </div>
+                    {/each}
+                    {#if linkedDomains.length === 5}
+                      <span class="text-[9px] text-md-on-surface/40">+more</span>
+                    {/if}
+                  </div>
+                {/if}
               </div>
             </div>
             <div class="flex items-center gap-2">
-              {#if identity.isDefault}
-                <span class="px-2 py-0.5 text-xs font-medium rounded-full bg-md-primary/20 text-md-primary">Default</span>
+              {#if !selectionMode}
+                {#if selectedIdentityId === identity.id}
+                  <span class="px-2 py-0.5 text-xs font-medium rounded-full bg-md-primary/20 text-md-primary">Default</span>
+                {/if}
+                <button
+                  class="w-6 h-6 flex items-center justify-center rounded-lg bg-transparent hover:bg-md-secondary-container text-md-error transition-colors"
+                  onclick={(e) => {
+                    e.stopPropagation();
+                    deleteIdentityHandler(identity.id);
+                  }}
+                  aria-label="Delete identity"
+                >
+                  <IconTrash class="w-4 h-4" />
+                </button>
               {/if}
-              {#if selectedIdentityId === identity.id}
-                <span class="px-2 py-0.5 text-xs font-medium rounded-full bg-md-success/20 text-md-success">Selected</span>
-              {/if}
-              <button
-                class="w-6 h-6 flex items-center justify-center rounded-lg bg-transparent hover:bg-md-secondary-container text-md-error transition-colors"
-                onclick={(e) => {
-                  e.stopPropagation();
-                  deleteIdentityHandler(identity.id);
-                }}
-                aria-label="Delete identity"
-              >
-                <IconTrash class="w-4 h-4" />
-              </button>
             </div>
           </div>
         {/each}
@@ -505,6 +681,10 @@ loadIdentitiesData();
               maxlength="8"
             />
           </div>
+
+          {#if validationError}
+            <p class="text-xs text-md-error">{validationError}</p>
+          {/if}
 
           <!-- Create Button -->
           <button class="w-full px-4 py-2 text-sm rounded-lg bg-md-primary text-md-on-primary hover:bg-md-primary/90 transition-colors" onclick={createNewIdentity}>

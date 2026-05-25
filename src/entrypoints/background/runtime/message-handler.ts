@@ -12,6 +12,7 @@ import {
   removeCustomProviderInstance,
 } from '@/utils/instance-manager.js';
 import { logError, logInfo, logWarn } from '@/utils/logger.js';
+import { getInboxes, getSelectedProvider, setInboxes } from '@/utils/storage-keys.js';
 import type { Account, ProviderInstance, RuntimeMessageSender } from '@/utils/types.js';
 import { validateCustomInstanceName, validateCustomInstanceUrl } from '@/utils/validation.js';
 import { handleUpdateSessionCredentials } from '../credentials/session-credentials.js';
@@ -30,6 +31,7 @@ import {
   setupInboxExpiryCheck,
   setupPeriodicEmailCheck,
 } from '../inbox/inbox-manager.js';
+import { updateRefreshAlarm } from '../inbox/periodic-checks.js';
 
 export function registerMessageHandler(): void {
   browser.runtime.onMessage.addListener(
@@ -40,10 +42,7 @@ export function registerMessageHandler(): void {
       if (message.type === 'createInbox') {
         (async () => {
           try {
-            const { selectedProvider } = (await browser.storage.local.get([
-              'selectedProvider',
-            ])) as { selectedProvider?: string };
-            const provider = message.provider || selectedProvider;
+            const provider = message.provider || (await getSelectedProvider());
             const instanceId = message.instanceId;
 
             const inbox = await createInbox(provider, instanceId, message.emailUser);
@@ -70,7 +69,7 @@ export function registerMessageHandler(): void {
       if (message.type === 'deleteInbox') {
         (async () => {
           try {
-            const result = await deleteInbox(message.inboxId);
+            const result = await deleteInbox(message.inboxId, message.preserveEmails ?? false);
             sendResponse(result);
           } catch (error: unknown) {
             sendResponse({ success: false, error: getErrorMessage(error) });
@@ -82,18 +81,17 @@ export function registerMessageHandler(): void {
       if (message.type === 'restoreInbox') {
         (async () => {
           try {
-            const { inboxes = [] } = (await browser.storage.local.get(['inboxes'])) as {
-              inboxes?: Account[];
-            };
+            const inboxes = await getInboxes();
             const inbox = inboxes.find((i) => i.id === message.inboxId);
             if (!inbox) {
               sendResponse({ success: false, error: 'Inbox not found' });
               return;
             }
-            const updatedInboxes = inboxes.map((i) =>
-              i.id === message.inboxId ? { ...i, accountStatus: 'active' as const } : i
+            await setInboxes(
+              inboxes.map((i) =>
+                i.id === message.inboxId ? { ...i, accountStatus: 'active' as const } : i
+              )
             );
-            await browser.storage.local.set({ inboxes: updatedInboxes });
             sendResponse({ success: true });
           } catch (e) {
             logError('restoreInbox error:', e);
@@ -106,9 +104,7 @@ export function registerMessageHandler(): void {
       if (message.type === 'getInboxes') {
         (async () => {
           try {
-            const { inboxes = [] } = (await browser.storage.local.get(['inboxes'])) as {
-              inboxes?: Account[];
-            };
+            const inboxes = await getInboxes();
             sendResponse({ success: true, inboxes });
           } catch (error: unknown) {
             sendResponse({ success: false, error: getErrorMessage(error) });
@@ -120,7 +116,7 @@ export function registerMessageHandler(): void {
       if (message.type === 'setProvider') {
         (async () => {
           try {
-            await browser.storage.local.set({ selectedProvider: message.provider });
+            await browser.storage.local.set({ selectedProvider: message.provider as string });
             sendResponse({ success: true });
           } catch (error: unknown) {
             sendResponse({ success: false, error: getErrorMessage(error) });
@@ -132,9 +128,7 @@ export function registerMessageHandler(): void {
       if (message.type === 'updateInboxTag') {
         (async () => {
           try {
-            const { inboxes = [] } = (await browser.storage.local.get(['inboxes'])) as {
-              inboxes?: Account[];
-            };
+            const inboxes = await getInboxes();
             const inboxIndex = inboxes.findIndex((i) => i.id === message.inboxId);
             if (inboxIndex === -1) {
               sendResponse({ success: false, error: 'Inbox not found' });
@@ -142,7 +136,7 @@ export function registerMessageHandler(): void {
             }
             inboxes[inboxIndex].tag = message.tag;
             inboxes[inboxIndex].tagColor = message.color || null;
-            await browser.storage.local.set({ inboxes });
+            await setInboxes(inboxes);
             sendResponse({ success: true });
           } catch (error: unknown) {
             sendResponse({ success: false, error: getErrorMessage(error) });
@@ -154,19 +148,18 @@ export function registerMessageHandler(): void {
       if (message.type === 'archiveInbox') {
         (async () => {
           try {
-            const { inboxes = [] } = (await browser.storage.local.get(['inboxes'])) as {
-              inboxes?: Account[];
-            };
+            const inboxes = await getInboxes();
             const inbox = inboxes.find((i) => i.id === message.inboxId);
             if (!inbox) {
               sendResponse({ success: false, error: 'Inbox not found' });
               return;
             }
             await clearStoredEmails(inbox.address);
-            const updatedInboxes = inboxes.map((i) =>
-              i.id === message.inboxId ? { ...i, accountStatus: 'archived' as const } : i
+            await setInboxes(
+              inboxes.map((i) =>
+                i.id === message.inboxId ? { ...i, accountStatus: 'archived' as const } : i
+              )
             );
-            await browser.storage.local.set({ inboxes: updatedInboxes });
             sendResponse({ success: true });
           } catch (e) {
             logError('archiveInbox error:', e);
@@ -179,18 +172,17 @@ export function registerMessageHandler(): void {
       if (message.type === 'unarchiveInbox') {
         (async () => {
           try {
-            const { inboxes = [] } = (await browser.storage.local.get(['inboxes'])) as {
-              inboxes?: Account[];
-            };
+            const inboxes = await getInboxes();
             const inbox = inboxes.find((i) => i.id === message.inboxId);
             if (!inbox) {
               sendResponse({ success: false, error: 'Inbox not found' });
               return;
             }
-            const updatedInboxes = inboxes.map((i) =>
-              i.id === message.inboxId ? { ...i, accountStatus: 'active' as const } : i
+            await setInboxes(
+              inboxes.map((i) =>
+                i.id === message.inboxId ? { ...i, accountStatus: 'active' as const } : i
+              )
             );
-            await browser.storage.local.set({ inboxes: updatedInboxes });
             sendResponse({ success: true });
           } catch (e) {
             logError('unarchiveInbox error:', e);
@@ -203,9 +195,7 @@ export function registerMessageHandler(): void {
       if (message.type === 'getProvider') {
         (async () => {
           try {
-            const { selectedProvider } = (await browser.storage.local.get([
-              'selectedProvider',
-            ])) as { selectedProvider?: string };
+            const selectedProvider = await getSelectedProvider();
             sendResponse({ success: true, provider: selectedProvider });
           } catch (error: unknown) {
             sendResponse({ success: false, error: getErrorMessage(error) });
@@ -355,9 +345,7 @@ export function registerMessageHandler(): void {
       if (message.type === 'renewInbox') {
         (async () => {
           try {
-            const { inboxes = [] } = (await browser.storage.local.get(['inboxes'])) as {
-              inboxes?: Account[];
-            };
+            const inboxes = await getInboxes();
             const inbox = inboxes.find((i) => i.id === message.inboxId);
             if (!inbox) {
               sendResponse({ success: false, error: 'Inbox not found' });
@@ -400,24 +388,20 @@ export function registerMessageHandler(): void {
               });
             }
 
-            const { inboxes: allInboxes = [] } = (await browser.storage.local.get(['inboxes'])) as {
-              inboxes?: Account[];
-            };
+            const allInboxes = await getInboxes();
             const inboxIndex = allInboxes.findIndex((i: Account) => i.id === inbox.id);
 
             if (inboxIndex !== -1) {
               const timestamp = newEmailResponse.timestamp as number;
               const expiryConfig = loadProviderConfig(inbox.provider);
-              const updatedInbox = {
+              allInboxes[inboxIndex] = {
                 ...allInboxes[inboxIndex],
                 sidToken: newSidToken,
                 expiresAt:
                   ((timestamp || 0) + (expiryConfig.expiry?.duration || 3600000) / 1000) * 1000,
                 expiryNotified: false,
               };
-
-              allInboxes[inboxIndex] = updatedInbox;
-              await browser.storage.local.set({ inboxes: allInboxes });
+              await setInboxes(allInboxes);
             }
 
             sendResponse({ success: true });
@@ -447,8 +431,7 @@ export function registerMessageHandler(): void {
             const instance = message.instance as Omit<ProviderInstance, 'id' | 'isCustom'>;
             validateCustomInstanceName(instance.name);
             validateCustomInstanceUrl(instance.apiUrl);
-            const { selectedProvider } = await browser.storage.local.get(['selectedProvider']);
-            const provider = (selectedProvider as string) || DEFAULT_PROVIDER;
+            const provider = await getSelectedProvider();
             await addCustomProviderInstance(provider, instance);
             sendResponse({ success: true });
           } catch (error: unknown) {
@@ -461,8 +444,7 @@ export function registerMessageHandler(): void {
       if (message.action === 'removeCustomInstance') {
         (async () => {
           try {
-            const { selectedProvider } = await browser.storage.local.get(['selectedProvider']);
-            const provider = (selectedProvider as string) || DEFAULT_PROVIDER;
+            const provider = await getSelectedProvider();
             await removeCustomProviderInstance(provider, message.instanceId as string);
             sendResponse({ success: true });
           } catch (error: unknown) {
@@ -475,8 +457,7 @@ export function registerMessageHandler(): void {
       if (message.action === 'getSelectedInstance') {
         (async () => {
           try {
-            const { selectedProvider } = await browser.storage.local.get(['selectedProvider']);
-            const provider = (selectedProvider as string) || DEFAULT_PROVIDER;
+            const provider = await getSelectedProvider();
             const instance = await getSelectedProviderInstance(provider);
             sendResponse({ success: true, instance });
           } catch (error: unknown) {
@@ -504,8 +485,7 @@ export function registerMessageHandler(): void {
             const instance = message.instance as Omit<ProviderInstance, 'id' | 'isCustom'>;
             validateCustomInstanceName(instance.name);
             validateCustomInstanceUrl(instance.apiUrl);
-            const { selectedProvider } = await browser.storage.local.get(['selectedProvider']);
-            const provider = (selectedProvider as string) || DEFAULT_PROVIDER;
+            const provider = await getSelectedProvider();
             await addCustomProviderInstance(provider, instance);
             sendResponse({ success: true });
           } catch (error: unknown) {
@@ -518,8 +498,7 @@ export function registerMessageHandler(): void {
       if (message.action === 'removeCustomProviderInstance') {
         (async () => {
           try {
-            const { selectedProvider } = await browser.storage.local.get(['selectedProvider']);
-            const provider = (selectedProvider as string) || DEFAULT_PROVIDER;
+            const provider = await getSelectedProvider();
             await removeCustomProviderInstance(provider, message.instanceId as string);
             sendResponse({ success: true });
           } catch (error: unknown) {
@@ -532,8 +511,7 @@ export function registerMessageHandler(): void {
       if (message.action === 'getSelectedProviderInstance') {
         (async () => {
           try {
-            const { selectedProvider } = await browser.storage.local.get(['selectedProvider']);
-            const provider = (selectedProvider as string) || DEFAULT_PROVIDER;
+            const provider = await getSelectedProvider();
             const instance = await getSelectedProviderInstance(provider);
             sendResponse({ success: true, instance });
           } catch (error: unknown) {
@@ -546,10 +524,9 @@ export function registerMessageHandler(): void {
       if (message.action === 'setSelectedProviderInstance') {
         (async () => {
           try {
-            const { selectedProvider } = await browser.storage.local.get(['selectedProvider']);
-            const provider = (selectedProvider as string) || DEFAULT_PROVIDER;
+            const provider = await getSelectedProvider();
             const storageKey = `selectedInstance_${provider}`;
-            await browser.storage.local.set({ [storageKey]: message.instanceId });
+            await browser.storage.local.set({ [storageKey]: message.instanceId as string });
             sendResponse({ success: true });
           } catch (error: unknown) {
             sendResponse({ success: false, error: getErrorMessage(error) });
@@ -617,6 +594,18 @@ export function registerMessageHandler(): void {
             const msg = error instanceof Error ? error.message : String(error);
             logError('fetchFavicon error', msg);
             sendResponse({ success: false, error: msg });
+          }
+        })();
+        return true;
+      }
+
+      if (message.type === 'updateRefreshInterval') {
+        (async () => {
+          try {
+            await updateRefreshAlarm(message.intervalMs as number);
+            sendResponse({ success: true });
+          } catch (error: unknown) {
+            sendResponse({ success: false, error: getErrorMessage(error) });
           }
         })();
         return true;

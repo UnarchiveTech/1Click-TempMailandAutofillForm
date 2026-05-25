@@ -1,5 +1,7 @@
 <script lang="ts">
 import { onMount } from 'svelte';
+import IconCheck from '@/components/icons/IconCheck.svelte';
+import IconChevronDown from '@/components/icons/IconChevronDown.svelte';
 import { isRTL, locale, setLanguage } from '@/lib/i18n';
 
 const languages = [
@@ -64,16 +66,7 @@ function toggleDropdown() {
       loading="lazy"
     />
     <span class="text-sm font-medium">{languages.find(lang => lang.code === currentLanguage)?.name}</span>
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      class="w-4 h-4 {isOpen ? 'rotate-180' : ''} transition-transform"
-      fill="none"
-      viewBox="0 0 24 24"
-      stroke="currentColor"
-      stroke-width="2"
-    >
-      <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" />
-    </svg>
+    <IconChevronDown class="w-4 h-4 {isOpen ? 'rotate-180' : ''} transition-transform" />
   </button>
 
   {#if isOpen}
@@ -93,17 +86,7 @@ function toggleDropdown() {
           />
           <span class="text-sm font-medium">{lang.name}</span>
           {#if currentLanguage === lang.code}
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              class="w-4 h-4 text-md-primary ml-auto"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              stroke-width="2"
-              aria-hidden="true"
-            >
-              <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
-            </svg>
+            <IconCheck class="w-4 h-4 text-md-primary ml-auto" />
           {/if}
         </button>
       {/each}

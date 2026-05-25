@@ -1,6 +1,8 @@
 <script lang="ts">
 import IconX from '@/components/icons/IconX.svelte';
+import { getErrorMessage } from '@/utils/errors.js';
 import { setupFocusTrap } from '@/utils/focusTrap.js';
+import { validateTextInput } from '@/utils/validation.js';
 
 interface Props {
   open: boolean;
@@ -17,6 +19,7 @@ let { open, currentTag, currentTagColor, existingTags, tagColors, onClose, onSav
 let tagInput = $state('');
 let selectedExistingTag = $state<string | null>(null);
 let selectedColor = $state('#6366F1');
+let validationError = $state('');
 let dialogRef = $state<HTMLElement | null>(null);
 let cleanupFocusTrap: (() => void) | null = null;
 
@@ -32,6 +35,7 @@ $effect(() => {
     tagInput = '';
     selectedExistingTag = null;
   }
+  validationError = '';
 });
 
 // Setup focus trap when dialog opens
@@ -53,9 +57,15 @@ $effect(() => {
 });
 
 function handleSave() {
-  const tagToSave = selectedExistingTag || tagInput.trim();
+  let tagToSave = selectedExistingTag || tagInput.trim();
   if (!tagToSave) {
     onSave('', '');
+    return;
+  }
+  try {
+    tagToSave = validateTextInput(tagToSave, 'Tag', 32);
+  } catch (error) {
+    validationError = getErrorMessage(error);
     return;
   }
   const colorToSave =
@@ -119,6 +129,7 @@ function clearSelection() {
           maxlength="12"
           bind:value={tagInput}
           oninput={() => {
+            validationError = '';
             // Clear selected existing tag when user types in input or clears it
             if (selectedExistingTag && (tagInput !== selectedExistingTag || tagInput === '')) {
               selectedExistingTag = null;
@@ -129,6 +140,9 @@ function clearSelection() {
             else if (e.key === 'Escape') onClose();
           }}
         />
+        {#if validationError}
+          <p class="text-xs text-md-error">{validationError}</p>
+        {/if}
         {#if selectedExistingTag || tagInput}
           <button
             id="button-clear-tag"

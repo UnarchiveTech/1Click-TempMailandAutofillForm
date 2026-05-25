@@ -205,8 +205,12 @@ export async function fillSignupForm(
 
     await updateAndCopyCredentials(credentials);
 
-    const { loginInfo = [] } = (await browser.storage.local.get(['loginInfo'])) as {
+    const { loginInfo = [], selectedIdentityId } = (await browser.storage.local.get([
+      'loginInfo',
+      'selectedIdentityId',
+    ])) as {
       loginInfo?: CredentialsHistoryItem[];
+      selectedIdentityId?: string;
     };
     const newCredential: CredentialsHistoryItem = {
       email: emailAddress,
@@ -218,6 +222,7 @@ export async function fillSignupForm(
       domain: window.location.hostname,
       timestamp: Date.now(),
       inboxId: activeInboxId,
+      identityId: selectedIdentityId,
     };
     loginInfo.unshift(newCredential);
     await browser.storage.local.set({ loginInfo });

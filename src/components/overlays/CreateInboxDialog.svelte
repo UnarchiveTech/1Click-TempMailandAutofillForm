@@ -1,5 +1,8 @@
 <script lang="ts">
+import IconX from '@/components/icons/IconX.svelte';
+import { getErrorMessage } from '@/utils/errors.js';
 import { setupFocusTrap } from '@/utils/focusTrap.js';
+import { validateUsername } from '@/utils/validation.js';
 
 interface Props {
   open: boolean;
@@ -11,6 +14,7 @@ let { open, onClose, onCreate }: Props = $props();
 
 let inboxType = $state<'random' | 'custom'>('random');
 let customUsername = $state('');
+let validationError = $state('');
 let dialogRef = $state<HTMLElement | null>(null);
 let cleanupFocusTrap: (() => void) | null = null;
 
@@ -32,12 +36,18 @@ $effect(() => {
 });
 
 function handleCreate() {
+  validationError = '';
   if (inboxType === 'random') {
     onCreate('random');
   } else {
     const trimmed = customUsername.trim();
     if (trimmed) {
-      onCreate('custom', trimmed);
+      try {
+        validateUsername(trimmed);
+        onCreate('custom', trimmed);
+      } catch (error) {
+        validationError = getErrorMessage(error);
+      }
     }
   }
 }
@@ -45,6 +55,7 @@ function handleCreate() {
 function handleClose() {
   inboxType = 'random';
   customUsername = '';
+  validationError = '';
   onClose();
 }
 </script>
@@ -64,9 +75,7 @@ function handleClose() {
       aria-label="Close dialog"
       onclick={handleClose}
     >
-      <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 text-md-on-surface/70" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
-        <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
-      </svg>
+      <IconX class="w-4 h-4 text-md-on-surface/70" />
     </button>
 
     <div
@@ -114,6 +123,7 @@ function handleClose() {
                 placeholder="Enter username..."
                 aria-label="Custom username"
                 bind:value={customUsername}
+                oninput={() => validationError = ''}
                 onkeydown={(e) => {
                   if (e.key === 'Enter') handleCreate();
                   else if (e.key === 'Escape') handleClose();
@@ -121,7 +131,11 @@ function handleClose() {
               />
               <span class="text-xs text-md-on-surface/50">@guerrillamailblock.com</span>
             </div>
-            <p class="text-xs text-md-on-surface/40 ml-7">Only letters, numbers, and hyphens allowed</p>
+            {#if validationError}
+              <p class="text-xs text-md-error ml-7">{validationError}</p>
+            {:else}
+              <p class="text-xs text-md-on-surface/40 ml-7">1-64 characters, letters, numbers, and underscores only</p>
+            {/if}
           {/if}
         </label>
       </div>

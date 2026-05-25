@@ -24,8 +24,8 @@ export const GITHUB_REPO_URL = 'https://github.com/UnarchiveTech/1Click-TempMail
 export const GITHUB_ISSUES_URL =
   'https://github.com/UnarchiveTech/1Click-TempMailwithAutofill/issues/new';
 export const GOOGLE_FAVICON_API_URL = 'https://www.google.com/s2/favicons';
-export const USERNAME_MIN_LENGTH = 8;
-export const USERNAME_MAX_LENGTH = 15;
+export const USERNAME_MIN_LENGTH = 1;
+export const USERNAME_MAX_LENGTH = 64;
 
 // Toast notification durations (in milliseconds)
 export const TOAST_DEFAULT_DURATION_MS = 3000;
@@ -83,3 +83,12 @@ export const PHONE_LAST_PART_MAX = 9999;
 // OTP detection patterns
 export const OTP_LENGTH_MIN = 4;
 export const OTP_LENGTH_MAX = 8;
+
+// Storage monitoring thresholds (in bytes)
+export const STORAGE_WARNING_THRESHOLD = 4.5 * 1024 * 1024; // 4.5MB
+export const STORAGE_CRITICAL_THRESHOLD = 4.8 * 1024 * 1024; // 4.8MB
+export const STORAGE_LIMIT = 5 * 1024 * 1024; // 5MB
+
+// Favicon cache limits
+export const MAX_FAVICON_CACHE_SIZE = 100; // Max cache entries
+export const FAVICON_CACHE_EVICT_RATIO = 0.2; // Remove 20% of oldest entries when full

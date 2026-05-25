@@ -42,6 +42,30 @@ export interface DeveloperSettings {
   enableLogging: boolean;
 }
 
+export interface Keybinding {
+  key: string;
+  ctrlKey?: boolean;
+  metaKey?: boolean;
+  shiftKey?: boolean;
+  altKey?: boolean;
+}
+
+export interface Keybindings {
+  refreshInbox: Keybinding;
+  createInbox: Keybinding;
+  copyEmail: Keybinding;
+  copyOtp: Keybinding;
+  closeDialogs: Keybinding;
+}
+
+export const DEFAULT_KEYBINDINGS: Keybindings = {
+  refreshInbox: { key: 'r', ctrlKey: true, metaKey: true },
+  createInbox: { key: 'n', ctrlKey: true, metaKey: true },
+  copyEmail: { key: 'c', ctrlKey: true, metaKey: true },
+  copyOtp: { key: 'o', ctrlKey: true, metaKey: true },
+  closeDialogs: { key: 'Escape' },
+};
+
 export interface StoredSettings {
   passwordSettings?: PasswordSettings;
   nameSettings?: NameSettings;
@@ -51,9 +75,13 @@ export interface StoredSettings {
   selectedInstance?: string;
   customInstances?: ProviderInstance[];
   notificationSettings?: NotificationSettings;
+  keybindings?: Keybindings;
+  autoRefreshInterval?: number;
   themeMode?: 'light' | 'dark' | 'system';
   developerSettings?: DeveloperSettings;
   faviconCaching?: 'direct' | 'local';
+  emailPreviewEnabled?: boolean;
+  guerrillaDefaultDomain?: string;
 }
 
 export interface ProviderInstance {
@@ -153,6 +181,7 @@ export interface Email {
   isOtp?: boolean;
   unread?: boolean;
   date?: string; // Formatted date string
+  tags?: string[]; // Custom user-defined labels
 }
 
 export interface SavedLogin {
@@ -179,6 +208,7 @@ export interface Identity {
 export interface NotificationSettings {
   enabled: boolean;
   soundEnabled: boolean;
+  expiryWarningThreshold: number; // in milliseconds (default: 1 hour)
 }
 
 export interface SessionCredentials {
@@ -204,8 +234,10 @@ export interface SavedSearchFilter {
   searchQuery: string;
   hasOTP: boolean;
   senderDomain: string;
+  selectedSenders?: string[];
   dateFrom: string;
   dateTo: string;
+  sortBy?: string;
   createdAt: number;
 }
 
@@ -337,6 +369,7 @@ export interface CredentialsHistoryItem {
   website?: string | null;
   password?: string;
   inboxId?: string;
+  identityId?: string;
   [key: string]: unknown;
 }
 
@@ -380,7 +413,7 @@ export type BackgroundMessage =
       emailUser?: string;
     }
   | { type: 'checkEmails'; inboxId: string; filters?: EmailFilters }
-  | { type: 'deleteInbox'; inboxId: string }
+  | { type: 'deleteInbox'; inboxId: string; preserveEmails?: boolean }
   | { type: 'restoreInbox'; inboxId: string }
   | { type: 'getInboxes' }
   | { type: 'setProvider'; provider: MailProvider }

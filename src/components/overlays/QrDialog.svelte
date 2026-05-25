@@ -1,6 +1,9 @@
 <script lang="ts">
 import QRCode from 'qrcode';
 import { onMount } from 'svelte';
+import IconCopy from '@/components/icons/IconCopy.svelte';
+import IconDownload from '@/components/icons/IconDownload.svelte';
+import IconX from '@/components/icons/IconX.svelte';
 import { rgbToHex } from '@/utils/color-utils.js';
 import { setupFocusTrap } from '@/utils/focusTrap.js';
 import { logError } from '@/utils/logger.js';
@@ -112,9 +115,7 @@ $effect(() => {
       aria-label="Close dialog"
       onclick={onClose}
     >
-      <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 text-md-on-surface/70" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
-        <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
-      </svg>
+      <IconX class="w-4 h-4 text-md-on-surface/70" />
     </button>
 
     <div
@@ -134,9 +135,7 @@ $effect(() => {
           aria-label="Download QR code"
           onclick={onDownload}
         >
-          <svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
-          </svg>
+          <IconDownload class="w-3.5 h-3.5" />
           Download QR
         </button>
         <button
@@ -144,9 +143,7 @@ $effect(() => {
           aria-label="Copy QR code as image"
           onclick={onCopyImage}
         >
-          <svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/>
-          </svg>
+          <IconCopy class="w-3.5 h-3.5" />
           Copy QR Image
         </button>
       </div>

@@ -340,7 +340,11 @@ function getTextColor() {
       {#if toast.undoAction}
         <button
           class="text-white/80 hover:text-white transition-colors text-xs font-medium"
-          onclick={toast.undoAction}
+          onclick={() => {
+            toast.undoAction?.();
+            visible = false;
+            setTimeout(() => onClose(toast.id), 300);
+          }}
           aria-label="Undo action"
         >
           Undo

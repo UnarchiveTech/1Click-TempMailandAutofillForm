@@ -28,7 +28,7 @@ let {
 <div class="px-4 py-2">
   <div class="flex items-center gap-2 w-full px-3 py-2 rounded-lg border border-md-outline-variant text-sm bg-md-surface-container-low">
     <IconSearch class="w-4 h-4 text-md-on-surface/40 shrink-0" />
-    <input type="text" class="grow bg-transparent outline-none" placeholder="Search archived emails..." bind:value={archivedSearch} oninput={(e) => onSearchChange((e.target as HTMLInputElement).value)} />
+    <input type="text" class="grow bg-transparent outline-none" placeholder="Search archived emails..." value={archivedSearch} oninput={(e) => onSearchChange((e.target as HTMLInputElement).value)} />
   </div>
 </div>
 <div class="flex-1 overflow-y-auto px-4 py-3 space-y-3" style="scrollbar-width: thin; scrollbar-color: var(--md-primary) transparent;">

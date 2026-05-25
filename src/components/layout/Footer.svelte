@@ -7,10 +7,37 @@ import IconMail from '@/components/icons/IconMail.svelte';
 import IconSettings from '@/components/icons/IconSettings.svelte';
 import IconUser from '@/components/icons/IconUser.svelte';
 
-let { currentView = 'main', onNavigate = () => {} } = $props<{
+import type { Account } from '@/utils/types.js';
+
+let {
+  currentView = 'main',
+  onNavigate = () => {},
+  accounts = [],
+  unreadByAddress = {},
+} = $props<{
   currentView?: View;
   onNavigate?: (view: View) => void;
+  accounts?: Account[];
+  unreadByAddress?: Record<string, number>;
 }>();
+
+let totalUnread = $derived(
+  (Object.entries(unreadByAddress) as [string, number][])
+    .filter(([addr]) => accounts.some((a: Account) => a.address === addr && a.status === 'active'))
+    .reduce((sum, [, count]) => sum + count, 0)
+);
+
+let unreadTooltip = $derived.by(() => {
+  if (!totalUnread) return 'Inbox';
+  const activeWithUnread = (Object.entries(unreadByAddress) as [string, number][])
+    .filter(
+      ([addr, count]) =>
+        count > 0 && accounts.some((a: Account) => a.address === addr && a.status === 'active')
+    )
+    .map(([addr, count]) => `${addr} \u2192 ${count} unread`);
+  if (activeWithUnread.length === 0) return 'Inbox';
+  return activeWithUnread.join('\n');
+});
 
 type View =
   | 'main'
@@ -22,7 +49,14 @@ type View =
   | 'emailDetail'
   | 'messageDetail'
   | 'about'
-  | 'identities';
+  | 'identities'
+  | 'keybindings'
+  | 'tagManagement'
+  | 'filtersManagement'
+  | 'mailProvider'
+  | 'storagePerformance'
+  | 'labelManagement'
+  | 'mailboxManagement';
 
 const navItems: { view: View; label: string; icon: Component }[] = [
   { view: 'main', label: 'Inbox', icon: IconMail },
@@ -44,13 +78,20 @@ const navItems: { view: View; label: string; icon: Component }[] = [
   >
     {#each navItems as item}
       {@const isActive = currentView === item.view}
+      {@const isInbox = item.view === 'main'}
       <button
         class="relative flex-1 flex flex-col items-center gap-0.5 px-1.5 py-1.5 transition-all duration-200 hover:scale-105 active:scale-95 {isActive ? 'bg-md-primary rounded-[10px]' : 'rounded-full hover:bg-md-surface-variant'}"
         aria-label={item.label}
         aria-current={isActive ? 'page' : undefined}
         onclick={() => onNavigate(item.view)}
+        title={isInbox && unreadTooltip ? unreadTooltip : item.label}
       >
-        <item.icon class="w-4 h-4 transition-colors duration-200 {isActive ? 'text-md-on-primary' : 'text-md-on-surface/50'}" />
+        <div class="relative">
+          <item.icon class="w-4 h-4 transition-colors duration-200 {isActive ? 'text-md-on-primary' : 'text-md-on-surface/50'}" />
+          {#if isInbox && totalUnread > 0}
+            <span class="absolute -top-1.5 -right-1.5 min-w-[14px] h-[14px] flex items-center justify-center rounded-full text-[8px] font-bold px-0.5 bg-md-error text-md-on-error">{totalUnread > 99 ? '99+' : totalUnread}</span>
+          {/if}
+        </div>
         <span class="text-[10px] font-semibold leading-none transition-colors duration-200 {isActive ? 'text-md-on-primary' : 'text-md-on-surface/50'}">
           {item.label}
         </span>

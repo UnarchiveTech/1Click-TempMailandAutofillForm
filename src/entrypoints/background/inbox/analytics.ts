@@ -2,27 +2,13 @@
  * Analytics management for the extension
  */
 
-import { browser } from 'wxt/browser';
 import { log, logError } from '@/utils/logger.js';
+import { DEFAULT_ANALYTICS, getAnalyticsRecord, setAnalyticsRecord } from '@/utils/storage-keys.js';
 import type { Analytics } from '@/utils/types.js';
 
 export async function initializeAnalytics(): Promise<void> {
   try {
-    const {
-      analytics = {
-        accountsCreated: 0,
-        emailsReceived: 0,
-        otpsDetected: 0,
-        notificationsSent: 0,
-        performance: {
-          emailFetchTimes: [],
-          providerLatency: {},
-          uiRenderTimes: [],
-        },
-      },
-    }: { analytics: Analytics } = (await browser.storage.local.get(['analytics'])) as {
-      analytics: Analytics;
-    };
+    const analytics = await getAnalyticsRecord();
     if (!analytics.createdAt) {
       analytics.createdAt = Date.now();
       analytics.accountsCreated = 0;
@@ -34,7 +20,7 @@ export async function initializeAnalytics(): Promise<void> {
         providerLatency: {},
         uiRenderTimes: [],
       };
-      await browser.storage.local.set({ analytics });
+      await setAnalyticsRecord(analytics);
       log('Analytics initialized:', analytics);
     }
   } catch (error: unknown) {
@@ -44,40 +30,16 @@ export async function initializeAnalytics(): Promise<void> {
 
 export async function incrementAnalytic(key: keyof Analytics): Promise<void> {
   try {
-    const {
-      analytics = {
-        accountsCreated: 0,
-        emailsReceived: 0,
-        otpsDetected: 0,
-        notificationsSent: 0,
-      },
-    }: { analytics: Analytics } = (await browser.storage.local.get(['analytics'])) as {
-      analytics: Analytics;
-    };
+    const analytics = await getAnalyticsRecord();
     (analytics[key] as number) = ((analytics[key] as number) || 0) + 1;
-    await browser.storage.local.set({ analytics });
+    await setAnalyticsRecord(analytics);
   } catch (error: unknown) {
     logError('Error updating analytics:', error);
   }
 }
 
 export async function getAnalytics(): Promise<Analytics> {
-  const {
-    analytics = {
-      accountsCreated: 0,
-      emailsReceived: 0,
-      otpsDetected: 0,
-      notificationsSent: 0,
-      performance: {
-        emailFetchTimes: [],
-        providerLatency: {},
-        uiRenderTimes: [],
-      },
-    },
-  } = (await browser.storage.local.get(['analytics'])) as {
-    analytics?: Analytics;
-  };
-  return analytics;
+  return getAnalyticsRecord();
 }
 
 /**
@@ -86,28 +48,9 @@ export async function getAnalytics(): Promise<Analytics> {
  */
 export async function recordEmailFetchTime(fetchTime: number): Promise<void> {
   try {
-    const {
-      analytics = {
-        accountsCreated: 0,
-        emailsReceived: 0,
-        otpsDetected: 0,
-        notificationsSent: 0,
-        performance: {
-          emailFetchTimes: [],
-          providerLatency: {},
-          uiRenderTimes: [],
-        },
-      },
-    }: { analytics: Analytics } = (await browser.storage.local.get(['analytics'])) as {
-      analytics: Analytics;
-    };
-
+    const analytics = await getAnalyticsRecord();
     if (!analytics.performance) {
-      analytics.performance = {
-        emailFetchTimes: [],
-        providerLatency: {},
-        uiRenderTimes: [],
-      };
+      analytics.performance = { ...DEFAULT_ANALYTICS.performance! };
     }
 
     // Keep only last 100 fetch times to avoid storage bloat
@@ -116,7 +59,7 @@ export async function recordEmailFetchTime(fetchTime: number): Promise<void> {
       analytics.performance.emailFetchTimes.shift();
     }
 
-    await browser.storage.local.set({ analytics });
+    await setAnalyticsRecord(analytics);
   } catch (error: unknown) {
     logError('Error recording email fetch time:', error);
   }
@@ -129,28 +72,9 @@ export async function recordEmailFetchTime(fetchTime: number): Promise<void> {
  */
 export async function recordProviderLatency(provider: string, latency: number): Promise<void> {
   try {
-    const {
-      analytics = {
-        accountsCreated: 0,
-        emailsReceived: 0,
-        otpsDetected: 0,
-        notificationsSent: 0,
-        performance: {
-          emailFetchTimes: [],
-          providerLatency: {},
-          uiRenderTimes: [],
-        },
-      },
-    }: { analytics: Analytics } = (await browser.storage.local.get(['analytics'])) as {
-      analytics: Analytics;
-    };
-
+    const analytics = await getAnalyticsRecord();
     if (!analytics.performance) {
-      analytics.performance = {
-        emailFetchTimes: [],
-        providerLatency: {},
-        uiRenderTimes: [],
-      };
+      analytics.performance = { ...DEFAULT_ANALYTICS.performance! };
     }
 
     if (!analytics.performance.providerLatency[provider]) {
@@ -163,7 +87,7 @@ export async function recordProviderLatency(provider: string, latency: number): 
       analytics.performance.providerLatency[provider].shift();
     }
 
-    await browser.storage.local.set({ analytics });
+    await setAnalyticsRecord(analytics);
   } catch (error: unknown) {
     logError('Error recording provider latency:', error);
   }
@@ -175,28 +99,9 @@ export async function recordProviderLatency(provider: string, latency: number): 
  */
 export async function recordUIRenderTime(renderTime: number): Promise<void> {
   try {
-    const {
-      analytics = {
-        accountsCreated: 0,
-        emailsReceived: 0,
-        otpsDetected: 0,
-        notificationsSent: 0,
-        performance: {
-          emailFetchTimes: [],
-          providerLatency: {},
-          uiRenderTimes: [],
-        },
-      },
-    }: { analytics: Analytics } = (await browser.storage.local.get(['analytics'])) as {
-      analytics: Analytics;
-    };
-
+    const analytics = await getAnalyticsRecord();
     if (!analytics.performance) {
-      analytics.performance = {
-        emailFetchTimes: [],
-        providerLatency: {},
-        uiRenderTimes: [],
-      };
+      analytics.performance = { ...DEFAULT_ANALYTICS.performance! };
     }
 
     // Keep only last 50 render times to avoid storage bloat
@@ -205,7 +110,7 @@ export async function recordUIRenderTime(renderTime: number): Promise<void> {
       analytics.performance.uiRenderTimes.shift();
     }
 
-    await browser.storage.local.set({ analytics });
+    await setAnalyticsRecord(analytics);
   } catch (error: unknown) {
     logError('Error recording UI render time:', error);
   }
@@ -231,11 +136,7 @@ export async function getPerformanceSummary(): Promise<{
   avgUIRenderTime: number;
 }> {
   const analytics = await getAnalytics();
-  const performance = analytics.performance || {
-    emailFetchTimes: [],
-    providerLatency: {},
-    uiRenderTimes: [],
-  };
+  const performance = analytics.performance || { ...DEFAULT_ANALYTICS.performance! };
 
   const avgProviderLatency: Record<string, number> = {};
   for (const [provider, latencies] of Object.entries(performance.providerLatency)) {

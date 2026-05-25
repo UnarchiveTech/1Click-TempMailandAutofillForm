@@ -6,18 +6,34 @@
 import { browser } from 'wxt/browser';
 import { DEBUG, EMAIL_CHECK_INTERVAL_MS, EMAIL_CLEANUP_INTERVAL_MS } from '@/utils/constants.js';
 import { log, logDebug, logError } from '@/utils/logger.js';
+import { getAutoRefreshInterval, getEmailRetentionDays, getInboxes } from '@/utils/storage-keys.js';
 import type { Alarm, Email, EmailFilters } from '@/utils/types.js';
 import { cleanupOldStoredEmails, storeNewMessages } from './email-storage.js';
+
+export async function updateRefreshAlarm(intervalMs: number): Promise<void> {
+  await browser.alarms.clear('checkEmails');
+  if (intervalMs > 0) {
+    const periodInMinutes = Math.max(intervalMs / 60 / 1000, 0.1); // Chrome minimum is ~0.1 min in dev
+    browser.alarms.create('checkEmails', { periodInMinutes });
+    if (DEBUG) log(`Refresh alarm updated: ${intervalMs / 1000}s`);
+  } else {
+    if (DEBUG) log('Refresh alarm cleared (manual only mode)');
+  }
+}
 
 export function setupPeriodicEmailCheck(
   checkNewEmailsFn: (inboxId: string, filters: EmailFilters) => Promise<Email[]>
 ): void {
   if (DEBUG) log('=== SETTING UP PERIODIC EMAIL CHECK ===');
-  if (DEBUG) log(`Email check interval: ${EMAIL_CHECK_INTERVAL_MS / 1000}s`);
 
-  browser.alarms.create('checkEmails', {
-    periodInMinutes: EMAIL_CHECK_INTERVAL_MS / 60 / 1000,
-  });
+  (async () => {
+    const intervalMs = await getAutoRefreshInterval();
+    const effectiveInterval = intervalMs > 0 ? intervalMs : EMAIL_CHECK_INTERVAL_MS;
+    if (DEBUG) log(`Email check interval: ${effectiveInterval / 1000}s`);
+    browser.alarms.create('checkEmails', {
+      periodInMinutes: Math.max(effectiveInterval / 60 / 1000, 0.1),
+    });
+  })();
 
   browser.alarms.create('cleanupStoredEmails', {
     periodInMinutes: EMAIL_CLEANUP_INTERVAL_MS / 60 / 1000,
@@ -31,9 +47,7 @@ export function setupPeriodicEmailCheck(
     if (alarm.name === 'checkEmails') {
       try {
         if (DEBUG) log('=== PERIODIC EMAIL CHECK STARTED ===');
-        const { inboxes = [] } = (await browser.storage.local.get(['inboxes'])) as {
-          inboxes?: Array<{ id: string; address: string; accountStatus?: string }>;
-        };
+        const inboxes = await getInboxes();
         if (DEBUG) log(`Found ${inboxes.length} inboxes`);
 
         if (inboxes.length === 0) {
@@ -73,11 +87,7 @@ export function setupPeriodicEmailCheck(
       }
     } else if (alarm.name === 'cleanupStoredEmails') {
       try {
-        const { emailRetentionDays = 30 } = (await browser.storage.local.get([
-          'emailRetentionDays',
-        ])) as {
-          emailRetentionDays?: number;
-        };
+        const emailRetentionDays = await getEmailRetentionDays();
         await cleanupOldStoredEmails(emailRetentionDays, emailRetentionDays * 3); // Archived retention is 3x active retention
       } catch (error: unknown) {
         logError(

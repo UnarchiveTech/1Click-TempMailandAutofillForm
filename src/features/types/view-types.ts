@@ -8,4 +8,11 @@ export type View =
   | 'emailDetail'
   | 'messageDetail'
   | 'about'
-  | 'identities';
+  | 'identities'
+  | 'keybindings'
+  | 'tagManagement'
+  | 'filtersManagement'
+  | 'mailProvider'
+  | 'storagePerformance'
+  | 'labelManagement'
+  | 'mailboxManagement';

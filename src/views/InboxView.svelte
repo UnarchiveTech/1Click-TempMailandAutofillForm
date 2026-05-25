@@ -17,6 +17,7 @@ import IconQr from '@/components/icons/IconQr.svelte';
 import IconSearch from '@/components/icons/IconSearch.svelte';
 import IconSettings from '@/components/icons/IconSettings.svelte';
 import IconShield from '@/components/icons/IconShield.svelte';
+import IconThreads from '@/components/icons/IconThreads.svelte';
 import IconTrash from '@/components/icons/IconTrash.svelte';
 import IconX from '@/components/icons/IconX.svelte';
 import TagDialog from '@/components/overlays/TagDialog.svelte';
@@ -37,6 +38,8 @@ import {
   loadAllProviderConfigs,
   loadProviderConfig,
 } from '@/utils/email-service.js';
+import type { EmailThread } from '@/utils/email-threads.js';
+import { groupEmailsByThread } from '@/utils/email-threads.js';
 import { getDomainFaviconUrl, getRootDomainFaviconUrl } from '@/utils/favicon.js';
 import { logError } from '@/utils/logger.js';
 import { timeAgo } from '@/utils/time.js';
@@ -215,6 +218,7 @@ let {
   sortBy = 'newest',
   otpOnly = false,
   senderDomain = '',
+  senderEmail = '',
   selectedSenders = [] as string[],
   dateFrom = '',
   dateTo = '',
@@ -260,7 +264,9 @@ let {
     _hasOTP: boolean,
     _senderDomain: string,
     _dateFrom: string,
-    _dateTo: string
+    _dateTo: string,
+    _selectedSenders: string[],
+    _sortBy: string
   ) => {},
   onLoadFilter = (_filter: SavedSearchFilter) => {},
   onRenameFilter = (_id: string, _name: string) => {},
@@ -269,11 +275,14 @@ let {
   onNavigateToManage = () => {},
   autoRenew = false,
   onToggleAutoRenew = () => {},
+  guerrillaDefaultDomain = '',
   dropdownOpen = undefined,
   openSection = undefined,
   onDropdownOpenChange = (_open: boolean) => {},
   onCreateInboxWithProvider = () => {},
   showToast = (_message: string) => {},
+  selectedProviderInstance = null as string | null,
+  emailPreviewEnabled = true,
 }: {
   context?: 'popup' | 'sidepanel' | 'app';
   selectedEmail?: string;
@@ -286,6 +295,7 @@ let {
   sortBy?: string;
   otpOnly?: boolean;
   senderDomain?: string;
+  senderEmail?: string;
   selectedSenders?: string[];
   dateFrom?: string;
   dateTo?: string;
@@ -332,7 +342,9 @@ let {
     hasOTP: boolean,
     senderDomain: string,
     dateFrom: string,
-    dateTo: string
+    dateTo: string,
+    selectedSenders: string[],
+    sortBy: string
   ) => void;
   onLoadFilter?: (filter: SavedSearchFilter) => void;
   onRenameFilter?: (id: string, name: string) => void;
@@ -341,9 +353,12 @@ let {
   onNavigateToManage?: () => void | Promise<void>;
   autoRenew?: boolean;
   onToggleAutoRenew?: () => void;
+  guerrillaDefaultDomain?: string;
   openSection?: 'active' | 'archived' | 'expired' | null;
   onDropdownOpenChange?: (open: boolean) => void;
   onCreateInboxWithProvider?: (providerId: string, instanceId?: string) => void;
+  selectedProviderInstance?: string | null;
+  emailPreviewEnabled?: boolean;
 } = $props();
 
 let otpSenderEmail = $derived(
@@ -409,8 +424,36 @@ $effect(() => {
 let displayedEmailCount = $state(20);
 const BATCH_SIZE = 20;
 
-// Displayed emails for lazy loading
+// Thread grouping state
+let threadGrouping = $state(false);
+let expandedThreadIds = $state<Set<string>>(new Set());
+
+let emailThreads = $derived.by((): EmailThread[] => {
+  if (!threadGrouping) return [];
+  return groupEmailsByThread(filteredEmails);
+});
+
+function toggleThread(threadId: string) {
+  const next = new Set(expandedThreadIds);
+  if (next.has(threadId)) next.delete(threadId);
+  else next.add(threadId);
+  expandedThreadIds = next;
+}
+
+// Displayed emails for lazy loading (flattened from threads when grouping is on)
 let displayedEmails = $derived.by(() => {
+  if (threadGrouping) {
+    // When thread grouping is on, show only thread header emails (latest per thread)
+    // The full thread is expanded inline
+    return emailThreads
+      .flatMap(
+        (t) =>
+          expandedThreadIds.has(t.id)
+            ? t.emails // expanded: show all emails in thread
+            : [t.latestEmail] // collapsed: show only the latest
+      )
+      .slice(0, displayedEmailCount);
+  }
   return filteredEmails.slice(0, displayedEmailCount);
 });
 
@@ -540,6 +583,7 @@ let tagColors = $derived.by(() => {
   {selectedEmail}
   bind:displayedEmail
   {accounts}
+  {guerrillaDefaultDomain}
   {allAccounts}
   {dropdownOpen}
   {onDropdownOpenChange}
@@ -556,6 +600,7 @@ let tagColors = $derived.by(() => {
   onNavigateToSettings={onNavigateToSettings}
   onCreateInboxWithProvider={onCreateInboxWithProvider}
   {showToast}
+  {selectedProviderInstance}
 />
 </div>
 
@@ -733,12 +778,13 @@ let tagColors = $derived.by(() => {
   sortBy={sortBy}
   otpOnly={otpOnly}
   senderDomain={senderDomain}
+  senderEmail={senderEmail}
   selectedSenders={selectedSenders}
   emails={emails}
   dateFrom={dateFrom}
   dateTo={dateTo}
   savedSearchFilters={savedSearchFilters}
-  onSearchChange={(value: string) => { console.log('[InboxView] onSearchChange received, value=', value); onSearchChange(value); }}
+  onSearchChange={(value: string) => onSearchChange(value)}
   onSortChange={(value: string) => { onSortChange(value); }}
   onOtpOnlyChange={(value: boolean) => { onOtpOnlyChange(value); }}
   onSenderDomainChange={(value: string) => { onSenderDomainChange(value); }}
@@ -746,8 +792,8 @@ let tagColors = $derived.by(() => {
   onDateFromChange={(value: string) => { onDateFromChange(value); }}
   onDateToChange={(value: string) => { onDateToChange(value); }}
   onClearFilters={onClearFilters}
-  onSaveFilter={async (name: string, sq: string, otp: boolean, sd: string, df: string, dt: string) => {
-    await onSaveFilter(name, sq, otp, sd, df, dt);
+  onSaveFilter={async (name: string, sq: string, otp: boolean, sd: string, df: string, dt: string, senders: string[], sort: string) => {
+    await onSaveFilter(name, sq, otp, sd, df, dt, senders, sort);
   }}
   onLoadFilter={onLoadFilter}
   onRenameFilter={onRenameFilter}
@@ -759,6 +805,19 @@ let tagColors = $derived.by(() => {
   onSearchBlur={() => { searchBarFocused = false; }}
   onFilterClick={() => { actionRowCollapsed = true; }}
 />
+
+<!-- Thread grouping toggle -->
+<div class="flex items-center justify-end px-2 py-1">
+  <button
+    class="flex items-center gap-1.5 px-2.5 py-1 text-[11px] rounded-full border transition-colors {threadGrouping ? 'border-md-primary bg-md-primary/10 text-md-primary font-semibold' : 'border-md-outline-variant text-md-on-surface/60 hover:text-md-on-surface hover:border-md-outline-variant/80'}"
+    onclick={() => { threadGrouping = !threadGrouping; expandedThreadIds = new Set(); }}
+    aria-label="Toggle thread grouping"
+    title="Group emails by conversation"
+  >
+    <IconThreads class="w-3 h-3" />
+    Threads
+  </button>
+</div>
 
 <!-- Email list -->
 <EmailList
@@ -773,6 +832,11 @@ let tagColors = $derived.by(() => {
   onRefreshInbox={onRefreshInbox}
   onCopyOtpFromMessage={onCopyOtpFromMessage}
   loadMoreEmails={loadMoreEmails}
+  threadGrouping={threadGrouping}
+  emailThreads={emailThreads}
+  expandedThreadIds={expandedThreadIds}
+  onToggleThread={toggleThread}
+  {emailPreviewEnabled}
 />
 
 <!-- Bottom strips stacked wrapper -->

@@ -1,13 +1,16 @@
 <script lang="ts">
 import { t } from 'svelte-i18n';
+import IconBookmark from '@/components/icons/IconBarChart.svelte';
 import IconBell from '@/components/icons/IconBell.svelte';
 import IconChevronDown from '@/components/icons/IconChevronDown.svelte';
 import IconClock from '@/components/icons/IconClock.svelte';
+import IconEdit from '@/components/icons/IconEdit.svelte';
 import IconEnvelope from '@/components/icons/IconEnvelope.svelte';
 import IconFilter from '@/components/icons/IconFilter.svelte';
 import IconMail from '@/components/icons/IconMail.svelte';
 import IconRefresh from '@/components/icons/IconRefresh.svelte';
 import IconSearch from '@/components/icons/IconSearch.svelte';
+import IconTrash from '@/components/icons/IconTrash.svelte';
 import IconUser from '@/components/icons/IconUser.svelte';
 import IconX from '@/components/icons/IconX.svelte';
 
@@ -16,6 +19,7 @@ let {
   sortBy = 'newest',
   otpOnly = false,
   senderDomain = '',
+  senderEmail = '',
   selectedSenders = [] as string[],
   dateFrom = '',
   dateTo = '',
@@ -35,7 +39,9 @@ let {
     _hasOTP: boolean,
     _senderDomain: string,
     _dateFrom: string,
-    _dateTo: string
+    _dateTo: string,
+    _selectedSenders: string[],
+    _sortBy: string
   ) => {},
   onLoadFilter = () => {},
   onRenameFilter = () => {},
@@ -101,8 +107,10 @@ let currentFilterSaved = $derived(
       f.searchQuery === searchQuery &&
       f.hasOTP === otpOnly &&
       f.senderDomain === senderDomain &&
+      JSON.stringify(f.selectedSenders || []) === JSON.stringify(selectedSenders) &&
       f.dateFrom === dateFrom &&
-      f.dateTo === dateTo
+      f.dateTo === dateTo &&
+      (f.sortBy || 'newest') === sortBy
   )
 );
 
@@ -262,146 +270,32 @@ function formatDateChip(from: string, to: string): string {
   </button>
 </div>
 
+
+
 <!-- Inline filter row (appears when search is focused) -->
 {#if searchFocused}
   <div bind:this={filterRowRef} class="flex flex-col gap-2 px-1 pb-2 pt-0.5 relative">
     <!-- First row: filter chips -->
     <div class="flex items-center gap-1 flex-wrap">
 
-    <!-- Sort chip -->
-    <div class="relative shrink-0">
-      <button
-        id="button-sort"
-        class="flex items-center gap-1.5 px-2 py-1.5 text-xs rounded-full border transition-colors {sortBy !== 'newest' ? 'border-md-primary bg-md-primary/10 text-md-primary' : 'border-md-outline-variant bg-transparent text-md-on-surface/80 hover:bg-md-surface-variant'}"
-        aria-label="Sort by"
-        onclick={() => { sortDropdownOpen = !sortDropdownOpen; dateDropdownOpen = false; savedFiltersDropdownOpen = false; fromDropdownOpen = false; }}
-      >
-        Sort: {sortLabel}
-        <IconChevronDown class="w-3 h-3" />
-      </button>
-      {#if sortDropdownOpen}
-        <div class="absolute top-full left-0 mt-1 bg-md-surface border border-md-outline-variant rounded-xl shadow-lg z-[200] overflow-hidden min-w-[200px]">
-          <!-- Date -->
-          {#each [['newest', 'Newest (Date)'], ['oldest', 'Oldest (Date)']] as [val, label]}
-            <button
-              id="button-sort-{val}"
-              class="w-full px-3 py-2 text-left text-xs hover:bg-md-surface-variant transition-colors {sortBy === val ? 'text-md-primary font-medium' : 'text-md-on-surface'} flex items-center gap-2"
-              onclick={() => { onSortChange(val); sortDropdownOpen = false; }}
-            >
-              <IconClock class="w-3.5 h-3.5 shrink-0" />
-              {label}
-            </button>
-          {/each}
-          <!-- Sender Name -->
-          {#each [['senderNameAsc', 'Sender Name (Ascending)'], ['senderNameDesc', 'Sender Name (Descending)']] as [val, label]}
-            <button
-              id="button-sort-{val}"
-              class="w-full px-3 py-2 text-left text-xs hover:bg-md-surface-variant transition-colors {sortBy === val ? 'text-md-primary font-medium' : 'text-md-on-surface'} flex items-center gap-2"
-              onclick={() => { onSortChange(val); sortDropdownOpen = false; }}
-            >
-              <IconUser class="w-3.5 h-3.5 shrink-0" />
-              {label}
-            </button>
-          {/each}
-          <!-- Sender Email -->
-          {#each [['senderEmailAsc', 'Sender Email (Ascending)'], ['senderEmailDesc', 'Sender Email (Descending)']] as [val, label]}
-            <button
-              id="button-sort-{val}"
-              class="w-full px-3 py-2 text-left text-xs hover:bg-md-surface-variant transition-colors {sortBy === val ? 'text-md-primary font-medium' : 'text-md-on-surface'} flex items-center gap-2"
-              onclick={() => { onSortChange(val); sortDropdownOpen = false; }}
-            >
-              <IconEnvelope class="w-3.5 h-3.5 shrink-0" />
-              {label}
-            </button>
-          {/each}
-          <!-- Subject -->
-          {#each [['subjectAsc', 'Subject (Ascending)'], ['subjectDesc', 'Subject (Descending)']] as [val, label]}
-            <button
-              id="button-sort-{val}"
-              class="w-full px-3 py-2 text-left text-xs hover:bg-md-surface-variant transition-colors {sortBy === val ? 'text-md-primary font-medium' : 'text-md-on-surface'} flex items-center gap-2"
-              onclick={() => { onSortChange(val); sortDropdownOpen = false; }}
-            >
-              <IconMail class="w-3.5 h-3.5 shrink-0" />
-              {label}
-            </button>
-          {/each}
-        </div>
-      {/if}
-    </div>
-
-    <!-- Saved Filters chip -->
-    {#if savedSearchFilters.length > 0}
-      <div class="relative shrink-0">
-        <button
-          id="button-saved-filters"
-          class="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full border transition-colors border-md-outline-variant bg-transparent text-md-on-surface/80 hover:bg-md-surface-variant"
-          aria-label="Saved filters"
-          onclick={() => { savedFiltersDropdownOpen = !savedFiltersDropdownOpen; sortDropdownOpen = false; dateDropdownOpen = false; fromDropdownOpen = false; manageFiltersOpen = false; }}
-        >
-          Saved Filters
-          <IconChevronDown class="w-3 h-3" />
-        </button>
-        {#if savedFiltersDropdownOpen}
-          <div class="absolute top-full left-0 mt-1 bg-md-surface border border-md-outline-variant rounded-xl shadow-lg z-[200] overflow-hidden min-w-[150px]">
-            {#each savedSearchFilters as filter}
-              <button
-                id="button-load-filter-{filter.id}"
-                class="w-full px-3 py-2 text-left text-xs hover:bg-md-surface-variant transition-colors text-md-on-surface"
-                onclick={() => {
-                  onSearchChange(filter.searchQuery);
-                  onSortChange('newest');
-                  onOtpOnlyChange(filter.hasOTP);
-                  onDateFromChange(filter.dateFrom);
-                  onDateToChange(filter.dateTo);
-                  datePreset = 'any';
-                  onLoadFilter(filter);
-                  savedFiltersDropdownOpen = false;
-                }}
-              >
-                {filter.name}
-              </button>
-            {/each}
-          </div>
-        {/if}
-      </div>
-    {/if}
-
-    <!-- Manage Filters chip -->
-    {#if savedSearchFilters.length > 0}
-      <button
-        id="button-manage-filters"
-        class="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full border transition-colors border-md-outline-variant bg-transparent text-md-on-surface/80 hover:bg-md-surface-variant shrink-0"
-        aria-label="Manage filters"
-        onclick={() => { manageFiltersOpen = true; savedFiltersDropdownOpen = false; sortDropdownOpen = false; dateDropdownOpen = false; fromDropdownOpen = false; }}
-      >
-        Manage Filters
-      </button>
-    {/if}
-
-    <!-- OTP chip -->
-    <button
-      id="button-otp-only"
-      class="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full border transition-colors shrink-0 {otpOnly ? 'border-md-primary bg-md-primary/10 text-md-primary' : 'border-md-outline-variant bg-transparent text-md-on-surface/80 hover:bg-md-surface-variant'}"
-      aria-label="Show only OTP emails"
-      onclick={() => { onOtpOnlyChange(!otpOnly); }}
-    >
-      has OTP
-    </button>
-
     <!-- From chip -->
     <div class="relative shrink-0">
       <button
         id="button-from-filter"
-        class="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full border transition-colors {selectedSenders.length > 0 ? 'border-md-primary bg-md-primary/10 text-md-primary' : 'border-md-outline-variant bg-transparent text-md-on-surface/80 hover:bg-md-surface-variant'}"
+        class="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full border transition-colors {selectedSenders.length > 0 || senderDomain || senderEmail ? 'border-md-primary bg-md-primary/10 text-md-primary' : 'border-md-outline-variant bg-transparent text-md-on-surface/80 hover:bg-md-surface-variant'}"
         aria-label="Filter by sender"
         onclick={() => { fromDropdownOpen = !fromDropdownOpen; sortDropdownOpen = false; dateDropdownOpen = false; savedFiltersDropdownOpen = false; }}
       >
-        {#if selectedSenders.length === 0}
+        {#if selectedSenders.length === 0 && !senderDomain && !senderEmail}
           From
         {:else if selectedSenders.length === 1}
           From {selectedSenders[0].split('@')[0]}@…
-        {:else}
+        {:else if selectedSenders.length > 1}
           From {selectedSenders[0].split('@')[0]}@… +{selectedSenders.length - 1}
+        {:else if senderDomain}
+          From {senderDomain}
+        {:else if senderEmail}
+          From {senderEmail.split('@')[0]}@…
         {/if}
         <IconChevronDown class="w-3 h-3" />
       </button>
@@ -475,6 +369,77 @@ function formatDateChip(from: string, to: string): string {
         </div>
       {/if}
     </div>
+
+    <!-- Sort chip -->
+    <div class="relative shrink-0">
+      <button
+        id="button-sort"
+        class="flex items-center gap-1.5 px-2 py-1.5 text-xs rounded-full border transition-colors {sortBy !== 'newest' ? 'border-md-primary bg-md-primary/10 text-md-primary' : 'border-md-outline-variant bg-transparent text-md-on-surface/80 hover:bg-md-surface-variant'}"
+        aria-label="Sort by"
+        onclick={() => { sortDropdownOpen = !sortDropdownOpen; dateDropdownOpen = false; savedFiltersDropdownOpen = false; fromDropdownOpen = false; }}
+      >
+        Sort: {sortLabel}
+        <IconChevronDown class="w-3 h-3" />
+      </button>
+      {#if sortDropdownOpen}
+        <div class="absolute top-full left-0 mt-1 bg-md-surface border border-md-outline-variant rounded-xl shadow-lg z-[200] overflow-hidden min-w-[200px]">
+          <!-- Date -->
+          {#each [['newest', 'Newest (Date)'], ['oldest', 'Oldest (Date)']] as [val, label]}
+            <button
+              id="button-sort-{val}"
+              class="w-full px-3 py-2 text-left text-xs hover:bg-md-surface-variant transition-colors {sortBy === val ? 'text-md-primary font-medium' : 'text-md-on-surface'} flex items-center gap-2"
+              onclick={() => { onSortChange(val); sortDropdownOpen = false; }}
+            >
+              <IconClock class="w-3.5 h-3.5 shrink-0" />
+              {label}
+            </button>
+          {/each}
+          <!-- Sender Name -->
+          {#each [['senderNameAsc', 'Sender Name (Ascending)'], ['senderNameDesc', 'Sender Name (Descending)']] as [val, label]}
+            <button
+              id="button-sort-{val}"
+              class="w-full px-3 py-2 text-left text-xs hover:bg-md-surface-variant transition-colors {sortBy === val ? 'text-md-primary font-medium' : 'text-md-on-surface'} flex items-center gap-2"
+              onclick={() => { onSortChange(val); sortDropdownOpen = false; }}
+            >
+              <IconUser class="w-3.5 h-3.5 shrink-0" />
+              {label}
+            </button>
+          {/each}
+          <!-- Sender Email -->
+          {#each [['senderEmailAsc', 'Sender Email (Ascending)'], ['senderEmailDesc', 'Sender Email (Descending)']] as [val, label]}
+            <button
+              id="button-sort-{val}"
+              class="w-full px-3 py-2 text-left text-xs hover:bg-md-surface-variant transition-colors {sortBy === val ? 'text-md-primary font-medium' : 'text-md-on-surface'} flex items-center gap-2"
+              onclick={() => { onSortChange(val); sortDropdownOpen = false; }}
+            >
+              <IconEnvelope class="w-3.5 h-3.5 shrink-0" />
+              {label}
+            </button>
+          {/each}
+          <!-- Subject -->
+          {#each [['subjectAsc', 'Subject (Ascending)'], ['subjectDesc', 'Subject (Descending)']] as [val, label]}
+            <button
+              id="button-sort-{val}"
+              class="w-full px-3 py-2 text-left text-xs hover:bg-md-surface-variant transition-colors {sortBy === val ? 'text-md-primary font-medium' : 'text-md-on-surface'} flex items-center gap-2"
+              onclick={() => { onSortChange(val); sortDropdownOpen = false; }}
+            >
+              <IconMail class="w-3.5 h-3.5 shrink-0" />
+              {label}
+            </button>
+          {/each}
+        </div>
+      {/if}
+    </div>
+
+    <!-- OTP chip -->
+    <button
+      id="button-otp-only"
+      class="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full border transition-colors shrink-0 {otpOnly ? 'border-md-primary bg-md-primary/10 text-md-primary' : 'border-md-outline-variant bg-transparent text-md-on-surface/80 hover:bg-md-surface-variant'}"
+      aria-label="Show only OTP emails"
+      onclick={() => { onOtpOnlyChange(!otpOnly); }}
+    >
+      has OTP
+    </button>
 
     <!-- Date chip -->
     <div class="relative shrink-0">
@@ -556,13 +521,64 @@ function formatDateChip(from: string, to: string): string {
       {/if}
     </div>
 
+        <!-- Saved Filters chip -->
+    {#if savedSearchFilters.length > 0}
+      <div class="relative shrink-0">
+        <button
+          id="button-saved-filters"
+          class="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full border transition-colors border-md-outline-variant bg-transparent text-md-on-surface/80 hover:bg-md-surface-variant"
+          aria-label="Saved filters"
+          onclick={() => { savedFiltersDropdownOpen = !savedFiltersDropdownOpen; sortDropdownOpen = false; dateDropdownOpen = false; fromDropdownOpen = false; manageFiltersOpen = false; }}
+        >
+          Saved Filters
+          <IconChevronDown class="w-3 h-3" />
+        </button>
+        {#if savedFiltersDropdownOpen}
+          <div class="absolute top-full left-0 mt-1 bg-md-surface border border-md-outline-variant rounded-xl shadow-lg z-[200] overflow-hidden min-w-[150px]">
+            {#each savedSearchFilters as filter}
+              <button
+                id="button-load-filter-{filter.id}"
+                class="w-full px-3 py-2 text-left text-xs hover:bg-md-surface-variant transition-colors text-md-on-surface"
+                onclick={() => {
+                  onSearchChange(filter.searchQuery);
+                  onSortChange(filter.sortBy || 'newest');
+                  onOtpOnlyChange(filter.hasOTP);
+                  onSenderDomainChange(filter.senderDomain);
+                  onSelectedSendersChange(filter.selectedSenders || []);
+                  onDateFromChange(filter.dateFrom);
+                  onDateToChange(filter.dateTo);
+                  datePreset = 'any';
+                  onLoadFilter(filter);
+                  savedFiltersDropdownOpen = false;
+                }}
+              >
+                {filter.name}
+              </button>
+            {/each}
+          </div>
+        {/if}
+      </div>
+    {/if}
+
+    <!-- Manage Filters chip -->
+    {#if savedSearchFilters.length > 0}
+      <button
+        id="button-manage-filters"
+        class="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full border transition-colors border-md-outline-variant bg-transparent text-md-on-surface/80 hover:bg-md-surface-variant shrink-0"
+        aria-label="Manage filters"
+        onclick={() => { manageFiltersOpen = true; savedFiltersDropdownOpen = false; sortDropdownOpen = false; dateDropdownOpen = false; fromDropdownOpen = false; }}
+      >
+        Manage Filters
+      </button>
+    {/if}
+
     <!-- Clear all chip (only shown if any filter is active) -->
-    {#if sortBy !== 'newest' || otpOnly || dateFrom || dateTo || selectedSenders.length > 0}
+    {#if sortBy !== 'newest' || otpOnly || dateFrom || dateTo || selectedSenders.length > 0 || searchQuery}
       <button
         id="button-clear-filters"
         class="flex items-center gap-1 px-3 py-1.5 text-xs rounded-full border border-md-error/50 bg-transparent text-md-error hover:bg-md-error/10 transition-colors shrink-0"
         aria-label="Clear all filters"
-        onclick={() => { onClearFilters(); onSortChange('newest'); onOtpOnlyChange(false); onDateFromChange(''); onDateToChange(''); onSelectedSendersChange([]); }}
+        onclick={() => { onClearFilters(); onSearchChange(''); onSortChange('newest'); onOtpOnlyChange(false); onSenderDomainChange(''); onDateFromChange(''); onDateToChange(''); onSelectedSendersChange([]); }}
       >
         <IconX class="w-3 h-3" />
         Clear
@@ -577,9 +593,7 @@ function formatDateChip(from: string, to: string): string {
         aria-label="Save as filter"
         onclick={() => { showSaveFilter = true; }}
       >
-        <svg xmlns="http://www.w3.org/2000/svg" class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" />
-        </svg>
+        <IconEdit class="w-3 h-3" />
         Save as filter
       </button>
     {/if}
@@ -612,7 +626,7 @@ function formatDateChip(from: string, to: string): string {
           onkeydown={(e) => {
             if (e.key === 'Enter') {
               if (saveFilterName.trim()) {
-                onSaveFilter(saveFilterName.trim(), searchQuery, otpOnly, senderDomain, dateFrom, dateTo);
+                onSaveFilter(saveFilterName.trim(), searchQuery, otpOnly, senderDomain, dateFrom, dateTo, selectedSenders, sortBy);
                 saveFilterName = '';
                 showSaveFilter = false;
               }
@@ -627,8 +641,7 @@ function formatDateChip(from: string, to: string): string {
             aria-label="Save filter"
             onclick={() => {
               if (saveFilterName.trim()) {
-                console.log('[FilterList] saving filter - sq:', searchQuery, 'otp:', otpOnly, 'sd:', senderDomain, 'df:', dateFrom, 'dt:', dateTo);
-                onSaveFilter(saveFilterName.trim(), searchQuery, otpOnly, senderDomain, dateFrom, dateTo);
+                onSaveFilter(saveFilterName.trim(), searchQuery, otpOnly, senderDomain, dateFrom, dateTo, selectedSenders, sortBy);
                 saveFilterName = '';
                 showSaveFilter = false;
               }
@@ -717,9 +730,7 @@ function formatDateChip(from: string, to: string): string {
                 aria-label="Rename filter"
                 onclick={() => { renamingFilterId = filter.id; renameFilterName = filter.name; }}
               >
-                <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 text-md-on-surface/60" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                  <path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-                </svg>
+                <IconEdit class="w-4 h-4 text-md-on-surface/60" />
               </button>
               <button
                 id="button-delete-filter-{filter.id}"
@@ -727,9 +738,7 @@ function formatDateChip(from: string, to: string): string {
                 aria-label="Delete filter"
                 onclick={() => onDeleteFilter(filter.id)}
               >
-                <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 text-md-error" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                  <path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                </svg>
+                <IconTrash class="w-4 h-4 text-md-error" />
               </button>
             {/if}
           </div>

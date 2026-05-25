@@ -16,9 +16,9 @@ class ToastStore {
     });
   }
 
-  add(type: ToastType, message: string, duration?: number) {
+  add(type: ToastType, message: string, duration?: number, undoAction?: (() => void) | null) {
     const id = crypto.randomUUID();
-    const toast: Toast = { id, type, message, duration };
+    const toast: Toast = { id, type, message, duration, undoAction };
     this.toasts = [...this.toasts, toast];
     this.notify();
     return id;
@@ -34,20 +34,20 @@ class ToastStore {
     this.notify();
   }
 
-  success(message: string, duration?: number) {
-    return this.add('success', message, duration);
+  success(message: string, duration?: number, undoAction?: (() => void) | null) {
+    return this.add('success', message, duration, undoAction);
   }
 
-  error(message: string, duration?: number) {
-    return this.add('error', message, duration);
+  error(message: string, duration?: number, undoAction?: (() => void) | null) {
+    return this.add('error', message, duration, undoAction);
   }
 
-  warning(message: string, duration?: number) {
-    return this.add('warning', message, duration);
+  warning(message: string, duration?: number, undoAction?: (() => void) | null) {
+    return this.add('warning', message, duration, undoAction);
   }
 
-  info(message: string, duration?: number) {
-    return this.add('info', message, duration);
+  info(message: string, duration?: number, undoAction?: (() => void) | null) {
+    return this.add('info', message, duration, undoAction);
   }
 }
 

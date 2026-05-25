@@ -4,23 +4,57 @@
  */
 
 import { browser } from 'wxt/browser';
-import { EXPIRY_WARNING_THRESHOLD_MS } from '@/utils/constants.js';
 import { EmailService, loadProviderConfig } from '@/utils/email-service.js';
 import { logError } from '@/utils/logger.js';
+import { getInboxes, setInboxes } from '@/utils/storage-keys.js';
 import type { Account, NotificationSettings } from '@/utils/types.js';
+
+type NotificationType = 'expired' | 'renewed' | 'expiring-soon';
+
+function createInboxNotification(type: NotificationType, address: string): void {
+  const messages: Record<NotificationType, { title: string; message: string }> = {
+    expired: {
+      title: 'Inbox Expired',
+      message: `The inbox ${address} has expired. Emails are preserved locally.`,
+    },
+    renewed: {
+      title: 'Inbox Auto-Renewed',
+      message: `The inbox ${address} has been automatically renewed.`,
+    },
+    'expiring-soon': {
+      title: 'Inbox Expiring Soon',
+      message: `The inbox ${address} will expire in less than 1 hour.`,
+    },
+  };
+  const { title, message } = messages[type];
+  browser.notifications.create({
+    type: 'basic',
+    iconUrl: 'icons/icon48.png',
+    title,
+    message,
+    priority: 1,
+  });
+}
 
 export async function checkInboxExpiry(): Promise<void> {
   try {
-    const { inboxes = [], notificationSettings = { enabled: true } } =
-      (await browser.storage.local.get(['inboxes', 'notificationSettings'])) as {
-        inboxes?: Account[];
-        notificationSettings?: NotificationSettings;
-      };
+    const {
+      inboxes = [],
+      notificationSettings = {
+        enabled: true,
+        soundEnabled: true,
+        expiryWarningThreshold: 60 * 60 * 1000,
+      },
+    } = (await browser.storage.local.get(['inboxes', 'notificationSettings'])) as {
+      inboxes?: Account[];
+      notificationSettings?: NotificationSettings;
+    };
 
     if (!notificationSettings?.enabled || inboxes.length === 0) return;
 
     const now = Date.now();
     const updatedInboxes = [...inboxes];
+    const warningThreshold = notificationSettings.expiryWarningThreshold || 60 * 60 * 1000; // Default to 1 hour
 
     for (let i = 0; i < updatedInboxes.length; i++) {
       const inbox = updatedInboxes[i];
@@ -33,13 +67,7 @@ export async function checkInboxExpiry(): Promise<void> {
             // The inbox will show as "Expired" in the UI
 
             if (notificationSettings?.enabled) {
-              browser.notifications.create({
-                type: 'basic',
-                iconUrl: 'icons/icon48.png',
-                title: 'Inbox Expired',
-                message: `The inbox ${inbox.address} has expired. Emails are preserved locally.`,
-                priority: 1,
-              });
+              createInboxNotification('expired', inbox.address);
             }
             continue;
           }
@@ -72,9 +100,7 @@ export async function checkInboxExpiry(): Promise<void> {
               });
             }
 
-            const { inboxes: allInboxes = [] } = (await browser.storage.local.get(['inboxes'])) as {
-              inboxes?: Account[];
-            };
+            const allInboxes = await getInboxes();
             const inboxIndex = allInboxes.findIndex((i: Account) => i.id === inbox.id);
 
             if (inboxIndex !== -1) {
@@ -89,18 +115,12 @@ export async function checkInboxExpiry(): Promise<void> {
               };
 
               allInboxes[inboxIndex] = renewedInbox;
-              await browser.storage.local.set({ inboxes: allInboxes });
+              await setInboxes(allInboxes);
               updatedInboxes[i] = renewedInbox;
             }
 
             if (notificationSettings?.enabled) {
-              browser.notifications.create({
-                type: 'basic',
-                iconUrl: 'icons/icon48.png',
-                title: 'Inbox Auto-Renewed',
-                message: `The inbox ${inbox.address} has been automatically renewed.`,
-                priority: 1,
-              });
+              createInboxNotification('renewed', inbox.address);
             }
           } catch (renewError: unknown) {
             logError('Failed to auto-renew inbox', {
@@ -109,47 +129,29 @@ export async function checkInboxExpiry(): Promise<void> {
             });
             // Keep as expired (don't auto-archive)
             if (notificationSettings?.enabled) {
-              browser.notifications.create({
-                type: 'basic',
-                iconUrl: 'icons/icon48.png',
-                title: 'Inbox Expired',
-                message: `The inbox ${inbox.address} has expired. Emails are preserved locally.`,
-                priority: 1,
-              });
+              createInboxNotification('expired', inbox.address);
             }
             continue;
           }
         } else {
           // Keep as expired (don't auto-archive)
           if (notificationSettings?.enabled) {
-            browser.notifications.create({
-              type: 'basic',
-              iconUrl: 'icons/icon48.png',
-              title: 'Inbox Expired',
-              message: `The inbox ${inbox.address} has expired. Emails are preserved locally.`,
-              priority: 1,
-            });
+            createInboxNotification('expired', inbox.address);
           }
           continue;
         }
       }
 
       const timeLeft = inbox.expiresAt ? inbox.expiresAt - now : null;
-      if (timeLeft && timeLeft <= EXPIRY_WARNING_THRESHOLD_MS && !inbox.expiryNotified) {
+      if (timeLeft && timeLeft <= warningThreshold && !inbox.expiryNotified) {
         if (notificationSettings?.enabled) {
-          browser.notifications.create({
-            type: 'basic',
-            iconUrl: 'icons/icon48.png',
-            title: 'Inbox Expiring Soon',
-            message: `The inbox ${inbox.address} will expire in less than 1 hour.`,
-            priority: 1,
-          });
+          createInboxNotification('expiring-soon', inbox.address);
         }
         updatedInboxes[i] = { ...inbox, expiryNotified: true };
       }
     }
 
-    await browser.storage.local.set({ inboxes: updatedInboxes });
+    await setInboxes(updatedInboxes);
   } catch (error: unknown) {
     logError(
       'Error in inbox expiry check:',

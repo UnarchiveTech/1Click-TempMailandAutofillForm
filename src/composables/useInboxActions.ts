@@ -92,7 +92,10 @@ export function useInboxActions(state: InboxActionsState, config: InboxActionsCo
   /**
    * Load inboxes from extension storage
    */
-  async function loadInboxes() {
+  async function loadInboxes(skipEmailSelection?: boolean) {
+    if (skipEmailSelection !== undefined) {
+      _skipEmailSelection = skipEmailSelection;
+    }
     await loadInboxesAction(ext, inboxSetters, _skipEmailSelection);
   }
 

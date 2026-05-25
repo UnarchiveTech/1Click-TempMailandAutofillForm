@@ -39,6 +39,9 @@ jobs:
       - name: Run TypeScript type check
         run: bun run typecheck
 
+      - name: Check translation completeness
+        run: bun run check-translations
+
       - name: Run unit tests
         run: bun test
 

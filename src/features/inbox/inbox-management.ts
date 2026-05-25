@@ -23,7 +23,8 @@ export interface ManagementSetters {
           icon?: ToastType;
         }
       | string,
-    type?: ToastType
+    type?: ToastType,
+    undoAction?: (() => void) | null
   ) => void;
   loadInboxes: (skipEmailSelection?: boolean) => Promise<void>;
   setDropdownOpen: (open: boolean) => void;
@@ -86,7 +87,7 @@ export async function removeAccount(
   const acct = account;
   if (!acct) return;
 
-  // Capture pre-deletion state from the active accounts list (no archived)
+  // Capture pre-deletion state from the active accounts list.
   const { inboxes: allAccounts = [] } = (await ext.storage.local.get(['inboxes'])) as {
     inboxes?: Account[];
   };
@@ -101,13 +102,32 @@ export async function removeAccount(
     acct.accountStatus !== 'deleted';
 
   try {
-    // Soft delete: mark as deleted instead of removing from storage
-    const { inboxes = [] } = (await ext.storage.local.get(['inboxes'])) as { inboxes?: Account[] };
-    const inboxIndex = inboxes.findIndex((i: Account) => i.id === acct.id);
+    const storageSnapshot = (await ext.storage.local.get([
+      'inboxes',
+      'storedEmails',
+      'archivedEmails',
+      'readEmails',
+      'starredEmails',
+      'seenEmailIds',
+      'lastMessageTimestamps',
+    ])) as {
+      inboxes?: Account[];
+      storedEmails?: Record<string, Email[]>;
+      archivedEmails?: Record<string, Email[]>;
+      readEmails?: Record<string, boolean>;
+      starredEmails?: string[];
+      seenEmailIds?: Record<string, string[]>;
+      lastMessageTimestamps?: Record<string, number>;
+    };
 
-    if (inboxIndex !== -1) {
-      inboxes[inboxIndex] = { ...inboxes[inboxIndex], accountStatus: 'deleted' as const };
-      await ext.storage.local.set({ inboxes });
+    const result = await ext.runtime.sendMessage({
+      type: 'deleteInbox',
+      inboxId: acct.id,
+      preserveEmails: false,
+    });
+
+    if (!result?.success) {
+      throw new Error(result?.error || 'Delete failed');
     }
 
     await setters.loadInboxes();
@@ -119,9 +139,8 @@ export async function removeAccount(
         (a: Account) => a.accountStatus !== 'archived' && a.accountStatus !== 'deleted'
       );
       const archivedAccounts = updatedInboxes.filter(
-        (a: Account) => a.accountStatus === 'archived'
+        (a: Account) => a.accountStatus === 'archived' || a.accountStatus === 'deleted'
       );
-      const deletedAccounts = updatedInboxes.filter((a: Account) => a.accountStatus === 'deleted');
 
       if (activeAccountsAfter.length > 0) {
         const nextCandidate =
@@ -129,10 +148,7 @@ export async function removeAccount(
         setters.setSelectedEmail(nextCandidate.address);
         setters.setEmails([]);
         setters.setDropdownOpen(true);
-      } else if (
-        (archivedAccounts.length > 0 || deletedAccounts.length > 0) &&
-        setters.setArchivedSectionOpen
-      ) {
+      } else if (archivedAccounts.length > 0 && setters.setArchivedSectionOpen) {
         // No active accounts left - open dropdown showing inactive tab
         setters.setSelectedEmail('');
         setters.setEmails([]);
@@ -150,6 +166,67 @@ export async function removeAccount(
       }
     }
     // If account was already inactive (archived→deleted), keep current view — no navigation needed
+    setters.setShowToast(
+      { message: `Address ${acct.address} deleted`, type: 'success', icon: 'deleted' },
+      undefined,
+      async () => {
+        const current = (await ext.storage.local.get([
+          'inboxes',
+          'storedEmails',
+          'archivedEmails',
+          'readEmails',
+          'starredEmails',
+          'seenEmailIds',
+          'lastMessageTimestamps',
+        ])) as {
+          inboxes?: Account[];
+          storedEmails?: Record<string, Email[]>;
+          archivedEmails?: Record<string, Email[]>;
+          readEmails?: Record<string, boolean>;
+          starredEmails?: string[];
+          seenEmailIds?: Record<string, string[]>;
+          lastMessageTimestamps?: Record<string, number>;
+        };
+
+        const restoredInboxes = current.inboxes || [];
+        if (!restoredInboxes.some((inbox) => inbox.id === acct.id)) {
+          const originalAccount =
+            storageSnapshot.inboxes?.find((inbox) => inbox.id === acct.id) || acct;
+          restoredInboxes.push(originalAccount);
+        }
+
+        const storedEmails = current.storedEmails || {};
+        const archivedEmails = current.archivedEmails || {};
+        if (storageSnapshot.storedEmails?.[acct.address]) {
+          storedEmails[acct.address] = storageSnapshot.storedEmails[acct.address];
+        }
+        if (storageSnapshot.archivedEmails?.[acct.address]) {
+          archivedEmails[acct.address] = storageSnapshot.archivedEmails[acct.address];
+        }
+
+        const seenEmailIds = current.seenEmailIds || {};
+        if (storageSnapshot.seenEmailIds?.[acct.address]) {
+          seenEmailIds[acct.address] = storageSnapshot.seenEmailIds[acct.address];
+        }
+
+        const lastMessageTimestamps = current.lastMessageTimestamps || {};
+        if (storageSnapshot.lastMessageTimestamps?.[acct.id] !== undefined) {
+          lastMessageTimestamps[acct.id] = storageSnapshot.lastMessageTimestamps[acct.id];
+        }
+
+        await ext.storage.local.set({
+          inboxes: restoredInboxes,
+          storedEmails,
+          archivedEmails,
+          readEmails: storageSnapshot.readEmails || current.readEmails || {},
+          starredEmails: storageSnapshot.starredEmails || current.starredEmails || [],
+          seenEmailIds,
+          lastMessageTimestamps,
+        });
+        await setters.loadInboxes(true);
+        setters.setShowToast('Delete undone');
+      }
+    );
   } catch (error: unknown) {
     const msg = getErrorMessage(error);
     setters.setShowToast({ message: `Failed to delete inbox: ${msg}`, type: 'error' });
@@ -199,11 +276,19 @@ export async function archiveAccount(
     }
     // If already inactive (deleted→archived), keep current view as-is
 
-    setters.setShowToast({
-      message: `Address ${account.address} archived`,
-      type: 'success',
-      icon: 'archived',
-    });
+    setters.setShowToast(
+      {
+        message: `Address ${account.address} archived`,
+        type: 'success',
+        icon: 'archived',
+      },
+      undefined,
+      async () => {
+        await ext.runtime.sendMessage({ type: 'unarchiveInbox', inboxId: account.id });
+        await setters.loadInboxes(true);
+        setters.setShowToast('Archive undone');
+      }
+    );
   } catch (e) {
     logError('archiveAccount error:', e);
     setters.setShowToast({ message: 'Failed to archive', type: 'error' });

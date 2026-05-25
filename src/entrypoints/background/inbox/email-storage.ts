@@ -6,13 +6,14 @@ import { browser } from 'wxt/browser';
 import { addActivityEvent } from '@/utils/activity-tracker.js';
 import { DEBUG, MAX_STORED_EMAILS_PER_INBOX } from '@/utils/constants.js';
 import { log, logError } from '@/utils/logger.js';
-import type {
-  Account,
-  Analytics,
-  Email,
-  EmailFilters,
-  NotificationSettings,
-} from '@/utils/types.js';
+import {
+  getAnalyticsRecord,
+  getEmailMaps,
+  getEmailRetentionDays,
+  getStoredEmailsMap,
+  setAnalyticsRecord,
+} from '@/utils/storage-keys.js';
+import type { Account, Email, EmailFilters, NotificationSettings } from '@/utils/types.js';
 
 /**
  * Play a notification sound using Web Audio API
@@ -57,25 +58,17 @@ async function isQuotaExceeded(error: unknown): Promise<boolean> {
 
 export async function getStoredEmails(inboxAddress: string): Promise<Email[]> {
   try {
-    const { storedEmails = {} } = (await browser.storage.local.get('storedEmails')) as {
-      storedEmails?: Record<string, Email[]>;
-    };
+    const storedEmails = await getStoredEmailsMap();
     return storedEmails[inboxAddress] || [];
   } catch (error: unknown) {
     if (await isQuotaExceeded(error)) {
       logError('Storage quota exceeded, attempting to clean up old emails', { inboxAddress });
       // Try to clean up old emails based on retention settings
-      const { emailRetentionDays = 30 } = (await browser.storage.local.get([
-        'emailRetentionDays',
-      ])) as {
-        emailRetentionDays?: number;
-      };
+      const emailRetentionDays = await getEmailRetentionDays();
       await cleanupOldStoredEmails(emailRetentionDays, emailRetentionDays * 3);
       // Retry getting stored emails
       try {
-        const { storedEmails = {} } = (await browser.storage.local.get('storedEmails')) as {
-          storedEmails?: Record<string, Email[]>;
-        };
+        const storedEmails = await getStoredEmailsMap();
         return storedEmails[inboxAddress] || [];
       } catch (retryError: unknown) {
         if (await isQuotaExceeded(retryError)) {
@@ -92,64 +85,31 @@ export async function getStoredEmails(inboxAddress: string): Promise<Email[]> {
 }
 
 export async function clearStoredEmails(inboxAddress: string): Promise<void> {
-  try {
-    const { storedEmails = {}, archivedEmails = {} } = (await browser.storage.local.get([
-      'storedEmails',
-      'archivedEmails',
-    ])) as {
-      storedEmails?: Record<string, Email[]>;
-      archivedEmails?: Record<string, Email[]>;
-    };
-
+  async function doArchive(): Promise<void> {
+    const { storedEmails, archivedEmails } = await getEmailMaps();
     if (storedEmails[inboxAddress] && storedEmails[inboxAddress].length > 0) {
-      if (!archivedEmails[inboxAddress]) {
-        archivedEmails[inboxAddress] = [];
-      }
-
+      if (!archivedEmails[inboxAddress]) archivedEmails[inboxAddress] = [];
       const emailsToArchive = storedEmails[inboxAddress].map((email: Email) => ({
         ...email,
         archived: true,
         archived_at: Date.now(),
         original_inbox: inboxAddress,
       }));
-
       archivedEmails[inboxAddress].push(...emailsToArchive);
       delete storedEmails[inboxAddress];
-
       await browser.storage.local.set({ storedEmails, archivedEmails });
       log(`Archived ${emailsToArchive.length} emails for expired inbox: ${inboxAddress}`);
     }
+  }
+
+  try {
+    await doArchive();
   } catch (error: unknown) {
     if (await isQuotaExceeded(error)) {
       logError('Storage quota exceeded during archive, attempting cleanup', { inboxAddress });
-      const { emailRetentionDays = 30 } = (await browser.storage.local.get([
-        'emailRetentionDays',
-      ])) as {
-        emailRetentionDays?: number;
-      };
+      const emailRetentionDays = await getEmailRetentionDays();
       await cleanupOldStoredEmails(emailRetentionDays, emailRetentionDays * 3);
-      // Retry archiving
-      const { storedEmails = {}, archivedEmails = {} } = (await browser.storage.local.get([
-        'storedEmails',
-        'archivedEmails',
-      ])) as {
-        storedEmails?: Record<string, Email[]>;
-        archivedEmails?: Record<string, Email[]>;
-      };
-      if (storedEmails[inboxAddress] && storedEmails[inboxAddress].length > 0) {
-        if (!archivedEmails[inboxAddress]) {
-          archivedEmails[inboxAddress] = [];
-        }
-        const emailsToArchive = storedEmails[inboxAddress].map((email: Email) => ({
-          ...email,
-          archived: true,
-          archived_at: Date.now(),
-          original_inbox: inboxAddress,
-        }));
-        archivedEmails[inboxAddress].push(...emailsToArchive);
-        delete storedEmails[inboxAddress];
-        await browser.storage.local.set({ storedEmails, archivedEmails });
-      }
+      await doArchive();
     } else {
       throw error;
     }
@@ -157,9 +117,7 @@ export async function clearStoredEmails(inboxAddress: string): Promise<void> {
 }
 
 export async function getArchivedEmails(inboxAddress?: string): Promise<Email[]> {
-  const { archivedEmails = {} } = (await browser.storage.local.get('archivedEmails')) as {
-    archivedEmails?: Record<string, Email[]>;
-  };
+  const { archivedEmails } = await getEmailMaps();
 
   if (inboxAddress) {
     return archivedEmails[inboxAddress] || [];
@@ -186,13 +144,7 @@ export async function cleanupOldStoredEmails(
     return;
   }
 
-  const { storedEmails = {}, archivedEmails = {} } = (await browser.storage.local.get([
-    'storedEmails',
-    'archivedEmails',
-  ])) as {
-    storedEmails?: Record<string, Email[]>;
-    archivedEmails?: Record<string, Email[]>;
-  };
+  const { storedEmails, archivedEmails } = await getEmailMaps();
 
   const activeThreshold =
     activeRetentionDays === 0 ? 0 : Date.now() - activeRetentionDays * 24 * 60 * 60 * 1000;
@@ -233,9 +185,7 @@ export async function cleanupOldStoredEmails(
 }
 
 export async function storeNewMessages(inboxAddress: string, newMessages: Email[]): Promise<void> {
-  const { storedEmails = {} } = (await browser.storage.local.get('storedEmails')) as {
-    storedEmails?: Record<string, Email[]>;
-  };
+  const storedEmails = await getStoredEmailsMap();
   if (!storedEmails[inboxAddress]) {
     storedEmails[inboxAddress] = [];
   }
@@ -268,6 +218,7 @@ export async function applyFiltersAndProcessMessages(
   const notificationSettings: NotificationSettings = result.notificationSettings ?? {
     enabled: true,
     soundEnabled: true,
+    expiryWarningThreshold: 60 * 60 * 1000, // Default 1 hour
   };
 
   const tsResult = (await browser.storage.local.get(['lastMessageTimestamps'])) as {
@@ -333,14 +284,9 @@ export async function applyFiltersAndProcessMessages(
   }
 
   // Update email received analytics
-  const {
-    analytics = { accountsCreated: 0, emailsReceived: 0, otpsDetected: 0, notificationsSent: 0 },
-  } = (await browser.storage.local.get(['analytics'])) as {
-    analytics?: Analytics;
-  };
-  (analytics as Analytics).emailsReceived =
-    ((analytics as Analytics).emailsReceived || 0) + newMessages.length;
-  await browser.storage.local.set({ analytics });
+  const analytics = await getAnalyticsRecord();
+  analytics.emailsReceived = (analytics.emailsReceived || 0) + newMessages.length;
+  await setAnalyticsRecord(analytics);
 
   // Send notifications for new messages
   if (notificationSettings.enabled && newMessages.length > 0) {
@@ -362,9 +308,8 @@ export async function applyFiltersAndProcessMessages(
     });
 
     // Update notifications sent analytics
-    (analytics as Analytics).notificationsSent =
-      ((analytics as Analytics).notificationsSent || 0) + newMessages.length;
-    await browser.storage.local.set({ analytics });
+    analytics.notificationsSent = (analytics.notificationsSent || 0) + newMessages.length;
+    await setAnalyticsRecord(analytics);
 
     // Track notification events
     for (const msg of newMessages) {
@@ -380,13 +325,10 @@ export async function applyFiltersAndProcessMessages(
   // Update OTP analytics
   const otpCount = messages.filter((msg: Email) => msg.otp).length;
   if (otpCount > 0) {
-    const {
-      analytics = { accountsCreated: 0, emailsReceived: 0, otpsDetected: 0, notificationsSent: 0 },
-    }: { analytics: Analytics } = (await browser.storage.local.get(['analytics'])) as {
-      analytics: Analytics;
-    };
-    analytics.otpsDetected = (analytics.otpsDetected || 0) + otpCount;
-    await browser.storage.local.set({ analytics });
+    // Re-read analytics to get latest value after the notifications write above
+    const latestAnalytics = await getAnalyticsRecord();
+    latestAnalytics.otpsDetected = (latestAnalytics.otpsDetected || 0) + otpCount;
+    await setAnalyticsRecord(latestAnalytics);
   }
 
   // Apply filters
@@ -504,13 +446,7 @@ export async function getEmailsToBeDeleted(
     return { activeEmails: 0, archivedEmails: 0, totalEmails: 0 };
   }
 
-  const { storedEmails = {}, archivedEmails = {} } = (await browser.storage.local.get([
-    'storedEmails',
-    'archivedEmails',
-  ])) as {
-    storedEmails?: Record<string, Email[]>;
-    archivedEmails?: Record<string, Email[]>;
-  };
+  const { storedEmails, archivedEmails } = await getEmailMaps();
 
   const threshold = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
   let activeEmailsToDelete = 0;

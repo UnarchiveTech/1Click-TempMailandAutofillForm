@@ -10,7 +10,13 @@ import type { LoginSetters } from '@/features/login-info/login-actions';
 import type { QRSetters } from '@/features/qr/qr-actions';
 import type { SettingsSetters } from '@/features/settings/settings-actions';
 import type { ContrastLevel, ThemeMode, ThemeSetters } from '@/features/theme/theme-actions';
-import type { Account, CredentialsHistoryItem, Email, ProviderInstance } from '@/utils/types.js';
+import type {
+  Account,
+  CredentialsHistoryItem,
+  Email,
+  Keybindings,
+  ProviderInstance,
+} from '@/utils/types.js';
 
 interface CommonSettersConfig {
   // Inbox state setters
@@ -26,13 +32,14 @@ interface CommonSettersConfig {
   setLoadingInboxes: (value: boolean) => void;
   setLoadingEmails: (value: boolean) => void;
   setNotificationsEnabled: (value: boolean) => void;
+  setSoundEnabled: (value: boolean) => void;
+  setExpiryWarningThreshold: (value: number) => void;
+  setKeybindings: (value: Keybindings) => void;
+  setAutoRefreshInterval: (value: number) => void;
+  setEmailPreviewEnabled: (value: boolean) => void;
+  setGuerrillaDefaultDomain: (value: string) => void;
 
   // Settings state setters
-  setUseCustomPassword: (value: boolean) => void;
-  setCustomPassword: (value: string) => void;
-  setUseCustomName: (value: boolean) => void;
-  setCustomFirstName: (value: string) => void;
-  setCustomLastName: (value: string) => void;
   setAutoCopy: (value: boolean) => void;
   setAutoRenew: (value: boolean) => void;
   setSelectedProvider: (value: string) => void;
@@ -95,12 +102,13 @@ export function useCommonSetters(config: CommonSettersConfig) {
     setLoadingInboxes,
     setLoadingEmails,
     setNotificationsEnabled,
+    setSoundEnabled,
+    setExpiryWarningThreshold,
+    setKeybindings,
+    setAutoRefreshInterval,
+    setEmailPreviewEnabled,
+    setGuerrillaDefaultDomain,
     // Settings
-    setUseCustomPassword,
-    setCustomPassword,
-    setUseCustomName,
-    setCustomFirstName,
-    setCustomLastName,
     setAutoCopy,
     setAutoRenew,
     setSelectedProvider,
@@ -143,16 +151,13 @@ export function useCommonSetters(config: CommonSettersConfig) {
     setLoadingInboxes,
     setLoadingEmails,
     setNotificationsEnabled,
+    setSoundEnabled,
+    setExpiryWarningThreshold,
     setShowToast,
   };
 
   // Settings setters
   const settingsSetters: SettingsSetters = {
-    setUseCustomPassword,
-    setCustomPassword,
-    setUseCustomName,
-    setCustomFirstName,
-    setCustomLastName,
     setAutoCopy,
     setAutoRenew,
     setSelectedProvider,
@@ -165,6 +170,13 @@ export function useCommonSetters(config: CommonSettersConfig) {
     setSettingsLoading,
     setEmailRetentionDays,
     setFaviconCaching,
+    setNotificationsEnabled,
+    setSoundEnabled,
+    setExpiryWarningThreshold,
+    setKeybindings,
+    setAutoRefreshInterval,
+    setEmailPreviewEnabled,
+    setGuerrillaDefaultDomain,
     setShowToast,
     loadInboxes,
   };

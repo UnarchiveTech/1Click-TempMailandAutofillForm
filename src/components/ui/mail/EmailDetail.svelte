@@ -1,4 +1,6 @@
 <script lang="ts">
+import IconDownload from '@/components/icons/IconDownload.svelte';
+import IconRefresh from '@/components/icons/IconRefresh.svelte';
 import type { Account, Email } from '@/utils/types.js';
 
 let {
@@ -21,14 +23,10 @@ let {
 
 <div class="flex items-center justify-end gap-2 px-4 py-2 border-b border-md-outline-variant">
   <button class="w-8 h-8 flex items-center justify-center rounded-lg bg-transparent hover:bg-md-surface-variant transition-colors" title="Refresh Messages" aria-label="Refresh messages" onclick={onRefreshMessages}>
-    <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 text-md-on-surface/60" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-      <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
-    </svg>
+    <IconRefresh class="w-4 h-4 text-md-on-surface/60" />
   </button>
   <button class="w-8 h-8 flex items-center justify-center rounded-lg bg-transparent hover:bg-md-surface-variant transition-colors" title="Export Emails" aria-label="Export emails" onclick={onExportEmail}>
-    <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 text-md-on-surface/60" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-      <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
-    </svg>
+    <IconDownload class="w-4 h-4 text-md-on-surface/60" />
   </button>
 </div>
 {#if currentEmailDetail}

@@ -1,3 +1,4 @@
+import { browser } from 'wxt/browser';
 import { logError } from '@/utils/logger.js';
 import type {
   Account,
@@ -7,13 +8,6 @@ import type {
   ExportResult,
   ImportResult,
 } from '@/utils/types.js';
-
-// WXT provides 'browser' global; fall back to chrome in non-WXT contexts
-// biome-ignore lint/suspicious/noExplicitAny: Cross-browser API compatibility requires any type
-declare const browser: any;
-// biome-ignore lint/suspicious/noExplicitAny: Cross-browser API compatibility requires any type
-declare const chrome: any;
-const _ext = typeof browser !== 'undefined' ? browser : chrome;
 
 async function exportData(): Promise<ExportResult> {
   try {
@@ -85,7 +79,7 @@ async function importData(file: File): Promise<ImportResult> {
       throw new Error('Invalid data format in backup file');
     }
 
-    const raw2 = (await _ext.storage.local.get(['emailHistory', 'loginInfo', 'inboxes'])) as {
+    const raw2 = (await browser.storage.local.get(['emailHistory', 'loginInfo', 'inboxes'])) as {
       emailHistory?: EmailHistoryItem[];
       loginInfo?: CredentialsHistoryItem[];
       inboxes?: Account[];
@@ -123,7 +117,7 @@ async function importData(file: File): Promise<ImportResult> {
     });
 
     const s = settings as { darkMode?: boolean; activeAccountId?: string };
-    await _ext.storage.local.set({
+    await browser.storage.local.set({
       emailHistory: mergedEmails,
       loginInfo: mergedCreds,
       inboxes: mergedInboxes,

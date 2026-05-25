@@ -87,7 +87,7 @@ let {
       type="text"
       placeholder="Search addresses or tags..."
       class="w-full bg-md-surface-container-low rounded-lg px-3 py-1.5 text-sm outline-none placeholder:text-md-on-surface/40"
-      bind:value={mgmtSearch}
+      value={mgmtSearch}
       oninput={(e) => onSearchChange((e.target as HTMLInputElement).value)}
       aria-label="Search addresses"
     />

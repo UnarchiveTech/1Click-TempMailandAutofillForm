@@ -1,4 +1,5 @@
 <script lang="ts">
+import IconTrashBox from '@/components/icons/IconTrashBox.svelte';
 import { setupFocusTrap } from '@/utils/focusTrap.js';
 
 interface Props {
@@ -59,9 +60,7 @@ $effect(() => {
           aria-label={confirmDialog.secondaryLabel}
           onclick={confirmDialog.onSecondary}
         >
-          <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8l1 12a2 2 0 002 2h8a2 2 0 002-2L19 8M10 12v4m4-4v4"/>
-          </svg>
+          <IconTrashBox class="w-4 h-4 shrink-0" />
           {confirmDialog.secondaryLabel}
         </button>
       {/if}

@@ -2,15 +2,11 @@ import { DEFAULT_PROVIDER, loadProviderConfig } from '@/utils/email-service.js';
 import { ApiError, getErrorMessage, ValidationError } from '@/utils/errors.js';
 import { setProviderInstance as setProviderInstanceStorage } from '@/utils/instance-manager.js';
 import { logError } from '@/utils/logger.js';
-import type { ProviderInstance } from '@/utils/types.js';
+import type { Keybindings, ProviderInstance } from '@/utils/types.js';
+import { DEFAULT_KEYBINDINGS } from '@/utils/types.js';
 import { validateCustomInstanceName, validateCustomInstanceUrl } from '@/utils/validation.js';
 
 export interface SettingsState {
-  useCustomPassword: boolean;
-  customPassword: string;
-  useCustomName: boolean;
-  customFirstName: string;
-  customLastName: string;
   autoCopy: boolean;
   autoRenew: boolean;
   selectedProvider: string;
@@ -23,14 +19,16 @@ export interface SettingsState {
   settingsLoading: boolean;
   emailRetentionDays: number;
   faviconCaching: 'direct' | 'local';
+  notificationsEnabled: boolean;
+  soundEnabled: boolean;
+  expiryWarningThreshold: number;
+  keybindings: Keybindings;
+  autoRefreshInterval: number;
+  emailPreviewEnabled: boolean;
+  guerrillaDefaultDomain: string;
 }
 
 export interface SettingsSetters {
-  setUseCustomPassword: (value: boolean) => void;
-  setCustomPassword: (value: string) => void;
-  setUseCustomName: (value: boolean) => void;
-  setCustomFirstName: (value: string) => void;
-  setCustomLastName: (value: string) => void;
   setAutoCopy: (value: boolean) => void;
   setAutoRenew: (value: boolean) => void;
   setSelectedProvider: (value: string) => void;
@@ -43,6 +41,13 @@ export interface SettingsSetters {
   setSettingsLoading: (value: boolean) => void;
   setEmailRetentionDays: (value: number) => void;
   setFaviconCaching: (value: 'direct' | 'local') => void;
+  setNotificationsEnabled: (value: boolean) => void;
+  setSoundEnabled: (value: boolean) => void;
+  setExpiryWarningThreshold: (value: number) => void;
+  setKeybindings: (value: Keybindings) => void;
+  setAutoRefreshInterval: (value: number) => void;
+  setEmailPreviewEnabled: (value: boolean) => void;
+  setGuerrillaDefaultDomain: (value: string) => void;
   setShowToast: (message: string, type: 'success' | 'error' | 'warning') => void;
   loadInboxes: () => Promise<void>;
 }
@@ -61,8 +66,6 @@ export async function loadSettings(
   try {
     setters.setSettingsLoading(true);
     const result = (await ext.storage.local.get([
-      'passwordSettings',
-      'nameSettings',
       'autoCopy',
       'autoRenew',
       'selectedProvider',
@@ -70,9 +73,12 @@ export async function loadSettings(
       'developerSettings',
       'emailRetentionDays',
       'faviconCaching',
+      'notificationSettings',
+      'keybindings',
+      'autoRefreshInterval',
+      'emailPreviewEnabled',
+      'guerrillaDefaultDomain',
     ])) as {
-      passwordSettings?: { useCustom: boolean; customPassword: string };
-      nameSettings?: { useCustom: boolean; firstName: string; lastName: string };
       autoCopy?: boolean;
       autoRenew?: boolean;
       selectedProvider?: string;
@@ -80,16 +86,16 @@ export async function loadSettings(
       developerSettings?: { showDeveloperSettings: boolean; enableLogging: boolean };
       emailRetentionDays?: number;
       faviconCaching?: 'direct' | 'local';
+      notificationSettings?: {
+        enabled: boolean;
+        soundEnabled: boolean;
+        expiryWarningThreshold: number;
+      };
+      keybindings?: Keybindings;
+      autoRefreshInterval?: number;
+      emailPreviewEnabled?: boolean;
+      guerrillaDefaultDomain?: string;
     };
-    if (result.passwordSettings) {
-      setters.setUseCustomPassword(result.passwordSettings.useCustom || false);
-      setters.setCustomPassword(result.passwordSettings.customPassword || '');
-    }
-    if (result.nameSettings) {
-      setters.setUseCustomName(result.nameSettings.useCustom || false);
-      setters.setCustomFirstName(result.nameSettings.firstName || '');
-      setters.setCustomLastName(result.nameSettings.lastName || '');
-    }
     if (result.autoCopy !== undefined) setters.setAutoCopy(result.autoCopy);
     if (result.autoRenew !== undefined) setters.setAutoRenew(result.autoRenew);
     if (result.selectedProvider) setters.setSelectedProvider(result.selectedProvider);
@@ -107,6 +113,37 @@ export async function loadSettings(
       setters.setFaviconCaching(result.faviconCaching);
     } else {
       setters.setFaviconCaching('local'); // Default to local
+    }
+    if (result.notificationSettings) {
+      setters.setNotificationsEnabled(result.notificationSettings.enabled ?? true);
+      setters.setSoundEnabled(result.notificationSettings.soundEnabled ?? true);
+      setters.setExpiryWarningThreshold(
+        result.notificationSettings.expiryWarningThreshold ?? 60 * 60 * 1000
+      );
+    } else {
+      setters.setNotificationsEnabled(true);
+      setters.setSoundEnabled(true);
+      setters.setExpiryWarningThreshold(60 * 60 * 1000);
+    }
+    if (result.keybindings) {
+      setters.setKeybindings(result.keybindings);
+    } else {
+      setters.setKeybindings(DEFAULT_KEYBINDINGS);
+    }
+    if (result.autoRefreshInterval !== undefined) {
+      setters.setAutoRefreshInterval(result.autoRefreshInterval);
+    } else {
+      setters.setAutoRefreshInterval(30000);
+    }
+    if (result.emailPreviewEnabled !== undefined) {
+      setters.setEmailPreviewEnabled(result.emailPreviewEnabled);
+    } else {
+      setters.setEmailPreviewEnabled(true);
+    }
+    if (result.guerrillaDefaultDomain !== undefined) {
+      setters.setGuerrillaDefaultDomain(result.guerrillaDefaultDomain);
+    } else {
+      setters.setGuerrillaDefaultDomain('');
     }
   } catch (e: unknown) {
     logError('loadSettings error:', undefined, e instanceof Error ? e : new Error(String(e)));
@@ -129,15 +166,6 @@ export async function saveSettings(
   setters.setSavingSettings(true);
   try {
     await ext.storage.local.set({
-      passwordSettings: {
-        useCustom: state.useCustomPassword,
-        customPassword: state.customPassword,
-      },
-      nameSettings: {
-        useCustom: state.useCustomName,
-        firstName: state.customFirstName,
-        lastName: state.customLastName,
-      },
       autoCopy: state.autoCopy,
       autoRenew: state.autoRenew,
       selectedProvider: state.selectedProvider,
@@ -148,6 +176,15 @@ export async function saveSettings(
       },
       emailRetentionDays: state.emailRetentionDays,
       faviconCaching: state.faviconCaching,
+      notificationSettings: {
+        enabled: state.notificationsEnabled,
+        soundEnabled: state.soundEnabled,
+        expiryWarningThreshold: state.expiryWarningThreshold,
+      },
+      keybindings: state.keybindings,
+      autoRefreshInterval: state.autoRefreshInterval,
+      emailPreviewEnabled: state.emailPreviewEnabled,
+      guerrillaDefaultDomain: state.guerrillaDefaultDomain,
     });
     setters.setShowToast('Settings saved', 'success');
   } catch (e: unknown) {
@@ -211,32 +248,6 @@ export async function handleProviderChange(
 ) {
   setters.setSelectedProvider(provider);
   await setters.loadInboxes();
-}
-
-/**
- * Save password settings to browser storage
- * @param ext - Browser extension API
- * @param state - Current settings state
- */
-export async function savePasswordSettings(ext: typeof browser, state: SettingsState) {
-  await ext.storage.local.set({
-    passwordSettings: { useCustom: state.useCustomPassword, customPassword: state.customPassword },
-  });
-}
-
-/**
- * Save name settings to browser storage
- * @param ext - Browser extension API
- * @param state - Current settings state
- */
-export async function saveNameSettings(ext: typeof browser, state: SettingsState) {
-  await ext.storage.local.set({
-    nameSettings: {
-      useCustom: state.useCustomName,
-      firstName: state.customFirstName,
-      lastName: state.customLastName,
-    },
-  });
 }
 
 /**
@@ -452,26 +463,24 @@ export async function exportData(ext: typeof browser) {
       'emailHistory',
       'loginInfo',
       'storedEmails',
+      'archivedEmails',
       'inboxes',
       'activeInboxId',
       'identities',
       'selectedIdentityId',
       'savedSearchFilters',
       'themeMode',
-      'darkMode',
       'contrastLevel',
       'customColor',
       'autoCopy',
       'autoRenew',
       'selectedProvider',
-      'useCustomPassword',
-      'customPassword',
-      'useCustomName',
-      'customFirstName',
-      'customLastName',
+      'passwordSettings',
+      'nameSettings',
+      'developerSettings',
       'emailRetentionDays',
-      'showDeveloperSettings',
-      'enableLogging',
+      'faviconCaching',
+      'providerInstances',
     ]);
     const data = { version: '3.0', exportDate: new Date().toISOString(), data: { ...result } };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -499,12 +508,13 @@ export function importData(ext: typeof browser, loadInboxes: () => Promise<void>
       if (!parsed.version || !parsed.data) throw new Error('Invalid format');
       const importedData = parsed.data;
 
-      // Merge arrays (inboxes, emailHistory, loginInfo, identities) to avoid overwriting
+      // Merge arrays (inboxes, emailHistory, loginInfo, identities, storedEmails, archivedEmails) to avoid overwriting
       const existing = await ext.storage.local.get([
         'inboxes',
         'emailHistory',
         'loginInfo',
         'storedEmails',
+        'archivedEmails',
         'identities',
         'savedSearchFilters',
       ]);
@@ -521,6 +531,17 @@ export function importData(ext: typeof browser, loadInboxes: () => Promise<void>
         const merged = [...existing];
         for (const item of incoming) {
           if (!merged.some((e) => e[key] === item[key])) merged.push(item);
+        }
+        return merged;
+      };
+
+      const mergeRecord = <T>(
+        existing: Record<string, T>,
+        incoming: Record<string, T>
+      ): Record<string, T> => {
+        const merged = { ...existing };
+        for (const [key, value] of Object.entries(incoming)) {
+          if (!(key in merged)) merged[key] = value;
         }
         return merged;
       };
@@ -551,6 +572,18 @@ export function importData(ext: typeof browser, loadInboxes: () => Promise<void>
         toSet.savedSearchFilters = mergeById(
           existing.savedSearchFilters || [],
           importedData.savedSearchFilters
+        );
+      }
+      if (typeof importedData.storedEmails === 'object' && importedData.storedEmails !== null) {
+        toSet.storedEmails = mergeRecord(
+          existing.storedEmails || {},
+          importedData.storedEmails as Record<string, unknown>
+        );
+      }
+      if (typeof importedData.archivedEmails === 'object' && importedData.archivedEmails !== null) {
+        toSet.archivedEmails = mergeRecord(
+          existing.archivedEmails || {},
+          importedData.archivedEmails as Record<string, unknown>
         );
       }
 

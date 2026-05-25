@@ -9,6 +9,8 @@ export interface EmailFilterOptions {
   searchQuery?: string;
   otpOnly?: boolean;
   senderDomain?: string;
+  senderEmail?: string;
+  subject?: string;
   selectedSenders?: string[];
   dateFrom?: string;
   dateTo?: string;
@@ -26,19 +28,25 @@ export function filterEmails(emails: Email[], options: EmailFilterOptions): Emai
     searchQuery = '',
     otpOnly = false,
     senderDomain = '',
+    senderEmail = '',
+    subject = '',
     selectedSenders = [],
     dateFrom = '',
     dateTo = '',
-    sortBy = 'date',
+    sortBy = 'newest',
   } = options;
+
+  const getReceivedAtMs = (email: Email) =>
+    email.received_at > 1_000_000_000_000 ? email.received_at : email.received_at * 1000;
 
   return emails
     .filter((email) => {
-      // Search query filter
+      // Search query filter (after parsing shortcuts)
       const matchesSearch =
         !searchQuery ||
         email.subject?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        email.from?.toLowerCase().includes(searchQuery.toLowerCase());
+        email.from?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        email.body_plain?.toLowerCase().includes(searchQuery.toLowerCase());
 
       // OTP-only filter
       const matchesOtp = !otpOnly || email.isOtp;
@@ -47,6 +55,14 @@ export function filterEmails(emails: Email[], options: EmailFilterOptions): Emai
       const matchesDomain =
         !senderDomain || email.from?.toLowerCase().includes(senderDomain.toLowerCase());
 
+      // Sender email filter (exact match)
+      const matchesSenderEmail =
+        !senderEmail || email.from?.toLowerCase() === senderEmail.toLowerCase();
+
+      // Subject filter
+      const matchesSubject =
+        !subject || email.subject?.toLowerCase().includes(subject.toLowerCase());
+
       // Selected senders filter (multi-select)
       const matchesSelectedSenders =
         selectedSenders.length === 0 ||
@@ -54,26 +70,33 @@ export function filterEmails(emails: Email[], options: EmailFilterOptions): Emai
 
       // Date range filter
       let matchesDateRange = true;
+      const receivedAtMs = getReceivedAtMs(email);
       if (dateFrom) {
         const fromDate = new Date(dateFrom).getTime();
-        matchesDateRange = matchesDateRange && email.received_at >= fromDate;
+        matchesDateRange = matchesDateRange && receivedAtMs >= fromDate;
       }
       if (dateTo) {
-        const toDate = new Date(dateTo).getTime();
-        matchesDateRange = matchesDateRange && email.received_at <= toDate;
+        const toDate = new Date(dateTo).getTime() + 24 * 60 * 60 * 1000 - 1;
+        matchesDateRange = matchesDateRange && receivedAtMs <= toDate;
       }
 
       return (
-        matchesSearch && matchesOtp && matchesDomain && matchesSelectedSenders && matchesDateRange
+        matchesSearch &&
+        matchesOtp &&
+        matchesDomain &&
+        matchesSenderEmail &&
+        matchesSubject &&
+        matchesSelectedSenders &&
+        matchesDateRange
       );
     })
     .sort((a, b) => {
       // Sorting logic
       switch (sortBy) {
         case 'newest':
-          return b.received_at - a.received_at;
+          return getReceivedAtMs(b) - getReceivedAtMs(a);
         case 'oldest':
-          return a.received_at - b.received_at;
+          return getReceivedAtMs(a) - getReceivedAtMs(b);
         case 'senderNameAsc':
           return (a.from_name || '').localeCompare(b.from_name || '');
         case 'senderNameDesc':

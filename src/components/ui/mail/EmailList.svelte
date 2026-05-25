@@ -1,12 +1,23 @@
 <script lang="ts">
+import { onDestroy, onMount } from 'svelte';
 import { browser } from 'wxt/browser';
+import IconArchive from '@/components/icons/IconArchive.svelte';
+import IconCheck from '@/components/icons/IconCheck.svelte';
+import IconChevronDown from '@/components/icons/IconChevronDown.svelte';
+import IconChevronUp from '@/components/icons/IconChevronUp.svelte';
 import IconCopy from '@/components/icons/IconCopy.svelte';
 import IconMail from '@/components/icons/IconMail.svelte';
+import IconRefresh from '@/components/icons/IconRefresh.svelte';
+import IconStar from '@/components/icons/IconStar.svelte';
+import IconTag from '@/components/icons/IconTag.svelte';
 import IconTrash from '@/components/icons/IconTrash.svelte';
+import IconX from '@/components/icons/IconX.svelte';
 import EmptyState from '@/components/ui/EmptyState.svelte';
 import FaviconImage from '@/components/ui/FaviconImage.svelte';
 import Skeleton from '@/components/ui/Skeleton.svelte';
+import type { EmailThread } from '@/utils/email-threads.js';
 import { logDebug, logError } from '@/utils/logger.js';
+import { highlightMatches, parseSearchShortcuts } from '@/utils/search-shortcuts.js';
 import type { Email } from '@/utils/types.js';
 
 let {
@@ -22,6 +33,11 @@ let {
   onCopyOtpFromMessage = () => {},
   loadMoreEmails = () => {},
   highlightedEmailId = '',
+  threadGrouping = false,
+  emailThreads = [],
+  expandedThreadIds = new Set<string>(),
+  onToggleThread = (_id: string) => {},
+  emailPreviewEnabled = true,
 } = $props<{
   displayedEmails?: Email[];
   filteredEmails?: Email[];
@@ -35,6 +51,11 @@ let {
   onCopyOtpFromMessage?: (otp: string) => void;
   loadMoreEmails?: () => void;
   highlightedEmailId?: string;
+  threadGrouping?: boolean;
+  emailThreads?: EmailThread[];
+  expandedThreadIds?: Set<string>;
+  onToggleThread?: (id: string) => void;
+  emailPreviewEnabled?: boolean;
 }>();
 
 // Pull-to-refresh state
@@ -64,6 +85,86 @@ let selectedEmailIds = $state<Set<string>>(new Set());
 // Starred emails
 let starredEmailIds = $state<Set<string>>(new Set());
 
+// Email-level custom tags
+let emailTagsMap = $state<Record<string, string[]>>({});
+let tagDialogEmailId = $state<string | null>(null);
+let tagDialogInput = $state('');
+let tagDialogOpen = $state(false);
+
+async function loadEmailTags() {
+  const result = (await browser.storage.local.get(['emailTags'])) as {
+    emailTags?: Record<string, string[]>;
+  };
+  const raw = result.emailTags || {};
+  // Sanitize: ensure every value is a string[]
+  const sanitized: Record<string, string[]> = {};
+  for (const [k, v] of Object.entries(raw)) {
+    sanitized[k] = Array.isArray(v) ? v : [];
+  }
+  emailTagsMap = sanitized;
+}
+
+async function saveEmailTagsToStorage() {
+  await browser.storage.local.set({ emailTags: emailTagsMap });
+}
+
+function openTagDialog(emailId: string) {
+  tagDialogEmailId = emailId;
+  tagDialogInput = (emailTagsMap[emailId] || []).join(', ');
+  tagDialogOpen = true;
+}
+
+function closeTagDialog() {
+  tagDialogOpen = false;
+  tagDialogEmailId = null;
+  tagDialogInput = '';
+}
+
+async function saveEmailTags() {
+  if (!tagDialogEmailId) return;
+  const tags = tagDialogInput
+    .split(',')
+    .map((t) => t.trim())
+    .filter(Boolean);
+  if (tags.length === 0) {
+    const next = { ...emailTagsMap };
+    delete next[tagDialogEmailId];
+    emailTagsMap = next;
+  } else {
+    emailTagsMap = { ...emailTagsMap, [tagDialogEmailId]: tags };
+  }
+  await saveEmailTagsToStorage();
+  closeTagDialog();
+}
+
+async function removeEmailTag(emailId: string, tag: string) {
+  const current = emailTagsMap[emailId] || [];
+  const next = current.filter((t) => t !== tag);
+  if (next.length === 0) {
+    const map = { ...emailTagsMap };
+    delete map[emailId];
+    emailTagsMap = map;
+  } else {
+    emailTagsMap = { ...emailTagsMap, [emailId]: next };
+  }
+  await saveEmailTagsToStorage();
+}
+
+// All unique tags across all emails for autocomplete
+let allEmailTags = $derived.by(() => {
+  const set = new Set<string>();
+  for (const tags of Object.values(emailTagsMap)) {
+    if (!Array.isArray(tags)) continue;
+    for (const t of tags) set.add(t);
+  }
+  return Array.from(set).sort();
+});
+
+// Hover preview state
+let hoveredEmail = $state<Email | null>(null);
+let previewPosition = $state({ x: 0, y: 0, above: false });
+let hoverTimer: ReturnType<typeof setTimeout> | null = null;
+
 async function loadStarredEmails() {
   const result = (await browser.storage.local.get(['starredEmails'])) as {
     starredEmails?: string[];
@@ -82,8 +183,21 @@ async function toggleStar(emailId: string) {
   await browser.storage.local.set({ starredEmails: Array.from(updated) });
 }
 
-$effect(() => {
+onMount(() => {
+  loadEmailTags();
   loadStarredEmails();
+
+  const handleStorageChange = (
+    changes: Record<string, { oldValue?: unknown; newValue?: unknown }>,
+    areaName: string
+  ) => {
+    if (areaName !== 'local') return;
+    if (changes.emailTags) loadEmailTags();
+    if (changes.starredEmails) loadStarredEmails();
+  };
+
+  browser.storage.onChanged.addListener(handleStorageChange);
+  onDestroy(() => browser.storage.onChanged.removeListener(handleStorageChange));
 });
 
 function handleSwipeStart(email: Email, e: TouchEvent | MouseEvent) {
@@ -178,6 +292,12 @@ function toggleEmailSelection(id: string) {
 // Track per-email favicon loaded state for container styling
 let faviconLoaded = $state<Record<string, boolean>>({});
 
+// Extract highlight terms from search query
+let highlightTerms = $derived.by(() => {
+  const parsed = parseSearchShortcuts(searchQuery);
+  return parsed.highlightTerms.filter((t) => !t.includes(':'));
+});
+
 // Extract display name from email address
 function getDisplayName(email: string, name?: string): string {
   // Prioritize name over email
@@ -215,30 +335,49 @@ function avatarColor(email: string): string {
   for (let i = 0; i < email.length; i++) hash = (hash * 31 + email.charCodeAt(i)) & 0xffff;
   return AVATAR_COLORS[hash % AVATAR_COLORS.length];
 }
+
+function handleMouseEnter(email: Email, e: MouseEvent) {
+  if (hoverTimer) clearTimeout(hoverTimer);
+  // Capture rect synchronously — currentTarget becomes null after the event returns
+  const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+  hoverTimer = setTimeout(() => {
+    const previewHeight = 240;
+    const viewportHeight = window.innerHeight;
+    // Prefer showing below, fall back to above if not enough space
+    const above = rect.bottom + previewHeight > viewportHeight;
+    const y = above ? rect.top - previewHeight - 4 : rect.bottom + 4;
+    // Stay within horizontal bounds of the popup
+    const x = Math.max(8, Math.min(rect.left, window.innerWidth - 288 - 8));
+    previewPosition = { x, y, above };
+    hoveredEmail = email;
+  }, 250);
+}
+
+function handleMouseLeave() {
+  if (hoverTimer) {
+    clearTimeout(hoverTimer);
+    hoverTimer = null;
+  }
+  hoveredEmail = null;
+}
+
+function stripHtml(html: string): string {
+  const tmp = document.createElement('div');
+  tmp.innerHTML = html;
+  return tmp.textContent || tmp.innerText || '';
+}
 </script>
 
-<div class="relative">
+<div class="relative flex flex-col flex-1 min-h-0">
   <!-- Pull-to-refresh overlay (outside scrollable area) -->
   {#if pullDistance > 0}
     <div
       class="absolute top-0 left-0 right-0 flex items-center justify-center py-2 z-10 bg-md-surface pointer-events-none"
       style="opacity: {Math.min(pullDistance / 60, 1)}; transform: translateY({Math.min(pullDistance - 10, 50)}px); transition: opacity 0.1s;"
     >
-      <svg
-        xmlns="http://www.w3.org/2000/svg"
-        class="w-5 h-5 text-md-primary"
-        fill="none"
-        viewBox="0 0 24 24"
-        stroke="currentColor"
-        stroke-width="2"
-        style="transform: rotate({refreshRotation}deg);"
-      >
-        <path
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99"
-        />
-      </svg>
+      <span style="transform: rotate({refreshRotation}deg); display: inline-block;">
+        <IconRefresh class="w-5 h-5 text-md-primary" />
+      </span>
       <span class="text-xs text-md-primary ml-2 font-semibold">
         {pullDistance > 60 ? 'Release to refresh' : 'Pull to refresh'}
       </span>
@@ -249,8 +388,8 @@ function avatarColor(email: string): string {
 <!-- Pull-to-refresh gesture area: touch/mouse handlers are intentional for mobile refresh functionality -->
 <!-- This is a scrollable list region that supports pull-to-refresh gesture -->
 <div
-  class="flex-1 px-1 border-t border-md-secondary-container {displayedEmails.length > 0 ? 'overflow-y-auto' : ''} relative"
-  style="max-height: 300px; padding-bottom: 120px; scrollbar-width: thin; scrollbar-color: var(--md-primary) transparent;"
+  class="flex-1 px-1 border-t border-md-secondary-container overflow-y-auto relative"
+  style="padding-bottom: 120px; scrollbar-width: thin; scrollbar-color: var(--md-primary) transparent;"
   role="region"
   aria-label="Email list with pull-to-refresh"
   aria-hidden="false"
@@ -344,7 +483,30 @@ function avatarColor(email: string): string {
     />
   {:else}
     {#each displayedEmails as mail, index}
-      <div class="relative overflow-hidden border-b border-md-outline-variant/50" id="email-item-{mail.id}">
+      <!-- Thread header: show before the latestEmail of a multi-email thread -->
+      {#if threadGrouping}
+        {@const thread = emailThreads.find((t: EmailThread) => t.latestEmail.id === mail.id)}
+        {#if thread && thread.emails.length > 1}
+          <div class="flex items-center justify-between px-2 py-1 bg-md-secondary-container/40 border-b border-md-outline-variant/30">
+            <span class="text-[10px] font-semibold text-md-primary/80 uppercase tracking-wider truncate max-w-[65%]">
+              {thread.normalizedSubject || '(no subject)'}
+            </span>
+            <button
+              class="flex items-center gap-1 text-[10px] text-md-on-surface/60 hover:text-md-primary transition-colors flex-shrink-0"
+              onclick={(e) => { e.stopPropagation(); onToggleThread(thread.id); }}
+              aria-label="Toggle thread"
+            >
+              <span class="bg-md-primary/15 text-md-primary font-semibold px-1.5 py-0.5 rounded-full">{thread.emails.length}</span>
+              {#if expandedThreadIds.has(thread.id)}
+                <IconChevronUp class="w-3 h-3" />
+              {:else}
+                <IconChevronDown class="w-3 h-3" />
+              {/if}
+            </button>
+          </div>
+        {/if}
+      {/if}
+      <div class="relative overflow-hidden border-b border-md-outline-variant/50 {threadGrouping && emailThreads.find((t: EmailThread) => t.latestEmail.id !== mail.id && t.emails.some((e: Email) => e.id === mail.id)) ? 'pl-3 bg-md-surface-variant/20' : ''}" id="email-item-{mail.id}">
         <!-- Swipe action background (delete/archive) -->
         {#if swipingEmail === mail && swipeDirection}
           <div
@@ -354,36 +516,10 @@ function avatarColor(email: string): string {
             style="opacity: {Math.abs(swipeDistance) / 120};"
           >
             {#if swipeDirection === 'left'}
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                class="w-6 h-6 text-white"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-                stroke-width="2"
-              >
-                <path
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
-                />
-              </svg>
+              <IconTrash class="w-6 h-6 text-white" />
               <span class="text-white font-medium">Delete</span>
             {:else}
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                class="w-6 h-6 text-white"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-                stroke-width="2"
-              >
-                <path
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"
-                />
-              </svg>
+              <IconArchive class="w-6 h-6 text-white" />
               <span class="text-white font-medium">Archive</span>
             {/if}
           </div>
@@ -394,6 +530,7 @@ function avatarColor(email: string): string {
           id="email-button-{mail.id}"
           class="w-full text-left border-0 focus:outline-none hover:bg-md-surface-variant/40 duration-150 {mail.id === highlightedEmailId ? 'bg-md-primary/5' : ''} {mail.unread ? 'bg-md-primary/5' : 'bg-transparent'} py-1 px-1"
           style="transform: translateX({swipingEmail === mail ? swipeDistance : 0}px); transition: {swipeActionTriggered ? 'transform 0.3s' : 'none'}; user-select: none;"
+          onmouseenter={(e) => handleMouseEnter(mail, e)}
           onclick={(e) => { if (Math.abs(swipeDistance) > 5) { e.preventDefault(); return; } if (selectionMode) { toggleEmailSelection(mail.id); } else { onOpenMessageDetail(mail); } }}
           ontouchstart={(e) => {
             handleLongPressStart(mail, e);
@@ -419,6 +556,7 @@ function avatarColor(email: string): string {
             if (e.buttons === 1) handleSwipeMove(e);
           }}
           onmouseleave={() => {
+            handleMouseLeave();
             handleLongPressEnd();
             handleSwipeEnd();
           }}
@@ -438,9 +576,7 @@ function avatarColor(email: string): string {
             <div class="flex-shrink-0 w-[35px] h-[35px] rounded-lg {selectedEmailIds.has(mail.id) ? 'bg-md-primary' : (isLoaded ? 'bg-md-surface-container-low' : (mail.unread ? avatarColor(mail.from) : 'bg-gray-400'))} overflow-hidden flex items-center justify-center relative">
               {#if selectedEmailIds.has(mail.id)}
                 <!-- Tick icon when selected -->
-                <svg xmlns="http://www.w3.org/2000/svg" class="w-6 h-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3">
-                  <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
-                </svg>
+                <IconCheck class="w-6 h-6 text-white" stroke-width="3" />
               {:else}
                 <FaviconImage
                   email={mail.from}
@@ -456,13 +592,13 @@ function avatarColor(email: string): string {
           {/if}          <!-- Text -->
           <div class="flex flex-col flex-1 min-w-0">
             <div class="flex items-center justify-between gap-2">
-              <span class="text-sm font-bold {mail.unread ? 'text-md-on-surface' : 'text-md-on-surface/70'} truncate leading-tight">{getDisplayName(mail.from, mail.from_name)}</span>
+              <span class="text-sm font-bold {mail.unread ? 'text-md-on-surface' : 'text-md-on-surface/70'} truncate leading-tight">{@html highlightMatches(getDisplayName(mail.from, mail.from_name), highlightTerms)}</span>
               <span class="text-[10px] font-medium {mail.unread ? 'text-md-on-surface/60' : 'text-md-on-surface/40'} flex-shrink-0">{mail.time}</span>
             </div>
             <div class="flex items-start gap-1">
               <!-- col1: subject + body/OTP -->
               <div class="flex flex-col flex-1 min-w-0">
-                <p class="text-xs {mail.unread ? 'font-semibold text-md-on-surface' : 'text-md-on-surface/50'} truncate leading-tight">{mail.subject || '(no subject)'}</p>
+                <p class="text-xs {mail.unread ? 'font-semibold text-md-on-surface' : 'text-md-on-surface/50'} truncate leading-tight">{@html highlightMatches(mail.subject || '(no subject)', highlightTerms)}</p>
                 <div class="flex items-center gap-1 mt-1 flex-wrap">
                   {#if mail.local_only}
                     <span id="local-badge-{mail.id}" class="px-2 py-0.5 text-xs rounded-full bg-amber-500/20 text-amber-600 flex-shrink-0">Local</span>
@@ -480,6 +616,20 @@ function avatarColor(email: string): string {
                       aria-label={`Copy OTP code ${mail.otp}`}
                     >OTP: {mail.otp}</span>
                   {/if}
+                  {#if emailTagsMap[mail.id]?.length}
+                    {#each emailTagsMap[mail.id] as tag}
+                      <span
+                        class="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[9px] font-semibold rounded-full bg-md-primary/15 text-md-primary cursor-pointer hover:bg-md-primary/25 transition-colors flex-shrink-0"
+                        onmousedown={(e) => { e.stopPropagation(); e.preventDefault(); }}
+                        onclick={(e) => { e.stopPropagation(); removeEmailTag(mail.id, tag); }}
+                        title="Remove tag '{tag}'"
+                        role="button"
+                        tabindex="0"
+                        onkeydown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); removeEmailTag(mail.id, tag); } }}
+                        aria-label="Remove tag {tag}"
+                      >{tag} ×</span>
+                    {/each}
+                  {/if}
                 </div>
                 {#if !mail.isOtp && (mail.body_plain || mail.body)}
                   <p class="text-xs text-md-on-surface/60 truncate leading-tight">{(mail.body_plain || (mail.body_html || '').replace(/<[^>]*>/g, '')) || ''}</p>
@@ -496,9 +646,7 @@ function avatarColor(email: string): string {
                 onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); e.preventDefault(); toggleStar(mail.id); } }}
                 aria-label={starredEmailIds.has(mail.id) ? 'Unstar email' : 'Star email'}
               >
-                <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" viewBox="0 0 24 24" fill={starredEmailIds.has(mail.id) ? 'currentColor' : 'none'} stroke="currentColor" stroke-width="2">
-                  <path stroke-linecap="round" stroke-linejoin="round" d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
-                </svg>
+                <IconStar class="w-5 h-5" viewBox="0 0 24 24" fill={starredEmailIds.has(mail.id) ? 'currentColor' : 'none'} />
               </div>
             </div>
           </div>
@@ -532,9 +680,7 @@ function avatarColor(email: string): string {
       aria-label="Cancel selection"
       onclick={closeContextMenu}
     >
-      <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 text-md-on-surface/60" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-        <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
-      </svg>
+      <IconX class="w-4 h-4 text-md-on-surface/60" />
     </button>
     <span class="text-xs font-semibold text-md-on-surface/70 px-1 flex-shrink-0">{selectedEmailIds.size} selected</span>
     <div class="flex-1"></div>
@@ -552,11 +698,103 @@ function avatarColor(email: string): string {
       aria-label="Archive selected"
       onclick={() => { closeContextMenu(); }}
     >
-      <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-        <path stroke-linecap="round" stroke-linejoin="round" d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4" />
-      </svg>
+      <IconArchive class="w-4 h-4" />
       <span>Archive</span>
     </button>
+    <div class="w-px h-6 bg-md-outline-variant/50"></div>
+    <button
+      class="flex items-center justify-center gap-1.5 px-4 py-2 text-sm font-medium text-md-on-surface/70 hover:bg-md-surface-variant/30 rounded-full transition-colors"
+      aria-label="Tag selected"
+      onclick={() => {
+        const id = selectedEmailIds.size === 1 ? Array.from(selectedEmailIds)[0] : (longPressEmail?.id ?? null);
+        closeContextMenu();
+        if (id) openTagDialog(id);
+      }}
+    >
+      <IconTag class="w-4 h-4" />
+      <span>Tag</span>
+    </button>
+  </div>
+{/if}
+
+<!-- Email Tag Dialog -->
+{#if tagDialogOpen}
+  <div class="fixed inset-0 z-[1000] flex items-center justify-center">
+    <div class="absolute inset-0 bg-black/30 backdrop-blur-sm" role="button" tabindex="-1" onclick={closeTagDialog} onkeydown={(e) => e.key === 'Escape' && closeTagDialog()}></div>
+    <div class="relative bg-md-surface rounded-2xl shadow-2xl p-4 w-72 z-10">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="text-sm font-bold text-md-on-surface">Tag Email</h3>
+        <button class="w-7 h-7 flex items-center justify-center rounded-full hover:bg-md-surface-variant transition-colors" onclick={closeTagDialog} aria-label="Close">
+          <IconX class="w-4 h-4 text-md-on-surface/60" />
+        </button>
+      </div>
+      <p class="text-xs text-md-on-surface/60 mb-2">Enter comma-separated tags (e.g. Banking, Shopping)</p>
+      <input
+        type="text"
+        class="w-full px-3 py-2 text-sm rounded-lg border border-md-outline-variant bg-md-surface-container-low focus:outline-none focus:border-md-primary focus:ring-1 focus:ring-md-primary"
+        placeholder="e.g. Banking, Shopping"
+        bind:value={tagDialogInput}
+        onkeydown={(e) => { if (e.key === 'Enter') saveEmailTags(); else if (e.key === 'Escape') closeTagDialog(); }}
+      />
+      {#if allEmailTags.length > 0}
+        <div class="flex flex-wrap gap-1.5 mt-2">
+          {#each allEmailTags as t}
+            <button
+              class="px-2 py-0.5 text-[10px] rounded-full bg-md-primary/10 text-md-primary hover:bg-md-primary/20 transition-colors"
+              onclick={() => { tagDialogInput = tagDialogInput ? `${tagDialogInput}, ${t}` : t; }}
+            >{t}</button>
+          {/each}
+        </div>
+      {/if}
+      <div class="flex gap-2 mt-3">
+        <button class="flex-1 py-1.5 text-sm rounded-xl bg-md-secondary-container text-md-on-secondary-container hover:bg-md-secondary-container/80 transition-colors" onclick={closeTagDialog}>Cancel</button>
+        <button class="flex-1 py-1.5 text-sm rounded-xl bg-md-primary text-md-on-primary hover:bg-md-primary/90 transition-colors" onclick={saveEmailTags}>Save</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- Email Preview Popup -->
+{#if hoveredEmail && emailPreviewEnabled}
+  <div
+    class="fixed bg-md-surface border border-md-outline-variant rounded-xl shadow-2xl z-[999] w-72 max-h-60 overflow-y-auto pointer-events-none"
+    style="left: {previewPosition.x}px; top: {previewPosition.y}px;"
+    role="tooltip"
+    aria-label="Email preview"
+  >
+    <div class="p-3 space-y-2">
+      <!-- Header -->
+      <div class="border-b border-md-outline-variant/30 pb-2">
+        <div class="flex items-center justify-between gap-2 mb-0.5">
+          <span class="text-xs font-bold text-md-on-surface truncate">
+            {hoveredEmail.from_name || hoveredEmail.from || 'Unknown'}
+          </span>
+          <span class="text-[10px] text-md-on-surface/50 flex-shrink-0">{hoveredEmail.time}</span>
+        </div>
+        <div class="text-xs text-md-primary/80 font-medium truncate">{hoveredEmail.subject || '(no subject)'}</div>
+        {#if hoveredEmail.from_name && hoveredEmail.from}
+          <div class="text-[10px] text-md-on-surface/40 truncate">{hoveredEmail.from}</div>
+        {/if}
+      </div>
+      
+      <!-- OTP badge if present -->
+      {#if hoveredEmail.isOtp}
+        <span class="inline-flex px-2 py-0.5 text-[10px] rounded-full bg-md-primary/20 text-md-primary font-medium">
+          OTP: {hoveredEmail.otp}
+        </span>
+      {/if}
+
+      <!-- Body preview -->
+      <div class="text-[11px] text-md-on-surface/70 leading-relaxed line-clamp-5">
+        {#if hoveredEmail.body_plain}
+          {hoveredEmail.body_plain.trim().slice(0, 400)}
+        {:else if hoveredEmail.body_html}
+          {hoveredEmail.body_html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 400)}
+        {:else}
+          <span class="italic opacity-50">No preview available</span>
+        {/if}
+      </div>
+    </div>
   </div>
 {/if}
 

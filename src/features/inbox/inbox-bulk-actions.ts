@@ -1,5 +1,5 @@
 import type { Browser } from 'wxt/browser';
-import type { Account } from '@/utils/types.js';
+import type { Account, Email } from '@/utils/types.js';
 import { canUnarchive } from './inbox-management.js';
 
 export interface BulkActionsState {
@@ -122,27 +122,93 @@ export async function deleteSelected(
   setters: BulkActionsSetters
 ) {
   setters.showConfirm(
-    `Are you sure you want to delete ${state.selectedAddresses.size} inbox(es)? This cannot be undone.`,
+    `Permanently delete ${state.selectedAddresses.size} inbox(es) from this extension? This cannot be undone.`,
     async () => {
       try {
         const count = state.selectedAddresses.size;
-        const _deletedIds = Array.from(state.selectedAddresses);
-        const result = (await ext.storage.local.get(['inboxes'])) as { inboxes?: Account[] };
-        const inboxes = result.inboxes || [];
-        const deletedInboxes = inboxes.filter((i: Account) => state.selectedAddresses.has(i.id));
+        const storageSnapshot = (await ext.storage.local.get([
+          'inboxes',
+          'storedEmails',
+          'archivedEmails',
+          'readEmails',
+          'starredEmails',
+          'seenEmailIds',
+          'lastMessageTimestamps',
+        ])) as {
+          inboxes?: Account[];
+          storedEmails?: Record<string, Email[]>;
+          archivedEmails?: Record<string, Email[]>;
+          readEmails?: Record<string, boolean>;
+          starredEmails?: string[];
+          seenEmailIds?: Record<string, string[]>;
+          lastMessageTimestamps?: Record<string, number>;
+        };
+        const deletedInboxes = (storageSnapshot.inboxes || []).filter((inbox) =>
+          state.selectedAddresses.has(inbox.id)
+        );
 
         for (const id of state.selectedAddresses) {
-          await ext.runtime.sendMessage({ type: 'deleteInbox', inboxId: id });
+          const result = await ext.runtime.sendMessage({
+            type: 'deleteInbox',
+            inboxId: id,
+            preserveEmails: false,
+          });
+          if (!result?.success) {
+            throw new Error(result?.error || `Failed to delete inbox ${id}`);
+          }
         }
         await setters.loadInboxes();
-        setters.setShowToast(`${count} inbox(es) deleted`, 'success', async () => {
-          // Undo: restore deleted inboxes
-          const currentResult = (await ext.storage.local.get(['inboxes'])) as {
+        setters.setShowToast(`${count} inbox(es) permanently deleted`, 'success', async () => {
+          const current = (await ext.storage.local.get([
+            'inboxes',
+            'storedEmails',
+            'archivedEmails',
+            'seenEmailIds',
+            'lastMessageTimestamps',
+          ])) as {
             inboxes?: Account[];
+            storedEmails?: Record<string, Email[]>;
+            archivedEmails?: Record<string, Email[]>;
+            seenEmailIds?: Record<string, string[]>;
+            lastMessageTimestamps?: Record<string, number>;
           };
-          const currentInboxes = currentResult.inboxes || [];
-          const restored = [...currentInboxes, ...deletedInboxes];
-          await ext.storage.local.set({ inboxes: restored });
+
+          const restoredInboxes = [...(current.inboxes || [])];
+          for (const inbox of deletedInboxes) {
+            if (!restoredInboxes.some((existing) => existing.id === inbox.id)) {
+              restoredInboxes.push(inbox);
+            }
+          }
+
+          const storedEmails = current.storedEmails || {};
+          const archivedEmails = current.archivedEmails || {};
+          const seenEmailIds = current.seenEmailIds || {};
+          const lastMessageTimestamps = current.lastMessageTimestamps || {};
+
+          for (const inbox of deletedInboxes) {
+            if (storageSnapshot.storedEmails?.[inbox.address]) {
+              storedEmails[inbox.address] = storageSnapshot.storedEmails[inbox.address];
+            }
+            if (storageSnapshot.archivedEmails?.[inbox.address]) {
+              archivedEmails[inbox.address] = storageSnapshot.archivedEmails[inbox.address];
+            }
+            if (storageSnapshot.seenEmailIds?.[inbox.address]) {
+              seenEmailIds[inbox.address] = storageSnapshot.seenEmailIds[inbox.address];
+            }
+            if (storageSnapshot.lastMessageTimestamps?.[inbox.id] !== undefined) {
+              lastMessageTimestamps[inbox.id] = storageSnapshot.lastMessageTimestamps[inbox.id];
+            }
+          }
+
+          await ext.storage.local.set({
+            inboxes: restoredInboxes,
+            storedEmails,
+            archivedEmails,
+            readEmails: storageSnapshot.readEmails || {},
+            starredEmails: storageSnapshot.starredEmails || [],
+            seenEmailIds,
+            lastMessageTimestamps,
+          });
           await setters.loadInboxes();
           setters.setShowToast('Delete undone');
         });

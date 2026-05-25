@@ -10,6 +10,8 @@ import IconMail from '@/components/icons/IconMail.svelte';
 import IconRefresh from '@/components/icons/IconRefresh.svelte';
 import IconTrash from '@/components/icons/IconTrash.svelte';
 import { clearActivityEvents, getActivityEvents } from '@/utils/activity-tracker.js';
+import { downloadCSV, exportAnalyticsToCSV } from '@/utils/csv-export.js';
+import { logError } from '@/utils/logger.js';
 import type { ActivityEvent, Analytics } from '@/utils/types.js';
 
 let {
@@ -55,6 +57,16 @@ async function handleReset() {
   resetDialogOpen = false;
 }
 
+async function handleExportAnalytics() {
+  try {
+    const csvContent = exportAnalyticsToCSV(analytics, activityEvents);
+    const filename = `1click-analytics-${new Date().toISOString().split('T')[0]}.csv`;
+    downloadCSV(csvContent, filename);
+  } catch (error) {
+    logError('Failed to export analytics:', error);
+  }
+}
+
 // Derived filtered events
 let filteredEvents = $derived.by(() => {
   return activityEvents.filter((event) => {
@@ -91,7 +103,7 @@ async function recordRenderTime(renderTime: number) {
   try {
     await browser.runtime.sendMessage({ type: 'recordUIRenderTime', renderTime });
   } catch (error) {
-    console.error('Failed to record UI render time:', error);
+    logError('Failed to record UI render time:', error);
   }
 }
 
@@ -535,6 +547,12 @@ function formatTime(timestamp: number) {
   <button class="w-full h-12 px-4 text-sm font-semibold rounded-xl border border-md-primary text-md-primary hover:bg-md-primary/10 transition-colors flex items-center justify-center gap-2" onclick={() => { onLoadAnalytics(); loadActivityEvents(); }}>
     <IconRefresh class="w-4 h-4" />
     Refresh
+  </button>
+
+  <!-- ── Export Analytics Button ── -->
+  <button class="w-full h-12 px-4 text-sm font-semibold rounded-xl border border-md-secondary text-md-secondary hover:bg-md-secondary/10 transition-colors flex items-center justify-center gap-2" onclick={handleExportAnalytics}>
+    <IconBarChart class="w-4 h-4" />
+    Export Analytics
   </button>
 
   <!-- ── Reset Button ── -->

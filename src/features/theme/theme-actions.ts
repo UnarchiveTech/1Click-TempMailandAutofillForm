@@ -89,13 +89,15 @@ export function listenForSystemThemeChanges(
   getThemeMode: () => ThemeMode,
   getContrastLevel: () => ContrastLevel,
   applyThemeFn: (mode: ThemeMode, contrastLevel: ContrastLevel) => void
-) {
+): () => void {
   const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
-  mediaQuery.addEventListener('change', () => {
+  const handler = () => {
     if (getThemeMode() === 'system') {
       applyThemeFn('system', getContrastLevel());
     }
-  });
+  };
+  mediaQuery.addEventListener('change', handler);
+  return () => mediaQuery.removeEventListener('change', handler);
 }
 
 /**

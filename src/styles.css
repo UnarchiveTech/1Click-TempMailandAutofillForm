@@ -1,5 +1,5 @@
 @import "tailwindcss";
-@import "../../styles/theme.css";
+@import "./styles/theme.css";
 @plugin "@tailwindcss/forms";
 
 @layer base {

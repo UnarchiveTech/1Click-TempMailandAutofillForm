@@ -31,10 +31,34 @@ All mail provider logic must be JSON-driven using `src/config/providers.json`. D
 
 When making changes that affect user-facing text or labels, update the translation files:
 
-- Translation files are located in `src/locales/` (e.g., `en.json`, `ar.json`, etc.)
+- Translation files are located in `src/lib/locales/` (e.g., `en.json`, `ar.json`, etc.)
+- `en.json` is the **source of truth** — all other locales must mirror its exact key structure
 - Add new translation keys for any new UI text
 - Update existing keys if text changes
-- Ensure all supported languages receive the same updates
+- Ensure all supported languages receive the same updates: `ar`, `de`, `es`, `fr`, `ja`, `zh`
+- If an interpolation variable (e.g. `{n}`, `{count}`) is used in `en.json`, it **must** appear in every other locale for that same key
+
+#### Translation Completeness Tooling
+
+An automated checker enforces the above rules at multiple levels:
+
+| Layer | Command | When it runs |
+|-------|---------|--------------|
+| **Pre-commit hook** | `bun run check-translations` | On every `git commit` via Husky |
+| **Unit test** | `bun test` | Locally and in CI — file: `src/utils/i18n-check.test.ts` |
+| **CI step** | `Check translation completeness` | On every PR via `pr-validation.yml` |
+| **Manual** | `bun run check-translations` | Run anytime to audit locale files |
+
+**Adding a new translation key** — workflow:
+1. Add the key and English value to `src/lib/locales/en.json`
+2. Add the translated value to every other locale file in the same section
+3. Run `bun run check-translations` to confirm no keys are missing
+4. Commit — the pre-commit hook will re-verify automatically
+
+**What the checker detects:**
+- Keys present in `en.json` but missing from another locale (❌ error — blocks CI)
+- Keys present in a locale but absent from `en.json` (⚠️ warning — does not block CI)
+- Interpolation variables present in an English string but missing from a translation (❌ error)
 
 ## Common Patterns and Best Practices
 

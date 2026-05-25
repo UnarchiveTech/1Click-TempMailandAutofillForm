@@ -16,8 +16,8 @@ export function formatDate(ts: number | string): string {
   const date = new Date(ts);
   const now = new Date();
   const diff = Math.ceil(Math.abs(now.getTime() - date.getTime()) / (1000 * 60 * 60 * 24));
-  if (diff <= 1) return 'Today';
-  if (diff <= 2) return 'Yesterday';
+  if (diff === 0) return 'Today';
+  if (diff === 1) return 'Yesterday';
   if (diff <= 7) return `${diff} days ago`;
   return date.toLocaleDateString();
 }

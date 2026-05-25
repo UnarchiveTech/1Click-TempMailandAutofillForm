@@ -4,7 +4,6 @@
  * Supports single-step and multi-step fetching flows
  */
 
-import { browser } from 'wxt/browser';
 import {
   recordEmailFetchTime,
   recordProviderLatency,
@@ -15,6 +14,7 @@ import {
 } from '@/entrypoints/background/inbox/email-storage.js';
 import { extractOTP } from '@/entrypoints/background/parsing/otp.js';
 import { log } from '@/utils/logger.js';
+import { getInboxes, getStoredEmailsMap, setInboxes } from '@/utils/storage-keys.js';
 import type { Account, Email, EmailFilters } from '@/utils/types.js';
 import type { EmailServiceContext, OperationConfig, ProviderConfig } from '../email-service.js';
 
@@ -511,9 +511,7 @@ async function fetchEmailsMultiStep(
   log(`Found ${messages.length} messages`);
 
   // Get existing emails to filter new ones
-  const { storedEmails = {} } = (await browser.storage.local.get('storedEmails')) as {
-    storedEmails?: Record<string, Email[]>;
-  };
+  const storedEmails = await getStoredEmailsMap();
   if (!storedEmails[inbox.address]) {
     storedEmails[inbox.address] = [];
   }
@@ -613,12 +611,7 @@ async function fetchEmailsMultiStep(
   }
 
   // Return all stored messages with filters applied
-  const allStoredMessages =
-    (
-      (await browser.storage.local.get('storedEmails')) as {
-        storedEmails?: Record<string, Email[]>;
-      }
-    ).storedEmails?.[inbox.address] || [];
+  const allStoredMessages = (await getStoredEmailsMap())[inbox.address] || [];
 
   return applyFiltersAndProcessMessages(allStoredMessages, filters, inbox);
 }
@@ -747,14 +740,12 @@ async function updateSequenceNumber(
     newSequence = Number(lastMailId);
   }
 
-  const { inboxes = [] } = (await browser.storage.local.get('inboxes')) as {
-    inboxes?: Account[];
-  };
-  const updatedInboxes = (inboxes ?? []).map((inb: Account) => {
+  const inboxes = await getInboxes();
+  const updatedInboxes = inboxes.map((inb: Account) => {
     if (inb.id === inbox.id) {
       return { ...inb, [sequenceField]: newSequence } as Account;
     }
     return inb;
   });
-  await browser.storage.local.set({ inboxes: updatedInboxes });
+  await setInboxes(updatedInboxes);
 }

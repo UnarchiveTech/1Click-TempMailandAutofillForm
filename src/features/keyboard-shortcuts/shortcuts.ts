@@ -1,4 +1,4 @@
-import type { Account, Email } from '@/utils/types.js';
+import type { Account, Email, Keybinding, Keybindings } from '@/utils/types.js';
 
 export interface ShortcutsState {
   currentView: string;
@@ -25,38 +25,52 @@ export interface ShortcutsCallbacks {
   setCurrentEmailDetail: (detail: Account | null) => void;
 }
 
+function matchesKeybinding(event: KeyboardEvent, binding: Keybinding): boolean {
+  const keyMatch = event.key.toLowerCase() === binding.key.toLowerCase();
+  const ctrlMatch = binding.ctrlKey
+    ? event.ctrlKey || event.metaKey
+    : !event.ctrlKey && !event.metaKey;
+  const metaMatch = binding.metaKey
+    ? event.metaKey || event.ctrlKey
+    : !event.metaKey && !event.ctrlKey;
+  const shiftMatch = binding.shiftKey ? event.shiftKey : !event.shiftKey;
+  const altMatch = binding.altKey ? event.altKey : !event.altKey;
+
+  return keyMatch && ctrlMatch && metaMatch && shiftMatch && altMatch;
+}
+
 export function handleKeydown(
   event: KeyboardEvent,
   state: ShortcutsState,
-  callbacks: ShortcutsCallbacks
+  callbacks: ShortcutsCallbacks,
+  keybindings: Keybindings
 ) {
-  // Ctrl/Cmd + R: Refresh inbox
-  if ((event.ctrlKey || event.metaKey) && event.key === 'r') {
+  // Refresh inbox
+  if (matchesKeybinding(event, keybindings.refreshInbox)) {
     event.preventDefault();
     callbacks.refreshInbox();
   }
-  // Ctrl/Cmd + N: Create new inbox
-  if ((event.ctrlKey || event.metaKey) && event.key === 'n') {
+  // Create new inbox
+  if (matchesKeybinding(event, keybindings.createInbox)) {
     event.preventDefault();
     callbacks.createInbox();
   }
-  // Ctrl/Cmd + C: Copy email (if not in input)
+  // Copy email (if not in input)
   if (
-    (event.ctrlKey || event.metaKey) &&
-    event.key === 'c' &&
+    matchesKeybinding(event, keybindings.copyEmail) &&
     !((event.target as HTMLElement).tagName === 'INPUT') &&
     !((event.target as HTMLElement).tagName === 'TEXTAREA')
   ) {
     event.preventDefault();
     callbacks.copyEmail();
   }
-  // Ctrl/Cmd + O: Copy OTP
-  if ((event.ctrlKey || event.metaKey) && event.key === 'o') {
+  // Copy OTP
+  if (matchesKeybinding(event, keybindings.copyOtp)) {
     event.preventDefault();
     callbacks.copyOtp();
   }
   // Escape: Close dialogs
-  if (event.key === 'Escape') {
+  if (matchesKeybinding(event, keybindings.closeDialogs)) {
     if (state.currentView === 'mailSettings') {
       callbacks.setCurrentView('main');
       callbacks.setSelectedAddresses(new Set());

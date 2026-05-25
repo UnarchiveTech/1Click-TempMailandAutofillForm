@@ -1,6 +1,7 @@
 import { browser } from 'wxt/browser';
 import { defineBackground } from 'wxt/utils/define-background';
 import { DEBUG } from '@/utils/constants.js';
+import { getCurrentLocale, preloadTranslations } from '@/utils/i18n-utils.js';
 import { initializeDefaultProvider } from '@/utils/instance-manager.js';
 import { log, logDebug } from '@/utils/logger.js';
 import { initializeAnalytics } from './inbox/analytics.js';
@@ -11,8 +12,16 @@ import {
 } from './inbox/inbox-manager.js';
 import { registerMessageHandler } from './runtime/message-handler.js';
 
-export default defineBackground(() => {
+export default defineBackground(async () => {
   if (DEBUG) log('=== BACKGROUND SCRIPT STARTED ===');
+
+  // Preload translations for current locale
+  const locale = await getCurrentLocale();
+  await preloadTranslations(locale);
+  // Also preload English as fallback
+  if (locale !== 'en') {
+    await preloadTranslations('en');
+  }
 
   // Register alarm listeners and setup periodic checks on EVERY service worker start
   // In MV3, service workers can be terminated and restarted, so we must setup alarms on every start

@@ -1,5 +1,8 @@
 <script lang="ts">
+import IconX from '@/components/icons/IconX.svelte';
+import { getErrorMessage } from '@/utils/errors.js';
 import { setupFocusTrap } from '@/utils/focusTrap.js';
+import { validateUsername } from '@/utils/validation.js';
 
 interface Props {
   open: boolean;
@@ -12,6 +15,7 @@ interface Props {
 let { open, currentUsername, domain, onClose, onSave }: Props = $props();
 
 let usernameInput = $state('');
+let validationError = $state('');
 let dialogRef = $state<HTMLElement | null>(null);
 let cleanupFocusTrap: (() => void) | null = null;
 
@@ -19,6 +23,7 @@ let cleanupFocusTrap: (() => void) | null = null;
 $effect(() => {
   if (open) {
     usernameInput = currentUsername;
+    validationError = '';
   }
 });
 
@@ -42,7 +47,12 @@ $effect(() => {
 function handleSave() {
   const trimmedUsername = usernameInput.trim();
   if (trimmedUsername && trimmedUsername !== currentUsername) {
-    onSave(trimmedUsername);
+    try {
+      validateUsername(trimmedUsername);
+      onSave(trimmedUsername);
+    } catch (error) {
+      validationError = getErrorMessage(error);
+    }
   }
 }
 </script>
@@ -62,9 +72,7 @@ function handleSave() {
       aria-label="Close dialog"
       onclick={onClose}
     >
-      <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 text-md-on-surface/70" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
-        <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
-      </svg>
+      <IconX class="w-4 h-4 text-md-on-surface/70" />
     </button>
 
     <div class="bg-md-surface rounded-xl px-4 py-2">
@@ -86,6 +94,7 @@ function handleSave() {
             class="flex-1 px-2 py-1.5 text-sm rounded-lg border border-md-outline-variant bg-md-surface-container-low outline-none focus:border-md-primary focus:ring-1 focus:ring-md-primary"
             placeholder="Enter new username..."
             bind:value={usernameInput}
+            oninput={() => validationError = ''}
             onkeydown={(e) => {
               if (e.key === 'Enter') handleSave();
               else if (e.key === 'Escape') onClose();
@@ -94,6 +103,9 @@ function handleSave() {
           <span class="text-xs text-md-on-surface/50">@{domain}</span>
         </div>
         <p class="text-xs text-md-on-surface/40">Current: {currentUsername}@{domain}</p>
+        {#if validationError}
+          <p class="text-xs text-md-error">{validationError}</p>
+        {/if}
       </div>
 
       <!-- Action buttons -->

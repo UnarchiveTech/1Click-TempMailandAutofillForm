@@ -32,6 +32,8 @@ export interface InboxSetters {
   setLoadingInboxes: (loading: boolean) => void;
   setLoadingEmails: (loading: boolean) => void;
   setNotificationsEnabled: (enabled: boolean) => void;
+  setSoundEnabled: (soundEnabled: boolean) => void;
+  setExpiryWarningThreshold: (expiryWarningThreshold: number) => void;
   setShowToast: (message: string, type: 'success' | 'error' | 'warning') => void;
 }
 
@@ -177,7 +179,9 @@ export async function selectAccount(
   setters.setEmails([]);
   setters.setLatestOtp('------');
   setters.setOtpContext('');
-  const acct = state.accounts.find((a) => a.address === address);
+  const acct =
+    state.accounts.find((a) => a.address === address) ||
+    state.allInboxes.find((a) => a.address === address);
   if (acct) {
     await ext.storage.local.set({ activeInboxId: acct.id });
     setters.setLoading(true);
@@ -266,6 +270,8 @@ export async function toggleNotifications(
     notificationSettings: {
       enabled: newEnabled,
       soundEnabled: currentSettings.notificationSettings?.soundEnabled ?? true,
+      expiryWarningThreshold:
+        currentSettings.notificationSettings?.expiryWarningThreshold ?? 60 * 60 * 1000,
     },
   });
   setters.setShowToast(`Notifications ${newEnabled ? 'enabled' : 'disabled'}`, 'success');
@@ -284,9 +290,30 @@ export async function toggleSoundNotifications(
     notificationSettings: {
       enabled: currentSettings.notificationSettings?.enabled ?? true,
       soundEnabled: newEnabled,
+      expiryWarningThreshold:
+        currentSettings.notificationSettings?.expiryWarningThreshold ?? 60 * 60 * 1000,
     },
   });
   setters.setShowToast(`Sound notifications ${newEnabled ? 'enabled' : 'disabled'}`, 'success');
+}
+
+export async function setExpiryWarningThreshold(
+  ext: typeof browser,
+  threshold: number,
+  setters: InboxSetters
+) {
+  const currentSettings = (await ext.storage.local.get(['notificationSettings'])) as {
+    notificationSettings?: NotificationSettings;
+  };
+  await ext.storage.local.set({
+    notificationSettings: {
+      enabled: currentSettings.notificationSettings?.enabled ?? true,
+      soundEnabled: currentSettings.notificationSettings?.soundEnabled ?? true,
+      expiryWarningThreshold: threshold,
+    },
+  });
+  setters.setExpiryWarningThreshold(threshold);
+  setters.setShowToast('Expiry warning threshold updated', 'success');
 }
 
 export async function autofillForm(

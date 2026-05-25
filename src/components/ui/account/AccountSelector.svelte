@@ -1,8 +1,12 @@
 <script lang="ts">
 import { browser } from 'wxt/browser';
 import IconChevronDown from '@/components/icons/IconChevronDown.svelte';
+import IconChevronLeft from '@/components/icons/IconChevronLeft.svelte';
+import IconChevronRight from '@/components/icons/IconChevronRight.svelte';
 import IconEnvelope from '@/components/icons/IconEnvelope.svelte';
 import IconFlame from '@/components/icons/IconFlame.svelte';
+import IconGlobe from '@/components/icons/IconGlobe.svelte';
+import IconInstances from '@/components/icons/IconInstances.svelte';
 import IconPlus from '@/components/icons/IconPlus.svelte';
 import IconX from '@/components/icons/IconX.svelte';
 import TagDialog from '@/components/overlays/TagDialog.svelte';
@@ -14,7 +18,6 @@ import {
   loadProviderConfig,
   type ProviderConfig,
 } from '@/utils/email-service.js';
-import { getSelectedProviderInstance } from '@/utils/instance-manager.js';
 import { logError } from '@/utils/logger.js';
 import { useCurrentTime } from '@/utils/time-store.js';
 import type { Account } from '@/utils/types.js';
@@ -41,6 +44,8 @@ let {
   dropdownOpen = false,
   onDropdownOpenChange = () => {},
   showToast = () => {},
+  selectedProviderInstance = null,
+  guerrillaDefaultDomain = '',
 } = $props<{
   selectedEmail?: string;
   accounts?: Account[];
@@ -62,6 +67,8 @@ let {
   dropdownOpen?: boolean;
   onDropdownOpenChange?: (open: boolean) => void;
   showToast?: (message: string) => void;
+  selectedProviderInstance?: string | null;
+  guerrillaDefaultDomain?: string;
 }>();
 
 let openSection = $state<'live' | 'inactive'>('live');
@@ -96,6 +103,15 @@ let domainMenuOpen = $state(false);
 let domainMenuPosition = $state({ x: 0, y: 0 });
 let currentDomainIndex = $state(0);
 
+// Derived values for email display
+let emailParts = $derived.by(() => displayedEmail.split('@'));
+let username = $derived.by(() => emailParts[0] || '');
+let domain = $derived.by(() => emailParts[1] || '');
+let isMultiDomain = $derived.by(() => {
+  const account = allAccounts.find((a: Account) => a.address === selectedEmail);
+  return account?.provider === 'guerrilla' && loadProviderConfig('guerrilla').multiDomain?.enabled;
+});
+
 // Storage key for domain index per inbox
 function getDomainStorageKey(email: string): string {
   return `guerrillaDomainIndex_${email.split('@')[0]}`;
@@ -112,7 +128,17 @@ $effect(() => {
   }
   const key = getDomainStorageKey(selectedEmail);
   browser.storage.local.get([key]).then((result: Record<string, unknown>) => {
-    currentDomainIndex = (result[key] as number) ?? 0;
+    const storedIndex = result[key] as number | undefined;
+    if (storedIndex !== undefined) {
+      currentDomainIndex = storedIndex;
+    } else if (guerrillaDefaultDomain) {
+      const providerConfig = loadProviderConfig('guerrilla');
+      const domains = providerConfig.multiDomain?.domains || [];
+      const defaultIndex = domains.indexOf(guerrillaDefaultDomain);
+      currentDomainIndex = defaultIndex >= 0 ? defaultIndex : 0;
+    } else {
+      currentDomainIndex = 0;
+    }
   });
 });
 
@@ -155,6 +181,21 @@ const remainingMinutes = $derived.by(() => {
   const remainingMs = currentAccount.expiresAt - currentTime;
   return Math.max(0, Math.ceil(remainingMs / (1000 * 60)));
 });
+
+// Calculate how long ago the account expired (in minutes)
+const expiredAgoMinutes = $derived.by(() => {
+  if (!currentAccount?.expiresAt) return 0;
+  const elapsedMs = currentTime - currentAccount.expiresAt;
+  return Math.max(0, Math.floor(elapsedMs / (1000 * 60)));
+});
+
+// Format expired-ago duration
+function formatTimeAgo(minutes: number): string {
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  const mins = minutes % 60;
+  return mins > 0 ? `${hours}hr ${mins}m ago` : `${hours}hr ago`;
+}
 
 // Calculate progress percentage for expiry (0-100)
 const progressPercentage = $derived.by(() => {
@@ -451,11 +492,9 @@ async function cycleDomain() {
   if (currentAccount?.provider !== 'guerrilla') return;
   const providerConfig = loadProviderConfig('guerrilla');
   if (!providerConfig.multiDomain?.enabled) return;
-
   const domains = providerConfig.multiDomain.domains;
   const nextIndex = (currentDomainIndex + 1) % domains.length;
   currentDomainIndex = nextIndex;
-
   const key = getDomainStorageKey(selectedEmail);
   await browser.storage.local.set({ [key]: nextIndex });
 }
@@ -559,7 +598,7 @@ async function handleDrop(e: DragEvent, targetAccount: Account, section: 'live' 
               Live
             {/if}
           {:else if currentAccount.status === 'expired'}
-            Expired
+            Expired {formatTimeAgo(expiredAgoMinutes)}
           {:else if currentAccount.status === 'deleted'}
             Deleted
           {:else}
@@ -585,38 +624,40 @@ async function handleDrop(e: DragEvent, targetAccount: Account, section: 'live' 
         onclick={(e) => { e.stopPropagation(); goToPrev(); }}
         disabled={currentIndexInStatus <= 0}
         aria-label="Previous address"
+        title={currentIndexInStatus > 0 ? currentStatusAccounts[currentIndexInStatus - 1].address : undefined}
       >
-        <svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/></svg>
+        <IconChevronLeft class="w-3.5 h-3.5" />
       </button>
 
-      <!-- Email text - clickable to open dropdown, double-click to copy -->
-      <button
-        id="button-select-email"
-        class="font-medium text-sm text-md-on-surface truncate flex-1 min-w-0 text-left bg-transparent border-0 p-0 cursor-pointer"
+      <!-- Email text area: username (truncates) + domain container (shrinks, never overlaps) -->
+      <div
+        class="flex items-center min-w-0 flex-1 gap-0.5 cursor-pointer overflow-hidden"
         onclick={handleSingleClick}
         ondblclick={handleDoubleClick}
+        onkeydown={(e) => { if (e.key === 'Enter') handleSingleClick(); }}
+        role="button"
+        tabindex="0"
+        id="button-select-email"
         aria-label="Select email address"
         title={currentAccount?.provider === 'guerrilla' && loadProviderConfig('guerrilla').multiDomain?.enabled ? `Same username works across ${loadProviderConfig('guerrilla').multiDomain?.domains?.length || 0} domains: ${loadProviderConfig('guerrilla').multiDomain?.domains?.slice(0, 3).join(', ') || ''}${(loadProviderConfig('guerrilla').multiDomain?.domains?.length || 0) > 3 ? ', ...' : ''}` : selectedEmail}
       >
-        <span>{displayedEmail}</span>
-      </button>
-
-      <!-- Multi-domain indicator for Guerrilla Mail -->
-      {#if currentAccount?.provider === 'guerrilla'}
-        {@const providerConfig = loadProviderConfig('guerrilla')}
-        {#if providerConfig.multiDomain?.enabled}
-          <button
-            id="button-cycle-domain"
-            class="shrink-0 text-md-primary/60 hover:text-md-primary cursor-pointer transition-colors bg-transparent border-0 p-0"
+        <span class="font-medium text-sm text-md-on-surface truncate min-w-0">{username}</span>
+        {#if isMultiDomain}
+          <span
+            class="inline-flex items-center gap-0 px-1.5 py-0.5 text-xs font-medium rounded-md bg-md-secondary-container text-md-on-secondary-container hover:bg-md-secondary-container/80 transition-colors cursor-pointer overflow-hidden" style="min-width: calc(5ch + 1.5rem)"
             onclick={(e) => { e.stopPropagation(); cycleDomain(); }}
+            onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); cycleDomain(); } }}
+            role="button"
+            tabindex="0"
             aria-label="Cycle through domains"
           >
-            <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" />
-            </svg>
-          </button>
+            <span class="truncate flex-1 min-w-0">@{domain}</span>
+            <IconGlobe class="w-3 h-3 shrink-0" />
+          </span>
+        {:else}
+          <span class="font-medium text-sm text-md-on-surface shrink-0">@{domain}</span>
         {/if}
-      {/if}
+      </div>
 
       <!-- +N badge -->
       {#if accounts.length > 1}
@@ -630,8 +671,9 @@ async function handleDrop(e: DragEvent, targetAccount: Account, section: 'live' 
         onclick={(e) => { e.stopPropagation(); goToNext(); }}
         disabled={currentIndexInStatus >= currentStatusAccounts.length - 1}
         aria-label="Next address"
+        title={currentIndexInStatus < currentStatusAccounts.length - 1 ? currentStatusAccounts[currentIndexInStatus + 1].address : undefined}
       >
-        <svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg>
+        <IconChevronRight class="w-3.5 h-3.5" />
       </button>
 
       <!-- Separator -->
@@ -658,9 +700,9 @@ async function handleDrop(e: DragEvent, targetAccount: Account, section: 'live' 
       onclick={async () => {
         const { selectedProvider } = await browser.storage.local.get(['selectedProvider']) as { selectedProvider?: string };
         const provider = selectedProvider || DEFAULT_PROVIDER;
-        const selectedInstance = await getSelectedProviderInstance(provider);
-        if (selectedInstance?.id && selectedInstance.id !== 'random') {
-          onCreateInbox(provider, selectedInstance.id);
+        // Use the passed selectedProviderInstance prop instead of reading from storage
+        if (selectedProviderInstance && selectedProviderInstance !== 'random') {
+          onCreateInbox(provider, selectedProviderInstance);
         } else {
           onCreateInbox(provider);
         }
@@ -703,9 +745,7 @@ async function handleDrop(e: DragEvent, targetAccount: Account, section: 'live' 
             onNavigateToSettings();
           }}
         >
-          <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M10.34 15.84c-.688-.06-1.386-.09-2.09-.09H7.5a4.5 4.5 0 110-9h.75c.704 0 1.402-.03 2.09-.09m0 9.18c.253.962.584 1.892.985 2.783.247.55.06 1.21-.463 1.511l-.657.38c-.551.318-1.26.117-1.527-.461a20.845 20.845 0 01-1.44-4.282m3.102.069a18.03 18.03 0 01-.59-4.59c0-1.586.205-3.124.59-4.59m0 9.18a23.848 23.848 0 018.835 2.535M10.34 6.66a23.847 23.847 0 018.835-2.535m0 9.18a23.848 23.848 0 00-8.835 2.535M10.34 6.66a23.847 23.847 0 00-8.835-2.535" />
-          </svg>
+          <IconInstances class="w-4 h-4" />
           Manage Instances
         </button>
         <button
@@ -969,17 +1009,15 @@ async function handleDrop(e: DragEvent, targetAccount: Account, section: 'live' 
                 closeDropdown();
                 const { selectedProvider } = await browser.storage.local.get(['selectedProvider']) as { selectedProvider?: string };
                 const provider = selectedProvider || DEFAULT_PROVIDER;
-                const selectedInstance = await getSelectedProviderInstance(provider);
-                if (selectedInstance?.id && selectedInstance.id !== 'random') {
-                  onCreateInbox(provider, selectedInstance.id);
+                // Use the passed selectedProviderInstance prop instead of reading from storage
+                if (selectedProviderInstance && selectedProviderInstance !== 'random') {
+                  onCreateInbox(provider, selectedProviderInstance);
                 } else {
                   onCreateInbox(provider);
                 }
               }}
             >
-              <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
-              </svg>
+              <IconPlus class="w-4 h-4" />
               Create New Mail Address
             </button>
 
@@ -988,9 +1026,7 @@ async function handleDrop(e: DragEvent, targetAccount: Account, section: 'live' 
               class="w-full px-3 py-2 text-center bg-md-surface-variant text-sm flex items-center justify-center gap-2 text-md-on-surface hover:bg-transparent hover:text-md-on-surface/60 rounded-lg transition-colors"
               onclick={() => { closeDropdown(); onNavigateToManage(); }}
             >
-              <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M10.34 15.84c-.688-.06-1.386-.09-2.09-.09H7.5a4.5 4.5 0 110-9h.75c.704 0 1.402-.03 2.09-.09m0 9.18c.253.962.584 1.892.985 2.783.247.55.06 1.21-.463 1.511l-.657.38c-.551.318-1.26.117-1.527-.461a20.845 20.845 0 01-1.44-4.282m3.102.069a18.03 18.03 0 01-.59-4.59c0-1.586.205-3.124.59-4.59m0 9.18a23.848 23.848 0 018.835 2.535M10.34 6.66a23.847 23.847 0 018.835-2.535m0 9.18a23.848 23.848 0 00-8.835 2.535M10.34 6.66a23.847 23.847 0 00-8.835-2.535" />
-              </svg>
+              <IconInstances class="w-4 h-4" />
               Manage All Addresses
             </button>
           </div>

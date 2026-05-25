@@ -1,6 +1,5 @@
 <script lang="ts">
 import { browser } from 'wxt/browser';
-import AppLogo from '@/components/icons/AppLogo.svelte';
 import IconGitHub from '@/components/icons/IconGitHub.svelte';
 import IconWarning from '@/components/icons/IconWarning.svelte';
 import { GITHUB_ISSUES_URL, GITHUB_REPO_URL } from '@/utils/constants.js';
@@ -14,9 +13,8 @@ let { context = 'popup', version }: Props = $props();
 
 <div class="flex flex-col h-full">
   <div class="flex flex-col items-center gap-5 px-6 py-8">
-    <AppLogo />
     <div class="text-center">
-      <h2 class="font-bold text-base">1Click — Temp Mail & Autofill</h2>
+      <h2 class="font-bold text-base">1Click — Temp Mail & Autofill Form</h2>
       <span class="px-2 py-0.5 text-xs rounded-full bg-md-primary/20 text-md-primary mt-1">v{version}</span>
     </div>
     <p class="text-sm text-md-on-surface/60 text-center leading-relaxed">

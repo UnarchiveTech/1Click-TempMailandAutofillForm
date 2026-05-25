@@ -5,7 +5,7 @@
 import { browser } from 'wxt/browser';
 import { addActivityEvent } from '@/utils/activity-tracker.js';
 import { fetchEmails } from '@/utils/dsl/email-fetcher.js';
-import { DEFAULT_PROVIDER, EmailService, loadProviderConfig } from '@/utils/email-service.js';
+import { EmailService, loadProviderConfig } from '@/utils/email-service.js';
 import {
   ApiError,
   InboxCreationError,
@@ -15,6 +15,7 @@ import {
 } from '@/utils/errors.js';
 import { getProviderInstances } from '@/utils/instance-manager.js';
 import { log, logError } from '@/utils/logger.js';
+import { getInboxes, getSelectedProvider } from '@/utils/storage-keys.js';
 import type {
   Account,
   Email,
@@ -45,9 +46,7 @@ export async function createInbox(
   instanceId?: string,
   emailUser?: string
 ): Promise<Account> {
-  const { selectedProvider = DEFAULT_PROVIDER } = (await browser.storage.local.get([
-    'selectedProvider',
-  ])) as { selectedProvider?: string };
+  const selectedProvider = await getSelectedProvider();
 
   if (!selectedProvider) {
     throw new ProviderUnsupportedError('No provider selected');
@@ -248,16 +247,15 @@ export async function createInbox(
 /**
  * Deletes an inbox from storage
  * @param inboxId - The ID of the inbox to delete
- * @param preserveEmails - Whether to preserve emails in archive (default: true)
+ * @param preserveEmails - Whether to preserve emails in archive (default: false)
  * @returns Promise resolving to delete result with success status
  */
 export async function deleteInbox(
   inboxId: string,
-  preserveEmails: boolean = true
+  preserveEmails: boolean = false
 ): Promise<DeleteInboxResult> {
   try {
-    const deleteResult = (await browser.storage.local.get(['inboxes'])) as { inboxes?: Account[] };
-    const inboxes: Account[] = deleteResult.inboxes ?? [];
+    const inboxes: Account[] = await getInboxes();
     const inbox = inboxes.find((i) => i.id === inboxId);
 
     if (!inbox) {
@@ -288,30 +286,67 @@ export async function deleteInbox(
 
     const updatedInboxes = inboxes.filter((i: Account) => i.id !== inboxId);
 
-    const { seenEmailIds = {}, lastMessageTimestamps = {} } = (await browser.storage.local.get([
+    const {
+      seenEmailIds = {},
+      lastMessageTimestamps = {},
+      storedEmails = {},
+      archivedEmails = {},
+      readEmails = {},
+      starredEmails = [],
+    } = (await browser.storage.local.get([
       'seenEmailIds',
       'lastMessageTimestamps',
+      'storedEmails',
+      'archivedEmails',
+      'readEmails',
+      'starredEmails',
     ])) as {
       seenEmailIds?: Record<string, string[]>;
       lastMessageTimestamps?: Record<string, number>;
+      storedEmails?: Record<string, Email[]>;
+      archivedEmails?: Record<string, Email[]>;
+      readEmails?: Record<string, boolean>;
+      starredEmails?: string[];
     };
     if (inbox) {
       delete seenEmailIds[inbox.address];
       delete lastMessageTimestamps[inboxId];
+      let deletedEmailIds = new Set<string>();
 
-      if (!preserveEmails) {
+      if (preserveEmails) {
         await clearStoredEmails(inbox.address);
+        await browser.storage.local.set({
+          inboxes: updatedInboxes,
+          seenEmailIds,
+          lastMessageTimestamps,
+        });
       } else {
-        await clearStoredEmails(inbox.address);
+        deletedEmailIds = new Set<string>([
+          ...(storedEmails[inbox.address] || []).map((email) => email.id),
+          ...(archivedEmails[inbox.address] || []).map((email) => email.id),
+        ]);
+
+        delete storedEmails[inbox.address];
+        delete archivedEmails[inbox.address];
+
+        for (const emailId of deletedEmailIds) {
+          delete readEmails[emailId];
+        }
+
+        await browser.storage.local.set({
+          inboxes: updatedInboxes,
+          seenEmailIds,
+          lastMessageTimestamps,
+          storedEmails,
+          archivedEmails,
+          readEmails,
+          starredEmails: starredEmails.filter((emailId) => !deletedEmailIds.has(emailId)),
+        });
       }
+      return { success: true };
     }
 
-    await browser.storage.local.set({
-      inboxes: updatedInboxes,
-      seenEmailIds,
-      lastMessageTimestamps,
-    });
-    return { success: true };
+    return { success: false, error: `Inbox with ID ${inboxId} not found` };
   } catch (error: unknown) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     logError(
@@ -336,8 +371,7 @@ export async function checkNewEmails(
   filters: EmailFilters = {}
 ): Promise<Email[]> {
   try {
-    const checkResult = (await browser.storage.local.get(['inboxes'])) as { inboxes?: Account[] };
-    const inboxes: Account[] = checkResult.inboxes ?? [];
+    const inboxes: Account[] = await getInboxes();
     const inbox = inboxes.find((i) => i.id === inboxId);
     if (!inbox) {
       throw new InboxNotFoundError(inboxId, {
