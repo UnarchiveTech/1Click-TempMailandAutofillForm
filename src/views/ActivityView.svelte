@@ -1,14 +1,9 @@
 <script lang="ts">
 import { onDestroy, onMount } from 'svelte';
+import { get } from 'svelte/store';
+import { t } from 'svelte-i18n';
 import { browser } from 'wxt/browser';
-import IconBarChart from '@/components/icons/IconBarChart.svelte';
-import IconBell from '@/components/icons/IconBell.svelte';
-import IconChevronDown from '@/components/icons/IconChevronDown.svelte';
-import IconClock from '@/components/icons/IconClock.svelte';
-import IconEnvelope from '@/components/icons/IconEnvelope.svelte';
-import IconMail from '@/components/icons/IconMail.svelte';
-import IconRefresh from '@/components/icons/IconRefresh.svelte';
-import IconTrash from '@/components/icons/IconTrash.svelte';
+import Icon from '@/components/icons/Icon.svelte';
 import { clearActivityEvents, getActivityEvents } from '@/utils/activity-tracker.js';
 import { downloadCSV, exportAnalyticsToCSV } from '@/utils/csv-export.js';
 import { logError } from '@/utils/logger.js';
@@ -136,64 +131,68 @@ onDestroy(() => {
   }
 });
 
-function getEventIcon(type: ActivityEvent['type']) {
+function getEventIcon(type: ActivityEvent['type']): string {
   switch (type) {
     case 'email_received':
-      return IconMail;
+      return 'mail';
     case 'otp_detected':
-      return IconEnvelope;
+      return 'envelope';
     case 'notification_sent':
-      return IconBell;
+      return 'bell';
     case 'account_created':
-      return IconBarChart;
+      return 'barChart';
     case 'account_deleted':
-      return IconBarChart;
+      return 'barChart';
     case 'auto_fill':
-      return IconClock;
+      return 'clock';
     case 'toast_notification':
-      return IconBell;
+      return 'bell';
     case 'auto_extend':
-      return IconRefresh;
+      return 'refresh';
     case 'hard_reset':
-      return IconRefresh;
+      return 'refresh';
     default:
-      return IconMail;
+      return 'mail';
   }
 }
 
 function getEventTitle(type: ActivityEvent['type'], data: ActivityEvent['data']) {
+  const tr = get(t);
+  const sender = data.sender || tr('activity.unknownSender');
   switch (type) {
     case 'email_received':
-      return `New email from ${data.sender || 'Unknown'}`;
+      return tr('activity.eventEmailReceived', { values: { sender } });
     case 'otp_detected':
-      return `OTP detected from ${data.sender || 'Unknown'}`;
+      return tr('activity.eventOtpDetected', { values: { sender } });
     case 'notification_sent':
-      return `Notification sent for ${data.sender || 'Unknown'}`;
+      return tr('activity.eventNotificationSent', { values: { sender } });
     case 'account_created':
-      return `Account created: ${data.inboxAddress}`;
+      return tr('activity.eventAccountCreated', { values: { address: data.inboxAddress } });
     case 'account_deleted':
-      return `Account deleted: ${data.inboxAddress}`;
+      return tr('activity.eventAccountDeleted', { values: { address: data.inboxAddress } });
     case 'auto_fill':
-      return `Auto-filled OTP for ${data.website}`;
+      return tr('activity.eventAutoFill', { values: { website: data.website } });
     case 'toast_notification':
-      return data.message || 'Notification';
+      return data.message || tr('activity.eventToastNotification');
     case 'auto_extend':
-      return `Auto-extended: ${data.inboxAddress}`;
+      return tr('activity.eventAutoExtended', { values: { address: data.inboxAddress } });
     case 'hard_reset':
-      return `Hard reset performed`;
+      return tr('activity.eventHardReset');
     default:
-      return 'Unknown event';
+      return tr('activity.eventUnknown');
   }
 }
 
 function getEventSubtitle(type: ActivityEvent['type'], data: ActivityEvent['data']) {
+  const tr = get(t);
+  const fallbackSubject = tr('activity.noSubject');
   switch (type) {
     case 'email_received':
-      return data.subject || 'No subject';
+      return data.subject || fallbackSubject;
     case 'otp_detected':
-      return data.subject || 'No subject';
+      return data.subject || fallbackSubject;
     case 'notification_sent':
-      return data.subject || 'No subject';
+      return data.subject || fallbackSubject;
     case 'account_created':
       return data.inboxAddress;
     case 'account_deleted':
@@ -201,29 +200,40 @@ function getEventSubtitle(type: ActivityEvent['type'], data: ActivityEvent['data
     case 'auto_fill':
       return data.website;
     case 'toast_notification':
-      return data.toastType || 'info';
+      return data.toastType || tr('activity.toastInfo');
     case 'auto_extend':
       return data.inboxAddress;
     case 'hard_reset':
-      return 'All data cleared';
+      return tr('activity.allDataCleared');
     default:
       return '';
   }
 }
 
 function formatTime(timestamp: number) {
+  const tr = get(t);
   const now = Date.now();
   const diff = now - timestamp;
 
-  if (diff < 60000) return 'Just now';
-  if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
-  if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
+  if (diff < 60000) return tr('activity.timeJustNow');
+  if (diff < 3600000)
+    return tr('activity.timeMinutesAgo', { values: { n: Math.floor(diff / 60000) } });
+  if (diff < 86400000)
+    return tr('activity.timeHoursAgo', { values: { n: Math.floor(diff / 3600000) } });
   return new Date(timestamp).toLocaleDateString();
+}
+
+async function copyOtp(otp: string) {
+  try {
+    await navigator.clipboard.writeText(otp);
+  } catch {
+    // Best-effort copy; ignore failures
+  }
 }
 </script>
 
 {#if loading}
-  <div class="flex-1 overflow-y-auto px-4 py-4 space-y-4" style="scrollbar-width: thin; scrollbar-color: var(--md-primary) transparent;">
+  <div class="flex-1 overflow-y-auto px-4 py-4 space-y-4">
     {#each [1,2,3,4] as _}
       <div class="rounded-xl bg-md-primary-container p-4 space-y-2 animate-pulse">
         <div class="h-3 w-24 bg-md-secondary-container rounded"></div>
@@ -232,40 +242,40 @@ function formatTime(timestamp: number) {
     {/each}
   </div>
 {:else}
-<div class="flex-1 overflow-y-auto px-4 py-4 space-y-5 pb-20" style="scrollbar-width: thin; scrollbar-color: var(--md-primary) transparent;">
+<div class="flex-1 overflow-y-auto px-4 py-4 space-y-5 pb-20">
 
   <!-- Page heading -->
   <div class="pt-1">
-    <h1 class="text-lg font-bold text-md-on-surface">Activity</h1>
-    <p class="text-xs text-md-on-surface/50 mt-0.5">Your extension usage and timeline.</p>
+    <h1 class="text-lg font-bold text-md-on-surface">{$t('activity.title')}</h1>
+    <p class="text-xs text-md-on-surface/50 mt-0.5">{$t('activity.subtitle')}</p>
   </div>
 
   <!-- ── Summary Stats Cards ── -->
   <section class="space-y-2">
     <div class="flex items-center gap-2 mb-1">
-      <IconBarChart class="w-4 h-4 text-md-primary" />
-      <span class="text-sm font-semibold text-md-on-surface">Summary</span>
+      <Icon name="barChart" class="w-4 h-4 text-md-primary" />
+      <span class="text-sm font-semibold text-md-on-surface">{$t('activity.summary')}</span>
     </div>
 
     <div class="grid grid-cols-2 gap-2">
       <div class="bg-md-tertiary-container rounded-xl px-3 py-3 flex flex-col items-center justify-center">
         <div class="text-2xl font-bold text-md-primary">{analytics.accountsCreated}</div>
-        <div class="text-xs text-md-on-surface/50">Inboxes</div>
+        <div class="text-xs text-md-on-surface/50">{$t('activity.inboxes')}</div>
       </div>
 
       <div class="bg-md-tertiary-container rounded-xl px-3 py-3 flex flex-col items-center justify-center">
         <div class="text-2xl font-bold text-md-secondary">{analytics.emailsReceived}</div>
-        <div class="text-xs text-md-on-surface/50">Emails</div>
+        <div class="text-xs text-md-on-surface/50">{$t('activity.emails')}</div>
       </div>
 
       <div class="bg-md-tertiary-container rounded-xl px-3 py-3 flex flex-col items-center justify-center">
         <div class="text-2xl font-bold text-md-tertiary">{analytics.otpsDetected}</div>
-        <div class="text-xs text-md-on-surface/50">OTPs</div>
+        <div class="text-xs text-md-on-surface/50">{$t('activity.otps')}</div>
       </div>
 
       <div class="bg-md-tertiary-container rounded-xl px-3 py-3 flex flex-col items-center justify-center">
         <div class="text-2xl font-bold text-md-primary">{analytics.notificationsSent}</div>
-        <div class="text-xs text-md-on-surface/50">Notifications</div>
+        <div class="text-xs text-md-on-surface/50">{$t('activity.notifications')}</div>
       </div>
     </div>
   </section>
@@ -274,42 +284,42 @@ function formatTime(timestamp: number) {
   {#if analytics.performance}
     <section class="space-y-2">
       <div class="flex items-center gap-2 mb-1">
-        <IconClock class="w-4 h-4 text-md-primary" />
-        <span class="text-sm font-semibold text-md-on-surface">Performance</span>
+        <Icon name="clock" class="w-4 h-4 text-md-primary" />
+        <span class="text-sm font-semibold text-md-on-surface">{$t('activity.performance')}</span>
       </div>
 
       <div class="bg-md-primary-container rounded-xl px-4 py-3 space-y-3">
         <!-- Email Fetch Time -->
         <div class="flex items-center justify-between">
-          <div class="text-xs text-md-on-surface/70">Avg Email Fetch</div>
+          <div class="text-xs text-md-on-surface/70">{$t('activity.avgEmailFetch')}</div>
           <div class="text-sm font-semibold text-md-primary">
             {analytics.performance.emailFetchTimes.length > 0
               ? `${(analytics.performance.emailFetchTimes.reduce((a: number, b: number) => a + b, 0) / analytics.performance.emailFetchTimes.length).toFixed(0)}ms`
-              : 'N/A'}
+              : $t('activity.notAvailable')}
           </div>
         </div>
 
         <!-- UI Render Time -->
         <div class="flex items-center justify-between">
-          <div class="text-xs text-md-on-surface/70">Avg UI Render</div>
+          <div class="text-xs text-md-on-surface/70">{$t('activity.avgUiRender')}</div>
           <div class="text-sm font-semibold text-md-secondary">
             {analytics.performance.uiRenderTimes.length > 0
               ? `${(analytics.performance.uiRenderTimes.reduce((a: number, b: number) => a + b, 0) / analytics.performance.uiRenderTimes.length).toFixed(0)}ms`
-              : 'N/A'}
+              : $t('activity.notAvailable')}
           </div>
         </div>
 
         <!-- Provider Latency -->
         {#if Object.keys(analytics.performance.providerLatency).length > 0}
           <div class="pt-2 border-t border-md-outline-variant/30">
-            <div class="text-xs text-md-on-surface/70 mb-2">Provider Latency</div>
+            <div class="text-xs text-md-on-surface/70 mb-2">{$t('activity.providerLatency')}</div>
             {#each Object.entries(analytics.performance.providerLatency) as [provider, latencies]}
               <div class="flex items-center justify-between mb-1 last:mb-0">
                 <div class="text-xs text-md-on-surface/60 capitalize">{provider}</div>
                 <div class="text-xs font-medium text-md-tertiary">
                   {Array.isArray(latencies) && latencies.length > 0
                     ? `${(latencies.reduce((a: number, b: number) => a + b, 0) / latencies.length).toFixed(0)}ms`
-                    : 'N/A'}
+                    : $t('activity.notAvailable')}
                 </div>
               </div>
             {/each}
@@ -322,8 +332,8 @@ function formatTime(timestamp: number) {
   <!-- ── Activity Timeline ── -->
   <section class="space-y-2">
     <div class="flex items-center gap-2 mb-1">
-      <IconClock class="w-4 h-4 text-md-primary" />
-      <span class="text-sm font-semibold text-md-on-surface">Recent Activity</span>
+      <Icon name="clock" class="w-4 h-4 text-md-primary" />
+      <span class="text-sm font-semibold text-md-on-surface">{$t('activity.recentActivity')}</span>
     </div>
 
     <!-- Filter pills -->
@@ -332,15 +342,15 @@ function formatTime(timestamp: number) {
       <div class="relative shrink-0">
         <button
           class="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full border transition-colors {activityTypeFilter !== 'all' ? 'border-md-primary bg-md-primary/10 text-md-primary' : 'border-md-outline-variant bg-transparent text-md-on-surface/80 hover:bg-md-surface-variant'}"
-          aria-label="Filter by action type"
+          aria-label={$t('activity.filterByActionType')}
           onclick={() => { actionTypeDropdownOpen = !actionTypeDropdownOpen; fromDropdownOpen = false; }}
         >
-          Action: {activityTypeFilter === 'all' ? 'All' : activityTypeFilter === 'auto_extend' ? 'Auto-extend' : activityTypeFilter === 'inbox_created' ? 'New Inbox' : activityTypeFilter === 'hard_reset' ? 'Hard Reset' : activityTypeFilter === 'notification' ? 'Notification' : 'All'}
-          <IconChevronDown class="w-3 h-3" />
+          {$t('activity.actionLabel')}: {activityTypeFilter === 'all' ? $t('activity.all') : activityTypeFilter === 'auto_extend' ? $t('activity.autoExtend') : activityTypeFilter === 'inbox_created' ? $t('activity.newInbox') : activityTypeFilter === 'hard_reset' ? $t('activity.hardReset') : activityTypeFilter === 'notification' ? $t('activity.notification') : $t('activity.all')}
+          <Icon name="chevronDown" class="w-3 h-3" />
         </button>
         {#if actionTypeDropdownOpen}
           <div class="absolute top-full left-0 mt-1 bg-md-surface border border-md-outline-variant rounded-xl shadow-lg z-[200] overflow-hidden min-w-[140px]">
-            {#each [['all', 'All'], ['auto_extend', 'Auto-extend'], ['inbox_created', 'New Inbox'], ['hard_reset', 'Hard Reset'], ['notification', 'Notification']] as [val, label]}
+            {#each [['all', $t('activity.all')], ['auto_extend', $t('activity.autoExtend')], ['inbox_created', $t('activity.newInbox')], ['hard_reset', $t('activity.hardReset')], ['notification', $t('activity.notification')]] as [val, label]}
               <button
                 class="w-full px-3 py-2 text-left text-xs hover:bg-md-surface-variant transition-colors {activityTypeFilter === val ? 'text-md-primary font-medium' : 'text-md-on-surface'}"
                 onclick={() => { activityTypeFilter = val; actionTypeDropdownOpen = false; }}
@@ -356,11 +366,11 @@ function formatTime(timestamp: number) {
       <div class="relative shrink-0">
         <button
           class="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full border transition-colors {addressFilter !== 'all' ? 'border-md-primary bg-md-primary/10 text-md-primary' : 'border-md-outline-variant bg-transparent text-md-on-surface/80 hover:bg-md-surface-variant'}"
-          aria-label="Filter by email address"
+          aria-label={$t('activity.filterByEmailAddress')}
           onclick={() => { fromDropdownOpen = !fromDropdownOpen; actionTypeDropdownOpen = false; }}
         >
-          From: {addressFilter === 'all' ? 'All' : addressFilter.length > 20 ? addressFilter.slice(0, 20) + '...' : addressFilter}
-          <IconChevronDown class="w-3 h-3" />
+          {$t('activity.fromLabel')}: {addressFilter === 'all' ? $t('activity.all') : addressFilter.length > 20 ? addressFilter.slice(0, 20) + '...' : addressFilter}
+          <Icon name="chevronDown" class="w-3 h-3" />
         </button>
         {#if fromDropdownOpen}
           <div class="absolute top-full left-0 mt-1 bg-md-surface border border-md-outline-variant rounded-xl shadow-lg z-[200] overflow-hidden min-w-[200px] max-h-64 overflow-y-auto">
@@ -368,7 +378,7 @@ function formatTime(timestamp: number) {
             <div class="p-2 border-b border-md-outline-variant/30">
               <input
                 type="text"
-                placeholder="Search addresses..."
+                placeholder={$t('activity.searchAddresses')}
                 class="w-full px-2 py-1 text-xs border border-md-outline-variant rounded-md bg-md-surface focus:outline-none focus:border-md-primary"
                 bind:value={fromSearch}
               />
@@ -378,7 +388,7 @@ function formatTime(timestamp: number) {
               class="w-full px-3 py-2 text-left text-xs hover:bg-md-surface-variant transition-colors {addressFilter === 'all' ? 'text-md-primary font-medium' : 'text-md-on-surface'}"
               onclick={() => { addressFilter = 'all'; fromDropdownOpen = false; fromSearch = ''; }}
             >
-              All
+              {$t('activity.all')}
             </button>
             <!-- Address options -->
             {#each uniqueAddresses.filter(addr => fromSearch === '' || addr.toLowerCase().includes(fromSearch.toLowerCase())) as addr}
@@ -399,13 +409,13 @@ function formatTime(timestamp: number) {
         {#each [1,2,3] as _}
           <div class="rounded-xl bg-md-primary-container p-4 space-y-2 animate-pulse">
             <div class="h-3 w-24 bg-md-secondary-container rounded"></div>
-            <div class="h-4 w-32 bg-md-secondacy-dont-oteriner rounded"></div>
+            <div class="h-4 w-32 bg-md-secondary-container rounded"></div>
           </div>
         {/each}
       </div>
     {:else if filteredEvents.length === 0}
       <div class="bg-md-primary-container rounded-xl px-4 py-6 text-center">
-        <div class="text-sm text-md-on-surface/50">{activityEvents.length === 0 ? 'No activity yet' : 'No matching activity'}</div>
+        <div class="text-sm text-md-on-surface/50">{activityEvents.length === 0 ? $t('activity.noActivity') : $t('activity.noMatchingActivity')}</div>
       </div>
     {:else}
       <div class="space-y-2">
@@ -413,7 +423,7 @@ function formatTime(timestamp: number) {
           {#if event.type === 'email_received'}
             <div class="bg-md-primary-container rounded-xl px-4 py-3 flex items-start gap-3">
               <div class="mt-0.5">
-                <IconMail class="w-4 h-4 text-md-primary" />
+                <Icon name="mail" class="w-4 h-4 text-md-primary" />
               </div>
               <div class="flex-1 min-w-0">
                 <div class="text-sm font-medium text-md-on-surface truncate">
@@ -430,7 +440,7 @@ function formatTime(timestamp: number) {
           {:else if event.type === 'otp_detected'}
             <div class="bg-md-primary-container rounded-xl px-4 py-3 flex items-start gap-3">
               <div class="mt-0.5">
-                <IconEnvelope class="w-4 h-4 text-md-primary" />
+                <Icon name="envelope" class="w-4 h-4 text-md-primary" />
               </div>
               <div class="flex-1 min-w-0">
                 <div class="text-sm font-medium text-md-on-surface truncate">
@@ -439,6 +449,23 @@ function formatTime(timestamp: number) {
                 <div class="text-xs text-md-on-surface/50 truncate">
                   {getEventSubtitle(event.type, event.data)}
                 </div>
+                {#if event.data.otp}
+                  {@const otpValue = event.data.otp}
+                  <div class="mt-2 flex items-center gap-2">
+                    <span class="text-[10px] text-md-on-surface/50 uppercase tracking-wide">{$t('activity.code')}</span>
+                    <code class="px-2 py-0.5 text-sm font-mono font-semibold rounded-md bg-md-primary/20 text-md-primary tracking-widest">
+                      {otpValue}
+                    </code>
+                    <button
+                      type="button"
+                      class="text-[10px] text-md-primary hover:underline bg-transparent border-0 p-0"
+                      onclick={(e) => { e.stopPropagation(); void copyOtp(otpValue); }}
+                      title={$t('activity.copyOtp')}
+                    >
+                      {$t('activity.copy')}
+                    </button>
+                  </div>
+                {/if}
                 <div class="text-[10px] text-md-on-surface/40 mt-1">
                   {formatTime(event.timestamp)}
                 </div>
@@ -447,7 +474,7 @@ function formatTime(timestamp: number) {
           {:else if event.type === 'notification_sent'}
             <div class="bg-md-primary-container rounded-xl px-4 py-3 flex items-start gap-3">
               <div class="mt-0.5">
-                <IconBell class="w-4 h-4 text-md-primary" />
+                <Icon name="bell" class="w-4 h-4 text-md-primary" />
               </div>
               <div class="flex-1 min-w-0">
                 <div class="text-sm font-medium text-md-on-surface truncate">
@@ -464,7 +491,7 @@ function formatTime(timestamp: number) {
           {:else if event.type === 'account_created'}
             <div class="bg-md-primary-container rounded-xl px-4 py-3 flex items-start gap-3">
               <div class="mt-0.5">
-                <IconBarChart class="w-4 h-4 text-md-primary" />
+                <Icon name="barChart" class="w-4 h-4 text-md-primary" />
               </div>
               <div class="flex-1 min-w-0">
                 <div class="text-sm font-medium text-md-on-surface truncate">
@@ -481,7 +508,7 @@ function formatTime(timestamp: number) {
           {:else if event.type === 'account_deleted'}
             <div class="bg-md-primary-container rounded-xl px-4 py-3 flex items-start gap-3">
               <div class="mt-0.5">
-                <IconBarChart class="w-4 h-4 text-md-primary" />
+                <Icon name="barChart" class="w-4 h-4 text-md-primary" />
               </div>
               <div class="flex-1 min-w-0">
                 <div class="text-sm font-medium text-md-on-surface truncate">
@@ -498,7 +525,7 @@ function formatTime(timestamp: number) {
           {:else if event.type === 'toast_notification'}
             <div class="bg-md-primary-container rounded-xl px-4 py-3 flex items-start gap-3">
               <div class="mt-0.5">
-                <IconBell class="w-4 h-4 text-md-primary" />
+                <Icon name="bell" class="w-4 h-4 text-md-primary" />
               </div>
               <div class="flex-1 min-w-0">
                 <div class="text-sm font-medium text-md-on-surface truncate">
@@ -515,7 +542,7 @@ function formatTime(timestamp: number) {
           {:else}
             <div class="bg-md-primary-container rounded-xl px-4 py-3 flex items-start gap-3">
               <div class="mt-0.5">
-                <IconMail class="w-4 h-4 text-md-primary" />
+                <Icon name="mail" class="w-4 h-4 text-md-primary" />
               </div>
               <div class="flex-1 min-w-0">
                 <div class="text-sm font-medium text-md-on-surface truncate">
@@ -538,27 +565,27 @@ function formatTime(timestamp: number) {
   <!-- ── Since Info ── -->
   {#if analytics.createdAt}
     <div class="bg-md-primary-container rounded-xl px-4 py-3">
-      <div class="text-[10px] font-semibold text-md-on-surface/40 uppercase tracking-wider mb-1.5">Tracking Since</div>
+      <div class="text-[10px] font-semibold text-md-on-surface/40 uppercase tracking-wider mb-1.5">{$t('activity.trackingSince')}</div>
       <div class="text-sm text-md-on-surface">{new Date(analytics.createdAt).toLocaleDateString()}</div>
     </div>
   {/if}
 
   <!-- ── Refresh Button ── -->
   <button class="w-full h-12 px-4 text-sm font-semibold rounded-xl border border-md-primary text-md-primary hover:bg-md-primary/10 transition-colors flex items-center justify-center gap-2" onclick={() => { onLoadAnalytics(); loadActivityEvents(); }}>
-    <IconRefresh class="w-4 h-4" />
-    Refresh
+    <Icon name="refresh" class="w-4 h-4" />
+    {$t('activity.refresh')}
   </button>
 
   <!-- ── Export Analytics Button ── -->
   <button class="w-full h-12 px-4 text-sm font-semibold rounded-xl border border-md-secondary text-md-secondary hover:bg-md-secondary/10 transition-colors flex items-center justify-center gap-2" onclick={handleExportAnalytics}>
-    <IconBarChart class="w-4 h-4" />
-    Export Analytics
+    <Icon name="barChart" class="w-4 h-4" />
+    {$t('activity.exportAnalytics')}
   </button>
 
   <!-- ── Reset Button ── -->
   <button class="w-full h-12 px-4 text-sm font-semibold rounded-xl border border-md-error text-md-error hover:bg-md-error/10 transition-colors flex items-center justify-center gap-2" onclick={() => { resetDialogOpen = true; }}>
-    <IconTrash class="w-4 h-4" />
-    Reset Activity
+    <Icon name="trash" class="w-4 h-4" />
+    {$t('activity.resetActivity')}
   </button>
 
   <!-- ── Reset Confirmation Dialog ── -->
@@ -576,9 +603,9 @@ function formatTime(timestamp: number) {
         class="bg-md-surface rounded-xl p-6 max-w-sm mx-4 shadow-xl"
         role="document"
       >
-        <h3 id="reset-dialog-title" class="text-lg font-semibold text-md-on-surface mb-2">Reset Activity?</h3>
+        <h3 id="reset-dialog-title" class="text-lg font-semibold text-md-on-surface mb-2">{$t('activity.resetDialogTitle')}</h3>
         <p class="text-sm text-md-on-surface/70 mb-4">
-          This will permanently delete all activity events and reset all stats (inboxes, emails, OTPs, notifications). Tracking will start fresh from this moment.
+          {$t('activity.resetDialogBody')}
         </p>
         <div class="flex gap-2">
           <button
@@ -586,14 +613,14 @@ function formatTime(timestamp: number) {
             onclick={() => resetDialogOpen = false}
             type="button"
           >
-            Cancel
+            {$t('common.cancel')}
           </button>
           <button
             class="flex-1 h-10 px-4 text-sm font-semibold rounded-xl bg-md-error text-md-on-error hover:bg-md-error/90 transition-colors"
             onclick={handleReset}
             type="button"
           >
-            Reset
+            {$t('activity.reset')}
           </button>
         </div>
       </div>

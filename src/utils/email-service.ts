@@ -11,7 +11,7 @@ import type { Browser } from 'wxt/browser';
 import { logDebug } from '@/utils/logger.js';
 import { validateAllProviderConfigs } from '@/utils/provider-validation.js';
 import type { ProviderInstance } from '@/utils/types.js';
-import allProviders from '../config/providers.json';
+import allProviders from '../config/providers.jsonc';
 import { buildRequest, checkForErrors, parseResponse } from './dsl/email-fetcher.js';
 
 // Validate all provider configs on load
@@ -23,7 +23,11 @@ const providerConfigs = new Map<string, ProviderConfig>(
 );
 
 // Default provider ID (first provider in config)
-export const DEFAULT_PROVIDER = (allProviders as unknown as ProviderConfig[])[0]?.id || 'guerrilla';
+const firstProvider = (allProviders as unknown as ProviderConfig[])[0];
+if (!firstProvider) {
+  throw new Error('No mail providers configured in providers.jsonc');
+}
+export const DEFAULT_PROVIDER = firstProvider.id;
 
 /**
  * Load a provider configuration by ID

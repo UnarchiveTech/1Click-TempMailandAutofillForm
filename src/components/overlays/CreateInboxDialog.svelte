@@ -1,5 +1,6 @@
 <script lang="ts">
-import IconX from '@/components/icons/IconX.svelte';
+import Icon from '@/components/icons/Icon.svelte';
+import type { ProviderConfig } from '@/utils/email-service.js';
 import { getErrorMessage } from '@/utils/errors.js';
 import { setupFocusTrap } from '@/utils/focusTrap.js';
 import { validateUsername } from '@/utils/validation.js';
@@ -8,15 +9,20 @@ interface Props {
   open: boolean;
   onClose: () => void;
   onCreate: (type: 'random' | 'custom', username?: string) => void;
+  providerConfig?: ProviderConfig;
 }
 
-let { open, onClose, onCreate }: Props = $props();
+let { open, onClose, onCreate, providerConfig }: Props = $props();
 
 let inboxType = $state<'random' | 'custom'>('random');
 let customUsername = $state('');
 let validationError = $state('');
 let dialogRef = $state<HTMLElement | null>(null);
 let cleanupFocusTrap: (() => void) | null = null;
+
+let displayName = $derived(providerConfig?.displayName ?? 'Mail');
+let defaultDomainHint = $derived(providerConfig?.multiDomain?.domains?.[0] ?? '');
+let supportsCustomEmail = $derived(providerConfig?.customEmail?.supported ?? true);
 
 // Setup focus trap when dialog opens
 $effect(() => {
@@ -66,21 +72,20 @@ function handleClose() {
       class="absolute inset-0 bg-md-surface/30 backdrop-blur-sm"
       role="button"
       tabindex="-1"
-      onclick={handleClose}
+      onclick={(e) => { e.stopPropagation(); handleClose(); }}
       onkeydown={(e) => e.key === 'Escape' && handleClose()}
     ></div>
 
     <button
       class="absolute top-4 right-4 z-10 w-9 h-9 rounded-full bg-md-surface hover:bg-md-surface-variant flex items-center justify-center shadow-md transition-colors"
       aria-label="Close dialog"
-      onclick={handleClose}
+      onclick={(e) => { e.stopPropagation(); handleClose(); }}
     >
-      <IconX class="w-4 h-4 text-md-on-surface/70" />
+      <Icon name="x" class="w-4 h-4 text-md-on-surface/70" />
     </button>
 
     <div
-      class="relative bg-md-surface rounded-xl px-4 py-2"
-      style="width: 350px"
+      class="relative bg-md-surface rounded-xl px-4 py-2 w-[350px]"
       tabindex="-1"
       bind:this={dialogRef}
     >
@@ -99,7 +104,7 @@ function handleClose() {
             aria-label="Random email address"
           />
           <div class="flex-1">
-            <p class="text-sm font-semibold text-md-on-surface">Random Guerrilla Mail</p>
+            <p class="text-sm font-semibold text-md-on-surface">Random {displayName}</p>
             <p class="text-xs text-md-on-surface/50">Generate a random email address</p>
           </div>
         </label>
@@ -129,7 +134,7 @@ function handleClose() {
                   else if (e.key === 'Escape') handleClose();
                 }}
               />
-              <span class="text-xs text-md-on-surface/50">@guerrillamailblock.com</span>
+              <span class="text-xs text-md-on-surface/50">@{defaultDomainHint || 'guerrillamail.com'}</span>
             </div>
             {#if validationError}
               <p class="text-xs text-md-error ml-7">{validationError}</p>
@@ -142,8 +147,8 @@ function handleClose() {
 
       <!-- Action buttons -->
       <div class="flex gap-2 pt-1">
-        <button class="flex-1 px-3 py-1.5 text-sm rounded-xl bg-md-secondary text-md-on-secondary hover:bg-md-secondary/90 transition-colors" aria-label="Cancel creating inbox" onclick={handleClose}>Cancel</button>
-        <button class="flex-1 px-3 py-1.5 text-sm rounded-xl bg-md-primary text-md-on-primary hover:bg-md-primary/90 transition-colors" aria-label="Create new inbox" onclick={handleCreate} disabled={inboxType === 'custom' && !customUsername.trim()}>Create</button>
+        <button class="flex-1 px-3 py-1.5 text-sm rounded-xl bg-md-secondary text-md-on-secondary hover:bg-md-secondary/90 transition-colors" aria-label="Cancel creating inbox" onclick={(e) => { e.stopPropagation(); handleClose(); }}>Cancel</button>
+        <button class="flex-1 px-3 py-1.5 text-sm rounded-xl bg-md-primary text-md-on-primary hover:bg-md-primary/90 transition-colors" aria-label="Create new inbox" onclick={(e) => { e.stopPropagation(); handleCreate(); }} disabled={inboxType === 'custom' && !customUsername.trim()}>Create</button>
       </div>
     </div>
   </div>

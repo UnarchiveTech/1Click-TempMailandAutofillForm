@@ -146,17 +146,27 @@ export function highlightMatches(
   highlightClass: string = 'bg-yellow-200 dark:bg-yellow-800'
 ): string {
   if (!text || !terms.length) {
-    return text;
+    return text.replace(
+      /[&<>"']/g,
+      (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[m] || m
+    );
   }
 
-  let result = text;
+  let result = text.replace(
+    /[&<>"']/g,
+    (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[m] || m
+  );
   const uniqueTerms = [...new Set(terms.map((t) => t.toLowerCase()))];
 
   for (const term of uniqueTerms) {
     // Skip shortcut syntax in highlighting
     if (term.includes(':')) continue;
 
-    const regex = new RegExp(`(${escapeRegex(term)})`, 'gi');
+    const escapedTermHtml = term.replace(
+      /[&<>"']/g,
+      (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[m] || m
+    );
+    const regex = new RegExp(`(${escapeRegex(escapedTermHtml)})`, 'gi');
     result = result.replace(regex, `<mark class="${highlightClass}">$1</mark>`);
   }
 

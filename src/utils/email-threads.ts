@@ -20,47 +20,50 @@ export function normalizeSubject(subject: string): string {
     .trim();
 }
 
+function toMs(receivedAt: number): number {
+  return receivedAt > 1_000_000_000_000 ? receivedAt : receivedAt * 1000;
+}
+
 /**
  * Group an array of emails into threads using subject-based heuristics.
  * Two emails belong to the same thread if:
  *   - their normalized subjects match, AND
  *   - they share at least one participant (from/to address), OR
  *   - they are within 72 hours of each other
+ *
+ * Uses a Map keyed by normalized subject for O(1) candidate lookup
+ * instead of iterating all threads per email.
  */
 export function groupEmailsByThread(emails: Email[]): EmailThread[] {
-  const threads: Map<string, EmailThread> = new Map();
+  // Map: normalized subject → array of threads with that subject
+  const subjectThreads = new Map<string, EmailThread[]>();
+  const allThreads: EmailThread[] = [];
 
-  // Sort newest-first so latest email is easy to track
-  const sorted = [...emails].sort((a, b) => {
-    const aMs = a.received_at > 1_000_000_000_000 ? a.received_at : a.received_at * 1000;
-    const bMs = b.received_at > 1_000_000_000_000 ? b.received_at : b.received_at * 1000;
-    return bMs - aMs;
-  });
+  // Sort newest-first so first assignment wins for latestEmail
+  const sorted = [...emails].sort((a, b) => toMs(b.received_at) - toMs(a.received_at));
 
   for (const email of sorted) {
     const norm = normalizeSubject(email.subject || '');
+    const candidates = subjectThreads.get(norm);
 
-    // Try to find a matching thread
     let matched: EmailThread | null = null;
-    for (const thread of threads.values()) {
-      if (thread.normalizedSubject !== norm) continue;
 
-      // Participant overlap check
+    if (candidates) {
       const emailParticipants = new Set([email.from, email.from_name].filter(Boolean));
-      const overlap = thread.participants.some((p) => emailParticipants.has(p));
+      const emailMs = toMs(email.received_at);
 
-      // Time proximity: within 72 hours of the latest email in this thread
-      const threadLatestMs =
-        thread.latestEmail.received_at > 1_000_000_000_000
-          ? thread.latestEmail.received_at
-          : thread.latestEmail.received_at * 1000;
-      const emailMs =
-        email.received_at > 1_000_000_000_000 ? email.received_at : email.received_at * 1000;
-      const withinWindow = Math.abs(threadLatestMs - emailMs) < 72 * 60 * 60 * 1000;
+      for (const thread of candidates) {
+        // Participant overlap check
+        const overlap = thread.participants.some((p) => emailParticipants.has(p));
 
-      if (overlap || withinWindow) {
-        matched = thread;
-        break;
+        // Time proximity: within 72 hours of the latest email in this thread
+        const threadLatestMs = toMs(thread.latestEmail.received_at);
+        const withinWindow = Math.abs(threadLatestMs - emailMs) < 72 * 60 * 60 * 1000;
+
+        if (overlap || withinWindow) {
+          matched = thread;
+          break;
+        }
       }
     }
 
@@ -69,30 +72,26 @@ export function groupEmailsByThread(emails: Email[]): EmailThread[] {
       if (email.unread) matched.unreadCount++;
       if (email.from && !matched.participants.includes(email.from))
         matched.participants.push(email.from);
-      // latestEmail is already the newest (sorted newest-first, first assignment wins)
     } else {
       const threadId = `thread-${norm}-${email.id}`;
-      threads.set(threadId, {
+      const thread: EmailThread = {
         id: threadId,
         normalizedSubject: norm,
         emails: [email],
         latestEmail: email,
         unreadCount: email.unread ? 1 : 0,
         participants: [email.from].filter(Boolean) as string[],
-      });
+      };
+      allThreads.push(thread);
+      if (!subjectThreads.has(norm)) {
+        subjectThreads.set(norm, []);
+      }
+      subjectThreads.get(norm)!.push(thread);
     }
   }
 
   // Sort threads by latest email timestamp descending
-  return Array.from(threads.values()).sort((a, b) => {
-    const aMs =
-      a.latestEmail.received_at > 1_000_000_000_000
-        ? a.latestEmail.received_at
-        : a.latestEmail.received_at * 1000;
-    const bMs =
-      b.latestEmail.received_at > 1_000_000_000_000
-        ? b.latestEmail.received_at
-        : b.latestEmail.received_at * 1000;
-    return bMs - aMs;
-  });
+  return allThreads.sort(
+    (a, b) => toMs(b.latestEmail.received_at) - toMs(a.latestEmail.received_at)
+  );
 }

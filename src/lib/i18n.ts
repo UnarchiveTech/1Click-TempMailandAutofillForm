@@ -20,14 +20,7 @@ function mapLocale(browserLocale: string): string {
     return langCode;
   }
 
-  // Specific mappings
-  const localeMap: Record<string, string> = {
-    zh: 'zh', // zh-CN, zh-TW, etc.
-    ja: 'ja',
-    ar: 'ar',
-  };
-
-  return localeMap[langCode] || 'en';
+  return 'en';
 }
 
 // Set locale immediately before init to prevent initialization errors
@@ -57,8 +50,10 @@ export async function setLanguage(newLocale: string) {
   locale.set(newLocale);
 }
 
+import { get } from 'svelte/store';
+
 export function getCurrentLocale(): string {
-  return getLocaleFromNavigator() || 'en';
+  return get(locale) || getLocaleFromNavigator() || 'en';
 }
 
 export const isRTL = (locale: string): boolean => {

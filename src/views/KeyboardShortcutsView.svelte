@@ -1,5 +1,7 @@
 <script lang="ts">
-import IconChevronLeft from '@/components/icons/IconChevronLeft.svelte';
+import { get } from 'svelte/store';
+import { t } from 'svelte-i18n';
+import Icon from '@/components/icons/Icon.svelte';
 import type { Keybindings } from '@/utils/types.js';
 import { DEFAULT_KEYBINDINGS } from '@/utils/types.js';
 
@@ -19,12 +21,27 @@ let editingKeybinding = $state<string | null>(null);
 let recordingKeybinding = $state(false);
 let recordedKeys = $state<string>('');
 
-const KEYBINDING_LABELS: Record<keyof Keybindings, { label: string; description: string }> = {
-  refreshInbox: { label: 'Refresh Inbox', description: 'Check for new emails' },
-  createInbox: { label: 'Create Inbox', description: 'Generate new email address' },
-  copyEmail: { label: 'Copy Email', description: 'Copy current email address' },
-  copyOtp: { label: 'Copy OTP', description: 'Copy one-time password' },
-  closeDialogs: { label: 'Close Dialogs', description: 'Close open dialogs/panels' },
+const KEYBINDING_LABELS: Record<keyof Keybindings, { labelKey: string; descriptionKey: string }> = {
+  refreshInbox: {
+    labelKey: 'keyboardShortcuts.refreshInbox',
+    descriptionKey: 'keyboardShortcuts.refreshInboxDescription',
+  },
+  createInbox: {
+    labelKey: 'keyboardShortcuts.createInbox',
+    descriptionKey: 'keyboardShortcuts.createInboxDescription',
+  },
+  copyEmail: {
+    labelKey: 'keyboardShortcuts.copyEmail',
+    descriptionKey: 'keyboardShortcuts.copyEmailDescription',
+  },
+  copyOtp: {
+    labelKey: 'keyboardShortcuts.copyOtp',
+    descriptionKey: 'keyboardShortcuts.copyOtpDescription',
+  },
+  closeDialogs: {
+    labelKey: 'keyboardShortcuts.closeDialogs',
+    descriptionKey: 'keyboardShortcuts.closeDialogsDescription',
+  },
 };
 
 function formatKeybinding(binding: {
@@ -34,10 +51,11 @@ function formatKeybinding(binding: {
   shiftKey?: boolean;
   altKey?: boolean;
 }): string {
+  const tr = get(t);
   const parts: string[] = [];
-  if (binding.ctrlKey || binding.metaKey) parts.push('Ctrl/Cmd');
-  if (binding.shiftKey) parts.push('Shift');
-  if (binding.altKey) parts.push('Alt');
+  if (binding.ctrlKey || binding.metaKey) parts.push(tr('keyboardShortcuts.ctrlCmd'));
+  if (binding.shiftKey) parts.push(tr('keyboardShortcuts.shift'));
+  if (binding.altKey) parts.push(tr('keyboardShortcuts.alt'));
   parts.push(binding.key.toUpperCase());
   return parts.join(' + ');
 }
@@ -52,10 +70,11 @@ function handleRecordingKeydown(event: KeyboardEvent) {
   event.preventDefault();
   event.stopPropagation();
 
+  const tr = get(t);
   const parts: string[] = [];
-  if (event.ctrlKey || event.metaKey) parts.push('Ctrl/Cmd');
-  if (event.shiftKey) parts.push('Shift');
-  if (event.altKey) parts.push('Alt');
+  if (event.ctrlKey || event.metaKey) parts.push(tr('keyboardShortcuts.ctrlCmd'));
+  if (event.shiftKey) parts.push(tr('keyboardShortcuts.shift'));
+  if (event.altKey) parts.push(tr('keyboardShortcuts.alt'));
   parts.push(event.key.toUpperCase());
 
   recordedKeys = parts.join(' + ');
@@ -113,26 +132,26 @@ let hasCustomized = $derived(
     <button
       class="w-8 h-8 flex items-center justify-center rounded-lg bg-transparent hover:bg-md-secondary-container transition-colors"
       onclick={onBack}
-      aria-label="Back"
+      aria-label={$t('common.back')}
     >
-      <IconChevronLeft class="w-5 h-5" />
+      <Icon name="chevronLeft" class="w-5 h-5" />
     </button>
     <div class="flex-1">
-      <div class="font-semibold text-sm">Keyboard Shortcuts</div>
-      <div class="text-xs text-md-on-surface/50">Customize hotkeys for quick actions</div>
+      <div class="font-semibold text-sm">{$t('keyboardShortcuts.title')}</div>
+      <div class="text-xs text-md-on-surface/50">{$t('keyboardShortcuts.subtitle')}</div>
     </div>
     {#if hasCustomized}
       <button
         class="text-xs text-md-error hover:text-md-error/80 transition-colors px-2 py-1 rounded-lg hover:bg-md-error/10"
         onclick={resetAll}
       >
-        Reset all
+        {$t('keyboardShortcuts.resetAll')}
       </button>
     {/if}
   </div>
 
   <!-- Shortcut list -->
-  <div class="flex-1 overflow-y-auto px-4 py-3 space-y-2" style="scrollbar-width: thin; scrollbar-color: var(--md-primary) transparent;">
+  <div class="flex-1 overflow-y-auto px-4 py-3 space-y-2">
     {#each Object.keys(KEYBINDING_LABELS) as action}
       {@const info = KEYBINDING_LABELS[action as keyof Keybindings]}
       {@const binding = keybindings[action as keyof Keybindings]}
@@ -140,12 +159,12 @@ let hasCustomized = $derived(
       <div class="bg-md-primary-container rounded-xl px-4 py-3 flex items-center justify-between gap-3">
         <div class="min-w-0">
           <div class="text-sm font-medium text-md-on-surface flex items-center gap-2">
-            {info.label}
+            {$t(info.labelKey)}
             {#if !isDefault}
-              <span class="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-md-primary/20 text-md-primary">custom</span>
+              <span class="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-md-primary/20 text-md-primary">{$t('keyboardShortcuts.custom')}</span>
             {/if}
           </div>
-          <div class="text-xs text-md-on-surface/50">{info.description}</div>
+          <div class="text-xs text-md-on-surface/50">{$t(info.descriptionKey)}</div>
         </div>
         <div class="flex items-center gap-2 shrink-0">
           {#if editingKeybinding === action && recordingKeybinding}
@@ -154,16 +173,16 @@ let hasCustomized = $derived(
               onkeydown={handleRecordingKeydown}
               onblur={cancelRecording}
             >
-              {recordedKeys || 'Press keys...'}
+              {recordedKeys || $t('keyboardShortcuts.pressKeys')}
             </button>
-            <button class="text-xs text-md-on-surface/60 hover:text-md-on-surface" onclick={cancelRecording}>Cancel</button>
+            <button class="text-xs text-md-on-surface/60 hover:text-md-on-surface" onclick={cancelRecording}>{$t('keyboardShortcuts.cancel')}</button>
           {:else}
             <div class="bg-md-secondary-container text-sm text-md-on-surface px-3 py-1.5 rounded-lg font-mono font-medium">
               {formatKeybinding(binding)}
             </div>
-            <button class="text-xs text-md-primary hover:text-md-primary/80" onclick={() => startRecording(action)}>Edit</button>
+            <button class="text-xs text-md-primary hover:text-md-primary/80" onclick={() => startRecording(action)}>{$t('keyboardShortcuts.edit')}</button>
             {#if !isDefault}
-              <button class="text-xs text-md-on-surface/60 hover:text-md-on-surface" onclick={() => resetKeybinding(action)}>Reset</button>
+              <button class="text-xs text-md-on-surface/60 hover:text-md-on-surface" onclick={() => resetKeybinding(action)}>{$t('keyboardShortcuts.reset')}</button>
             {/if}
           {/if}
         </div>

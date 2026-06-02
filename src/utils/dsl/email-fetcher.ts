@@ -17,6 +17,7 @@ import { log } from '@/utils/logger.js';
 import { getInboxes, getStoredEmailsMap, setInboxes } from '@/utils/storage-keys.js';
 import type { Account, Email, EmailFilters } from '@/utils/types.js';
 import type { EmailServiceContext, OperationConfig, ProviderConfig } from '../email-service.js';
+import { randomToken } from '../secure-random.js';
 
 // ============================================================================
 // PATH EXTRACTOR UTILITIES
@@ -56,28 +57,6 @@ function extractPath(obj: unknown, path: string): unknown {
   return current;
 }
 
-/**
- * Check if a path exists and is truthy
- */
-function _pathExists(obj: unknown, path: string): boolean {
-  const value = extractPath(obj, path);
-  return value !== undefined && value !== null;
-}
-
-/**
- * Get multiple paths from an object
- */
-function _extractPaths(obj: unknown, paths: Record<string, string>): Record<string, unknown> {
-  const result: Record<string, unknown> = {};
-  for (const [targetKey, sourcePath] of Object.entries(paths)) {
-    const value = extractPath(obj, sourcePath);
-    if (value !== undefined) {
-      result[targetKey] = value;
-    }
-  }
-  return result;
-}
-
 // ============================================================================
 // TEMPLATE RESOLVER UTILITIES
 // ============================================================================
@@ -103,7 +82,7 @@ function resolveTemplateValue(value: string, context: EmailServiceContext): unkn
 
   // Replace {random}
   if (value === '{random}') {
-    return Math.random().toString(36).substring(7);
+    return randomToken(8);
   }
 
   // Replace {instanceUrl}
@@ -171,7 +150,7 @@ function buildRequest(
     }
     url.pathname = url.pathname.replace(/\/$/, '') + functionPath;
   } else {
-    // For query parameter based APIs (like Guerrilla Mail)
+    // For query parameter based APIs (function appended to URL)
     url.searchParams.append('f', operation.function);
   }
 
@@ -289,7 +268,17 @@ function parseResponse(
 // EXPORTED UTILITIES (used by email-service.ts)
 // ============================================================================
 
-export { buildRequest, checkForErrors, parseResponse };
+export {
+  buildRequest,
+  checkForErrors,
+  extractPath,
+  parseDateString,
+  parseResponse,
+  parseTimestamp,
+  parseTimestampValue,
+  resolveTemplateParams,
+  resolveTemplateValue,
+};
 
 /**
  * Fetch emails using the provider's email fetching configuration
@@ -342,7 +331,7 @@ export async function fetchEmails(
 }
 
 /**
- * Single-step email fetching (e.g., Burner.kiwi)
+ * Single-step email fetching (one API call returns all emails)
  * One API call returns all emails
  */
 async function fetchEmailsSingleStep(

@@ -80,7 +80,7 @@ export async function unarchiveSelected(
     const result = (await ext.storage.local.get(['inboxes'])) as { inboxes?: Account[] };
     const inboxes = result.inboxes || [];
 
-    // Filter out expired burner emails that cannot be unarchived
+    // Filter out expired emails that cannot be unarchived
     const canUnarchiveIds = new Set<string>();
     for (const id of state.selectedAddresses) {
       const inbox = inboxes.find((i) => i.id === id);

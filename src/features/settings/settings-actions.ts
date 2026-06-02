@@ -25,7 +25,7 @@ export interface SettingsState {
   keybindings: Keybindings;
   autoRefreshInterval: number;
   emailPreviewEnabled: boolean;
-  guerrillaDefaultDomain: string;
+  defaultDomain: string;
 }
 
 export interface SettingsSetters {
@@ -47,7 +47,7 @@ export interface SettingsSetters {
   setKeybindings: (value: Keybindings) => void;
   setAutoRefreshInterval: (value: number) => void;
   setEmailPreviewEnabled: (value: boolean) => void;
-  setGuerrillaDefaultDomain: (value: string) => void;
+  setDefaultDomain: (value: string) => void;
   setShowToast: (message: string, type: 'success' | 'error' | 'warning') => void;
   loadInboxes: () => Promise<void>;
 }
@@ -77,7 +77,6 @@ export async function loadSettings(
       'keybindings',
       'autoRefreshInterval',
       'emailPreviewEnabled',
-      'guerrillaDefaultDomain',
     ])) as {
       autoCopy?: boolean;
       autoRenew?: boolean;
@@ -94,7 +93,6 @@ export async function loadSettings(
       keybindings?: Keybindings;
       autoRefreshInterval?: number;
       emailPreviewEnabled?: boolean;
-      guerrillaDefaultDomain?: string;
     };
     if (result.autoCopy !== undefined) setters.setAutoCopy(result.autoCopy);
     if (result.autoRenew !== undefined) setters.setAutoRenew(result.autoRenew);
@@ -140,11 +138,11 @@ export async function loadSettings(
     } else {
       setters.setEmailPreviewEnabled(true);
     }
-    if (result.guerrillaDefaultDomain !== undefined) {
-      setters.setGuerrillaDefaultDomain(result.guerrillaDefaultDomain);
-    } else {
-      setters.setGuerrillaDefaultDomain('');
-    }
+    // Load default domain from per-provider scoped key
+    const provider = result.selectedProvider || DEFAULT_PROVIDER;
+    const defaultDomainKey = `defaultDomain_${provider}`;
+    const domainResult = await ext.storage.local.get([defaultDomainKey]);
+    setters.setDefaultDomain(String(domainResult[defaultDomainKey] ?? ''));
   } catch (e: unknown) {
     logError('loadSettings error:', undefined, e instanceof Error ? e : new Error(String(e)));
   } finally {
@@ -184,8 +182,13 @@ export async function saveSettings(
       keybindings: state.keybindings,
       autoRefreshInterval: state.autoRefreshInterval,
       emailPreviewEnabled: state.emailPreviewEnabled,
-      guerrillaDefaultDomain: state.guerrillaDefaultDomain,
     });
+    // Save default domain to per-provider scoped key
+    if (state.defaultDomain) {
+      await ext.storage.local.set({
+        [`defaultDomain_${state.selectedProvider}`]: state.defaultDomain,
+      });
+    }
     setters.setShowToast('Settings saved', 'success');
   } catch (e: unknown) {
     logError('saveSettings error:', undefined, e instanceof Error ? e : new Error(String(e)));
@@ -410,20 +413,13 @@ export async function addCustomInstance(
   ];
   const isBlacklisted = blacklistedPatterns.some((pattern) => domain.includes(pattern));
 
-  const whitelistedDomains = ['temp-mail.org', 'sharklasers.com', 'airmail.cc'];
-  const isWhitelisted = whitelistedDomains.some(
-    (allowed) => domain === allowed || domain.endsWith(`.${allowed}`)
-  );
-
   if (isBlacklisted) {
     setters.setShowToast('Domain not allowed', 'error');
     return;
   }
 
-  if (!isWhitelisted) {
-    const confirmed = confirm(`Warning: ${domain} is not in the trusted domains list. Add anyway?`);
-    if (!confirmed) return;
-  }
+  // Note: We removed the synchronous confirm() here because it is disallowed in background scripts/MV3.
+  // The user explicitly adds this domain through the UI, so we proceed directly.
 
   const response = await ext.runtime.sendMessage({
     action: 'addCustomProviderInstance',
@@ -436,18 +432,16 @@ export async function addCustomInstance(
 }
 
 export async function hardReset(ext: typeof browser, setters: SettingsSetters) {
-  if (
-    !confirm(
-      '⚠ HARD RESET WARNING\n\nThis will permanently delete ALL extension data. This cannot be undone. Are you sure?'
-    )
-  )
-    return;
   try {
+    // Send message to background script FIRST so it can reset alarms and caches before storage is cleared
+    const response = await ext.runtime.sendMessage({ action: 'hardReset' });
+
+    // Now clear UI storage
     await ext.storage.local.clear();
     if ('sync' in ext.storage && ext.storage.sync) {
       await ext.storage.sync.clear();
     }
-    const response = await ext.runtime.sendMessage({ action: 'hardReset' });
+
     if (response?.success) {
       setters.setShowToast('Hard reset completed', 'success');
       setTimeout(() => window.location.reload(), 1000);
@@ -482,6 +476,9 @@ export async function exportData(ext: typeof browser) {
       'faviconCaching',
       'providerInstances',
     ]);
+    if (result.passwordSettings && typeof result.passwordSettings === 'object') {
+      delete (result.passwordSettings as Record<string, unknown>).customPassword;
+    }
     const data = { version: '3.0', exportDate: new Date().toISOString(), data: { ...result } };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -499,13 +496,23 @@ export function importData(ext: typeof browser, loadInboxes: () => Promise<void>
   const input = document.createElement('input');
   input.type = 'file';
   input.accept = '.json';
+  input.style.display = 'none';
+  document.body.appendChild(input);
+
   input.onchange = async (e) => {
+    document.body.removeChild(input);
     const file = (e.target as HTMLInputElement).files?.[0];
     if (!file) return;
     try {
       const text = await file.text();
-      const parsed = JSON.parse(text);
-      if (!parsed.version || !parsed.data) throw new Error('Invalid format');
+      let parsed: { version?: string; data?: unknown };
+      try {
+        parsed = JSON.parse(text);
+      } catch (_parseError) {
+        throw new Error('Invalid JSON format');
+      }
+      if (!parsed.version || !parsed.data)
+        throw new Error('Missing required format fields (version/data)');
       const importedData = parsed.data;
 
       // Merge arrays (inboxes, emailHistory, loginInfo, identities, storedEmails, archivedEmails) to avoid overwriting
@@ -546,51 +553,70 @@ export function importData(ext: typeof browser, loadInboxes: () => Promise<void>
         return merged;
       };
 
-      const toSet: Record<string, unknown> = { ...importedData };
-
-      if (Array.isArray(importedData.inboxes)) {
-        toSet.inboxes = mergeById(existing.inboxes || [], importedData.inboxes);
+      const allowedKeys = [
+        'themeMode',
+        'contrastLevel',
+        'customColor',
+        'autoCopy',
+        'autoRenew',
+        'selectedProvider',
+        'nameSettings',
+        'developerSettings',
+        'emailRetentionDays',
+        'faviconCaching',
+        'providerInstances',
+      ];
+      const toSet: Record<string, unknown> = {};
+      const importedDict = importedData as Record<string, unknown>;
+      for (const key of allowedKeys) {
+        if (key in importedDict) {
+          toSet[key] = importedDict[key];
+        }
       }
-      if (Array.isArray(importedData.emailHistory)) {
+
+      if (Array.isArray(importedDict.inboxes)) {
+        toSet.inboxes = mergeById(existing.inboxes || [], importedDict.inboxes as never[]);
+      }
+      if (Array.isArray(importedDict.emailHistory)) {
         toSet.emailHistory = mergeByKey(
           existing.emailHistory || [],
-          importedData.emailHistory,
+          importedDict.emailHistory as never[],
           'email' as keyof unknown
         );
       }
-      if (Array.isArray(importedData.loginInfo)) {
+      if (Array.isArray(importedDict.loginInfo)) {
         toSet.loginInfo = mergeByKey(
           existing.loginInfo || [],
-          importedData.loginInfo,
+          importedDict.loginInfo as never[],
           'domain' as keyof unknown
         );
       }
-      if (Array.isArray(importedData.identities)) {
-        toSet.identities = mergeById(existing.identities || [], importedData.identities);
+      if (Array.isArray(importedDict.identities)) {
+        toSet.identities = mergeById(existing.identities || [], importedDict.identities as never[]);
       }
-      if (Array.isArray(importedData.savedSearchFilters)) {
+      if (Array.isArray(importedDict.savedSearchFilters)) {
         toSet.savedSearchFilters = mergeById(
           existing.savedSearchFilters || [],
-          importedData.savedSearchFilters
+          importedDict.savedSearchFilters as never[]
         );
       }
-      if (typeof importedData.storedEmails === 'object' && importedData.storedEmails !== null) {
+      if (typeof importedDict.storedEmails === 'object' && importedDict.storedEmails !== null) {
         toSet.storedEmails = mergeRecord(
           existing.storedEmails || {},
-          importedData.storedEmails as Record<string, unknown>
+          importedDict.storedEmails as Record<string, unknown>
         );
       }
-      if (typeof importedData.archivedEmails === 'object' && importedData.archivedEmails !== null) {
+      if (typeof importedDict.archivedEmails === 'object' && importedDict.archivedEmails !== null) {
         toSet.archivedEmails = mergeRecord(
           existing.archivedEmails || {},
-          importedData.archivedEmails as Record<string, unknown>
+          importedDict.archivedEmails as Record<string, unknown>
         );
       }
 
       await ext.storage.local.set(toSet);
       await loadInboxes();
-    } catch (_err) {
-      throw new Error('Import failed');
+    } catch (err: unknown) {
+      throw new Error(`Import failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   };
   input.click();

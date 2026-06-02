@@ -6,6 +6,7 @@ import { browser } from 'wxt/browser';
 
 import { NoActiveInboxError } from '@/utils/errors.js';
 import { logError } from '@/utils/logger.js';
+import { randomItem } from '@/utils/secure-random.js';
 import type { CredentialsHistoryItem } from '@/utils/types.js';
 import {
   generatePassword,
@@ -58,7 +59,8 @@ export function fillSelectElement(selectElement: HTMLSelectElement): void {
   );
 
   if (validOptions.length > 0) {
-    const randomOption = validOptions[Math.floor(Math.random() * validOptions.length)];
+    const randomOption = randomItem(validOptions);
+    if (!randomOption) return;
     selectElement.value = randomOption.value;
   }
 }
@@ -95,8 +97,8 @@ export async function fillSignupForm(
         .map((n) => n.trim())
         .filter((n) => n);
 
-      const firstName = firstNameList[Math.floor(Math.random() * firstNameList.length)];
-      const lastName = lastNameList[Math.floor(Math.random() * lastNameList.length)];
+      const firstName = randomItem(firstNameList) ?? '';
+      const lastName = randomItem(lastNameList) ?? '';
 
       names = {
         firstName,
@@ -134,7 +136,7 @@ export async function fillSignupForm(
 
     const emailAddress = inbox.address;
     let password: string;
-    if (identity?.useRandomPassword === false && identity?.customPassword) {
+    if (!identity?.useRandomPassword && identity?.customPassword) {
       password = identity.customPassword;
     } else {
       password = await getPasswordToFill();
@@ -225,6 +227,7 @@ export async function fillSignupForm(
       identityId: selectedIdentityId,
     };
     loginInfo.unshift(newCredential);
+    if (loginInfo.length > 50) loginInfo.length = 50;
     await browser.storage.local.set({ loginInfo });
 
     return true;

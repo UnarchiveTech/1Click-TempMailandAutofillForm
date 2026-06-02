@@ -37,7 +37,7 @@ interface CommonSettersConfig {
   setKeybindings: (value: Keybindings) => void;
   setAutoRefreshInterval: (value: number) => void;
   setEmailPreviewEnabled: (value: boolean) => void;
-  setGuerrillaDefaultDomain: (value: string) => void;
+  setDefaultDomain: (value: string) => void;
 
   // Settings state setters
   setAutoCopy: (value: boolean) => void;
@@ -64,7 +64,9 @@ interface CommonSettersConfig {
   setPreviousFocusElement: (value: HTMLElement | null) => void;
 
   // Login state setters
-  setSavedLogins: (value: CredentialsHistoryItem[]) => void;
+  setSavedLogins: (
+    value: CredentialsHistoryItem[] | ((prev: CredentialsHistoryItem[]) => CredentialsHistoryItem[])
+  ) => void;
 
   // Common toast setter
   setShowToast: (
@@ -107,7 +109,7 @@ export function useCommonSetters(config: CommonSettersConfig) {
     setKeybindings,
     setAutoRefreshInterval,
     setEmailPreviewEnabled,
-    setGuerrillaDefaultDomain,
+    setDefaultDomain,
     // Settings
     setAutoCopy,
     setAutoRenew,
@@ -176,7 +178,7 @@ export function useCommonSetters(config: CommonSettersConfig) {
     setKeybindings,
     setAutoRefreshInterval,
     setEmailPreviewEnabled,
-    setGuerrillaDefaultDomain,
+    setDefaultDomain,
     setShowToast,
     loadInboxes,
   };

@@ -176,6 +176,11 @@ export interface Email {
   stored_at?: number; // ms timestamp (when we stored it)
   original_inbox?: string;
   local_only?: boolean; // Email only exists locally, not in API
+  // Local-only soft archive/delete (separate from `archived` which is server-side)
+  local_archived?: boolean;
+  local_archived_at?: number;
+  local_deleted?: boolean;
+  local_deleted_at?: number;
   // UI-specific properties
   time?: string; // Formatted time string
   isOtp?: boolean;
@@ -201,6 +206,7 @@ export interface Identity {
   customPassword?: string;
   phone?: string;
   pin?: string;
+  domainHints?: string[];
   isDefault: boolean;
   createdAt: number;
 }
@@ -433,7 +439,6 @@ export type BackgroundMessage =
   | { action: 'getSelectedInstance' }
   | { action: 'setSelectedInstance'; instanceId: string }
   | { action: 'setInstance'; instanceId: string }
-  | { action: 'addCustomBurnerInstance'; instance: Omit<ProviderInstance, 'id' | 'isCustom'> }
   | { action: 'removeCustomProviderInstance'; instanceId: string }
   | { action: 'getSelectedProviderInstance' }
   | { action: 'setSelectedProviderInstance'; instanceId: string }

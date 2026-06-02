@@ -1,6 +1,5 @@
 <script lang="ts">
-import IconWifiOff from '@/components/icons/IconWifiOff.svelte';
-import IconX from '@/components/icons/IconX.svelte';
+import Icon from '@/components/icons/Icon.svelte';
 
 let { onDismiss = () => {} }: { onDismiss?: () => void } = $props();
 </script>
@@ -11,7 +10,7 @@ let { onDismiss = () => {} }: { onDismiss?: () => void } = $props();
   aria-live="assertive"
 >
   <div class="flex items-center gap-2">
-    <IconWifiOff class="w-4 h-4 flex-shrink-0" />
+    <Icon name="wifiOff" class="w-4 h-4 flex-shrink-0" />
     <span>No internet connection. Some features may not work.</span>
   </div>
   <button
@@ -19,6 +18,6 @@ let { onDismiss = () => {} }: { onDismiss?: () => void } = $props();
     aria-label="Dismiss offline notice"
     onclick={onDismiss}
   >
-    <IconX class="w-3.5 h-3.5" />
+    <Icon name="x" class="w-3.5 h-3.5" />
   </button>
 </div>

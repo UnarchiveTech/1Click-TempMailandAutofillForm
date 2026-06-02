@@ -21,7 +21,7 @@ export interface ThemeSetters {
  * @param setters - Theme setter functions
  * @param ext - Browser extension API
  */
-export function toggleTheme(state: ThemeState, setters: ThemeSetters, ext: typeof browser) {
+export async function toggleTheme(state: ThemeState, setters: ThemeSetters, ext: typeof browser) {
   let newMode: ThemeMode;
   if (state.themeMode === 'light') {
     newMode = 'system';
@@ -32,10 +32,7 @@ export function toggleTheme(state: ThemeState, setters: ThemeSetters, ext: typeo
   }
   setters.setThemeMode(newMode);
   applyTheme(newMode, state.contrastLevel);
-  // Reapply custom color if set to ensure it matches the new theme mode
-  if (state.customColor) {
-    applyCustomColor(state.customColor);
-  }
+  await reapplyCustomColor(state.customColor);
   ext.storage.local.set({ themeMode: newMode });
 }
 
@@ -47,7 +44,7 @@ export function toggleTheme(state: ThemeState, setters: ThemeSetters, ext: typeo
  * @param setters - Theme setter functions
  * @param ext - Browser extension API
  */
-export function setThemeMode(
+export async function setThemeMode(
   mode: ThemeMode,
   customColor: string,
   contrastLevel: ContrastLevel,
@@ -56,10 +53,7 @@ export function setThemeMode(
 ) {
   setters.setThemeMode(mode);
   applyTheme(mode, contrastLevel);
-  // Reapply custom color if set to ensure it matches the new theme mode
-  if (customColor) {
-    applyCustomColor(customColor);
-  }
+  await reapplyCustomColor(customColor);
   ext.storage.local.set({ themeMode: mode });
 }
 
@@ -108,7 +102,7 @@ export function listenForSystemThemeChanges(
  * @param setters - Theme setter functions
  * @param ext - Browser extension API
  */
-export function setContrastLevel(
+export async function setContrastLevel(
   level: ContrastLevel,
   themeMode: ThemeMode,
   customColor: string,
@@ -117,18 +111,16 @@ export function setContrastLevel(
 ) {
   setters.setContrastLevel(level);
   applyTheme(themeMode, level);
-  // Reapply custom color if set to ensure it matches the new contrast level
-  if (customColor) {
-    applyCustomColor(customColor);
-  }
+  await reapplyCustomColor(customColor);
   ext.storage.local.set({ contrastLevel: level });
 }
 
-/**
- * Apply custom color theme from a seed color
- * @param customColor - Hex color code to use as seed for theme generation
- */
-export function applyCustomColor(customColor: string) {
+export async function reapplyCustomColor(customColor: string) {
+  if (customColor) {
+    await applyCustomColor(customColor);
+  }
+}
+export async function applyCustomColor(customColor: string) {
   if (customColor) {
     // Get current theme mode and contrast level from data-theme attribute
     const currentTheme = document.documentElement.getAttribute('data-theme') || 'light-standard';

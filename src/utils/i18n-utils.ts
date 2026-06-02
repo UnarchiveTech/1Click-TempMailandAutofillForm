@@ -4,6 +4,7 @@
  */
 
 import { browser } from 'wxt/browser';
+import { logError } from './logger.js';
 
 // Cache for loaded translations
 const translationCache = new Map<string, Record<string, unknown>>();
@@ -35,7 +36,11 @@ async function loadTranslations(locale: string): Promise<Record<string, unknown>
     translationCache.set(locale, translations.default);
     return translations.default;
   } catch (error) {
-    console.error(`Failed to load translations for locale ${locale}:`, error);
+    logError(
+      `Failed to load translations for locale ${locale}:`,
+      undefined,
+      error instanceof Error ? error : new Error(String(error))
+    );
     // Fallback to English
     if (locale !== 'en') {
       return loadTranslations('en');
@@ -45,10 +50,24 @@ async function loadTranslations(locale: string): Promise<Record<string, unknown>
 }
 
 /**
- * Get a translated string by key path (e.g., "errors.apiCallFailed")
- * Supports nested keys with dot notation
+ * Substitute {var} placeholders in a string with values from a record.
  */
-export async function t(key: string, locale?: string): Promise<string> {
+function interpolate(template: string, vars?: Record<string, string | number>): string {
+  if (!vars) return template;
+  return template.replace(/\{(\w+)\}/g, (match, name: string) =>
+    name in vars ? String(vars[name]) : match
+  );
+}
+
+/**
+ * Get a translated string by key path (e.g., "errors.apiCallFailed")
+ * Supports nested keys with dot notation and {var} interpolation.
+ */
+export async function t(
+  key: string,
+  vars?: Record<string, string | number>,
+  locale?: string
+): Promise<string> {
   const targetLocale = locale || (await getCurrentLocale());
   const translations = await loadTranslations(targetLocale);
 
@@ -64,14 +83,19 @@ export async function t(key: string, locale?: string): Promise<string> {
     }
   }
 
-  return typeof value === 'string' ? value : key;
+  return typeof value === 'string' ? interpolate(value, vars) : key;
 }
 
 /**
  * Get a translated string synchronously (uses cached translations)
- * Returns the key if translation is not yet loaded
+ * Returns the key if translation is not yet loaded.
+ * Supports {var} interpolation.
  */
-export function tSync(key: string, locale?: string): string {
+export function tSync(
+  key: string,
+  vars?: Record<string, string | number>,
+  locale?: string
+): string {
   const targetLocale = locale || 'en';
   const translations = translationCache.get(targetLocale);
 
@@ -90,7 +114,7 @@ export function tSync(key: string, locale?: string): string {
     }
   }
 
-  return typeof value === 'string' ? value : key;
+  return typeof value === 'string' ? interpolate(value, vars) : key;
 }
 
 /**

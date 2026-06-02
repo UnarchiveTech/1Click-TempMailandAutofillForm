@@ -192,6 +192,35 @@ export async function selectIdentity(
   }
 }
 
+export async function reorderIdentities(
+  ext: Browser,
+  setters: IdentitySetters,
+  fromIndex: number,
+  toIndex: number
+): Promise<void> {
+  if (fromIndex === toIndex) return;
+  try {
+    const { identities = [] } = (await ext.storage.local.get(['identities'])) as {
+      identities?: Identity[];
+    };
+    if (fromIndex < 0 || fromIndex >= identities.length) return;
+    if (toIndex < 0 || toIndex >= identities.length) return;
+
+    const next = [...identities];
+    const [moved] = next.splice(fromIndex, 1);
+    next.splice(toIndex, 0, moved);
+
+    await ext.storage.local.set({ identities: next });
+    setters.setIdentities(next);
+  } catch (error: unknown) {
+    logError(
+      'Failed to reorder identities:',
+      undefined,
+      error instanceof Error ? error : new Error(String(error))
+    );
+  }
+}
+
 export async function getSelectedIdentity(ext: Browser): Promise<Identity | null> {
   try {
     const { identities = [], selectedIdentityId } = (await ext.storage.local.get([

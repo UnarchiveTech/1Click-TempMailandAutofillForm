@@ -1,5 +1,5 @@
 <script lang="ts">
-import IconAutoRenew from '@/components/icons/IconAutoRenew.svelte';
+import Icon from '@/components/icons/Icon.svelte';
 
 interface Props {
   expiryTime: number; // Time remaining in minutes
@@ -128,11 +128,11 @@ const borderGradient = $derived(
         aria-label={autoRenew ? 'Disable auto-renew' : 'Enable auto-renew'}
         title={autoRenew ? 'Disable auto-renew' : 'Enable auto-renew'}
       >
-        <IconAutoRenew />
+        <Icon name="autoRenew" />
       </button>
     {:else}
       <div class="icon-display {iconColorClass}">
-        <IconAutoRenew />
+        <Icon name="autoRenew" />
       </div>
     {/if}
     <span class="status-text">{statusText}</span>

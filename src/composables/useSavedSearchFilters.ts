@@ -6,6 +6,7 @@ import {
   renameFilterInStorage,
   saveFilterToStorage,
 } from '@/composables/useEmailFilters.js';
+import { t } from '@/utils/i18n-utils.js';
 import { logError } from '@/utils/logger.js';
 import type { SavedSearchFilter } from '@/utils/types.js';
 import { validateTextInput } from '@/utils/validation.js';
@@ -67,10 +68,10 @@ export function useSavedSearchFilters(
         newFilter
       );
       setters.setSavedSearchFilters(filters);
-      setters.showToast('Filter saved');
+      setters.showToast(await t('toasts.filterSaved'));
     } catch (error) {
       logError('Error saving filter', error);
-      setters.showToast('Failed to save filter', 'error');
+      setters.showToast(await t('toasts.filterSaveFailed'), 'error');
     }
   }
 
@@ -84,14 +85,14 @@ export function useSavedSearchFilters(
         filterName
       );
       setters.setSavedSearchFilters(filters);
-      setters.showToast('Filter renamed');
+      setters.showToast(await t('toasts.filterRenamed'));
     } catch (error) {
       logError('Error renaming filter', error);
-      setters.showToast('Failed to rename filter', 'error');
+      setters.showToast(await t('toasts.filterRenameFailed'), 'error');
     }
   }
 
-  function loadFilter(filter: SavedSearchFilter) {
+  async function loadFilter(filter: SavedSearchFilter) {
     setters.setSearchQuery(filter.searchQuery);
     setters.setOtpOnly(filter.hasOTP);
     setters.setSenderDomain(filter.senderDomain);
@@ -101,7 +102,7 @@ export function useSavedSearchFilters(
     setters.setDateFrom(filter.dateFrom);
     setters.setDateTo(filter.dateTo);
     setters.setSortBy(filter.sortBy || 'newest');
-    setters.showToast(`Loaded filter: ${filter.name}`);
+    setters.showToast(await t('toasts.filterLoaded', { name: filter.name }));
   }
 
   function clearFilters() {
@@ -124,10 +125,10 @@ export function useSavedSearchFilters(
         filterId
       );
       setters.setSavedSearchFilters(filters);
-      setters.showToast('Filter deleted');
+      setters.showToast(await t('toasts.filterDeleted'));
     } catch (error) {
       logError('Error deleting filter', error);
-      setters.showToast('Failed to delete filter', 'error');
+      setters.showToast(await t('toasts.filterDeleteFailed'), 'error');
     }
   }
 

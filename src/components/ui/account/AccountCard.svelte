@@ -1,6 +1,5 @@
 <script lang="ts">
-import IconArchive from '@/components/icons/IconArchive.svelte';
-import IconTrash from '@/components/icons/IconTrash.svelte';
+import Icon from '@/components/icons/Icon.svelte';
 import ExpiryPill from '@/components/ui/ExpiryPill.svelte';
 import TagPill from '@/components/ui/TagPill.svelte';
 import { loadProviderConfig } from '@/utils/email-service.js';
@@ -196,7 +195,7 @@ const supportsAutoRenew = $derived.by(() => {
           aria-label="Restore inbox {account.address}"
           onclick={(e) => { e.stopPropagation(); onRestoreAccount(account.address); }}
         >
-          <IconArchive class="w-3 h-3" />
+          <Icon name="archive" class="w-3 h-3" />
           <span>Restore</span>
         </button>
       {:else}
@@ -206,7 +205,7 @@ const supportsAutoRenew = $derived.by(() => {
           aria-label="Delete inbox {account.address}"
           onclick={(e) => { e.stopPropagation(); onRemoveAccount(account.address); }}
         >
-          <IconTrash class="w-3 h-3" />
+          <Icon name="trash" class="w-3 h-3" />
           <span>Delete</span>
         </button>
       {/if}
@@ -217,7 +216,7 @@ const supportsAutoRenew = $derived.by(() => {
           aria-label="Unarchive inbox {account.address}"
           onclick={(e) => { e.stopPropagation(); onUnarchiveAccount(account); }}
         >
-          <IconArchive class="w-3 h-3" />
+          <Icon name="archive" class="w-3 h-3" />
           <span>Unarchive</span>
         </button>
       {:else}
@@ -227,7 +226,7 @@ const supportsAutoRenew = $derived.by(() => {
           aria-label="Archive inbox {account.address}"
           onclick={(e) => { e.stopPropagation(); onArchiveAccount(account); }}
         >
-          <IconArchive class="w-3 h-3" />
+          <Icon name="archive" class="w-3 h-3" />
           <span>Archive</span>
         </button>
       {/if}

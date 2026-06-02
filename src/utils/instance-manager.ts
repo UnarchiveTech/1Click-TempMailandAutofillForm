@@ -7,6 +7,7 @@ import { browser } from 'wxt/browser';
 import { DEFAULT_PROVIDER, loadProviderConfig } from '@/utils/email-service.js';
 import { ProviderInstanceNotFoundError } from '@/utils/errors.js';
 import { logError, logWarn } from '@/utils/logger.js';
+import { randomItem } from '@/utils/secure-random.js';
 import { getStorage, type ProviderStorageKey, setStorage } from '@/utils/storage-keys.js';
 import type { ProviderInstance } from '@/utils/types.js';
 
@@ -53,12 +54,12 @@ export async function getSelectedProviderInstance(
 
   if (!selectedInstance || typeof selectedInstance !== 'string') {
     await setStorage(storageKey, 'random');
-    const randomInstance = instances[Math.floor(Math.random() * instances.length)];
+    const randomInstance = randomItem(instances);
     return randomInstance || null;
   }
 
   if (selectedInstance === 'random') {
-    const randomInstance = instances[Math.floor(Math.random() * instances.length)];
+    const randomInstance = randomItem(instances);
     return randomInstance || null;
   }
 
@@ -68,7 +69,7 @@ export async function getSelectedProviderInstance(
       `Selected instance ${selectedInstance} not found for provider ${providerId}, falling back to random`
     );
     await setStorage(storageKey, 'random');
-    const randomInstance = instances[Math.floor(Math.random() * instances.length)];
+    const randomInstance = randomItem(instances);
     return randomInstance || null;
   }
   return selected;

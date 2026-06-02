@@ -1,11 +1,10 @@
 <script lang="ts">
 import { onMount } from 'svelte';
+import { get } from 'svelte/store';
+import { t } from 'svelte-i18n';
 import { browser } from 'wxt/browser';
 import ToastContainer from '@/components/feedback/ToastContainer.svelte';
-import IconChevronDown from '@/components/icons/IconChevronDown.svelte';
-import IconChevronLeft from '@/components/icons/IconChevronLeft.svelte';
-import IconPlus from '@/components/icons/IconPlus.svelte';
-import IconRefresh from '@/components/icons/IconRefresh.svelte';
+import Icon from '@/components/icons/Icon.svelte';
 import {
   getAllProviderConfigs,
   loadProviderConfig,
@@ -26,7 +25,7 @@ let {
   emailPreviewEnabled = true,
   providerInstances = [] as ProviderInstance[],
   selectedProviderInstance = null as string | null,
-  guerrillaDefaultDomain = '',
+  defaultDomain = '',
   allInboxes = [] as Account[],
   onProviderChange = (_p: string) => {},
   onSetAutoRenew = undefined as ((v: boolean) => void) | undefined,
@@ -38,7 +37,7 @@ let {
   onSetProviderInstance = (_id: string) => {},
   onAddCustomInstance = (_name: string, _url: string) => {},
   onLoadProviderInstances = async () => {},
-  onSetGuerrillaDefaultDomain = undefined as ((v: string) => void) | undefined,
+  onSetDefaultDomain = undefined as ((v: string) => void) | undefined,
   onSaveSettings = () => {},
 } = $props<{
   onBack?: () => void;
@@ -51,7 +50,7 @@ let {
   emailPreviewEnabled?: boolean;
   providerInstances?: ProviderInstance[];
   selectedProviderInstance?: string | null;
-  guerrillaDefaultDomain?: string;
+  defaultDomain?: string;
   allInboxes?: Account[];
   onProviderChange?: (p: string) => void;
   onSetAutoRenew?: (v: boolean) => void;
@@ -63,7 +62,7 @@ let {
   onSetProviderInstance?: (id: string) => void;
   onAddCustomInstance?: (name: string, url: string) => void;
   onLoadProviderInstances?: () => Promise<void>;
-  onSetGuerrillaDefaultDomain?: (v: string) => void;
+  onSetDefaultDomain?: (v: string) => void;
   onSaveSettings?: () => void;
 }>();
 
@@ -130,36 +129,37 @@ function saveCustomInstance() {
 }
 
 // Domain override state — username -> effective domain string
-let guerrillaDomainOverrides = $state<Record<string, string>>({});
+let domainOverrides = $state<Record<string, string>>({});
 
-async function loadGuerrillaOverrides() {
-  const config = loadProviderConfig('guerrilla');
+async function loadDomainOverrides() {
+  const config = loadProviderConfig(selectedProvider);
   const domains = config.multiDomain?.domains || [];
   if (domains.length === 0) return;
-  const guerrillaAccounts = allInboxes.filter((a: Account) => a.provider === 'guerrilla');
-  if (guerrillaAccounts.length === 0) return;
-  const keys = guerrillaAccounts.map(
-    (a: Account) => `guerrillaDomainIndex_${a.address.split('@')[0]}`
+  const multiDomainAccounts = allInboxes.filter((a: Account) => a.provider === selectedProvider);
+  if (multiDomainAccounts.length === 0) return;
+  const keys = multiDomainAccounts.map(
+    (a: Account) => `domainIndex_${selectedProvider}_${a.address.split('@')[0]}`
   );
   const result = (await browser.storage.local.get(keys)) as Record<string, number>;
   const overrides: Record<string, string> = {};
-  for (const acc of guerrillaAccounts) {
+  for (const acc of multiDomainAccounts) {
     const username = acc.address.split('@')[0];
-    const key = `guerrillaDomainIndex_${username}`;
+    const key = `domainIndex_${selectedProvider}_${username}`;
     const idx = result[key];
     overrides[username] = idx !== undefined ? domains[idx] || domains[0] : domains[0];
   }
-  guerrillaDomainOverrides = overrides;
+  domainOverrides = overrides;
 }
 
 function getEffectiveDomain(account: Account): string {
-  if (account.provider !== 'guerrilla') return account.address.split('@')[1] || '';
+  if (!loadProviderConfig(account.provider).multiDomain?.enabled)
+    return account.address.split('@')[1] || '';
   const username = account.address.split('@')[0];
-  return guerrillaDomainOverrides[username] || account.address.split('@')[1] || '';
+  return domainOverrides[username] || account.address.split('@')[1] || '';
 }
 
 onMount(() => {
-  loadGuerrillaOverrides();
+  loadDomainOverrides();
 });
 
 $effect(() => {
@@ -169,11 +169,13 @@ $effect(() => {
 $effect(() => {
   const config = loadProviderConfig(selectedProvider);
   if (config.multiInstance?.enabled) onLoadProviderInstances();
+  if (config.multiDomain?.enabled) loadDomainOverrides();
 });
 
 // Reload overrides when inboxes change
 $effect(() => {
-  if (allInboxes.length >= 0) loadGuerrillaOverrides();
+  if (allInboxes.length >= 0 && loadProviderConfig(selectedProvider).multiDomain?.enabled)
+    loadDomainOverrides();
 });
 
 // Domain switch dialog state
@@ -187,14 +189,14 @@ let domainSwitchAll = $state(true);
 let domainSwitchFromDomain = $state<string>('');
 
 function openDomainSwitchDialog(newDomain: string) {
-  const config = loadProviderConfig('guerrilla');
+  const config = loadProviderConfig(selectedProvider);
   const domains = config.multiDomain?.domains || [];
-  const guerrillaAccounts = allInboxes.filter(
-    (a: Account) => a.provider === 'guerrilla' && a.status === 'active'
+  const multiDomainAccounts = allInboxes.filter(
+    (a: Account) => a.provider === selectedProvider && a.status === 'active'
   );
   const domainCounts: Record<string, number> = {};
   for (const d of domains) domainCounts[d] = 0;
-  for (const acc of guerrillaAccounts) {
+  for (const acc of multiDomainAccounts) {
     const d = getEffectiveDomain(acc);
     if (d && d in domainCounts) domainCounts[d]++;
   }
@@ -208,7 +210,7 @@ async function applyDomainSwitch() {
   if (!domainSwitchDialog) return;
   const { pendingDomain, domains } = domainSwitchDialog;
 
-  onSetGuerrillaDefaultDomain?.(pendingDomain);
+  onSetDefaultDomain?.(pendingDomain);
   onSaveSettings();
 
   if (domainSwitchScope === 'existing') {
@@ -216,18 +218,18 @@ async function applyDomainSwitch() {
       inboxes?: Account[];
     };
     const toUpdate = domainSwitchAll
-      ? inboxes.filter((a) => a.provider === 'guerrilla' && a.status === 'active')
+      ? inboxes.filter((a) => a.provider === selectedProvider && a.status === 'active')
       : inboxes.filter((a) => {
           const d = getEffectiveDomain(a);
           return (
-            a.provider === 'guerrilla' && a.status === 'active' && d === domainSwitchFromDomain
+            a.provider === selectedProvider && a.status === 'active' && d === domainSwitchFromDomain
           );
         });
 
     const pendingIndex = domains.indexOf(pendingDomain);
     const storageUpdates: Record<string, number> = {};
     for (const acc of toUpdate) {
-      const key = `guerrillaDomainIndex_${acc.address.split('@')[0]}`;
+      const key = `domainIndex_${selectedProvider}_${acc.address.split('@')[0]}`;
       storageUpdates[key] = pendingIndex >= 0 ? pendingIndex : 0;
     }
     if (Object.keys(storageUpdates).length > 0) {
@@ -235,9 +237,12 @@ async function applyDomainSwitch() {
     }
     if (toUpdate.length > 0) {
       toastStore.success(
-        `Updated ${toUpdate.length} address${toUpdate.length === 1 ? '' : 'es'} to @${pendingDomain}`
+        get(t)('mailProvider.updatedAddresses', {
+          default: 'mailProvider.updatedAddressesPlural',
+          values: { n: toUpdate.length, domain: pendingDomain },
+        })
       );
-      await loadGuerrillaOverrides();
+      await loadDomainOverrides();
     }
   }
 
@@ -251,35 +256,35 @@ async function applyDomainSwitch() {
     <button
       class="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-md-secondary-container transition-colors"
       onclick={onBack}
-      aria-label="Back"
+      aria-label={$t('common.back')}
     >
-      <IconChevronLeft class="w-5 h-5" />
+      <Icon name="chevronLeft" class="w-5 h-5" />
     </button>
     <div class="flex-1">
-      <h1 class="text-base font-bold text-md-on-surface">Mail Provider</h1>
-      <p class="text-xs text-md-on-surface/50">Provider, refresh and notification settings</p>
+      <h1 class="text-base font-bold text-md-on-surface">{$t('mailProvider.title')}</h1>
+      <p class="text-xs text-md-on-surface/50">{$t('mailProvider.subtitle')}</p>
     </div>
     <button
       class="w-8 h-8 flex items-center justify-center rounded-full hover:bg-md-secondary-container transition-colors"
       onclick={() => { providerPingResults = new Map(); pingAllProviders(); }}
-      aria-label="Re-ping providers"
+      aria-label={$t('mailProvider.rep')}
     >
-      <IconRefresh class="w-4 h-4" />
+      <Icon name="refresh" class="w-4 h-4" />
     </button>
   </div>
 
-  <div class="flex-1 overflow-y-auto px-4 py-4 space-y-4" style="scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--md-outline, #75777f) 0.2, transparent) transparent;">
+  <div class="flex-1 overflow-y-auto px-4 py-4 space-y-4">
 
     <!-- Provider Selection -->
     <section class="space-y-2">
-      <div class="text-xs font-semibold text-md-on-surface/50 uppercase tracking-wider px-1">Provider</div>
+      <div class="text-xs font-semibold text-md-on-surface/50 uppercase tracking-wider px-1">{$t('mailProvider.provider')}</div>
       <div class="bg-md-primary-container rounded-xl px-4 py-3">
-        <div class="text-xs font-semibold text-md-secondary uppercase tracking-wider mb-1.5">Mail Provider</div>
+        <div class="text-xs font-semibold text-md-secondary uppercase tracking-wider mb-1.5">{$t('mailProvider.mailProvider')}</div>
         <div class="relative">
           <button
             class="w-full bg-transparent text-sm outline-none text-md-on-surface appearance-none cursor-pointer font-medium flex items-center justify-between"
             onclick={() => providerDropdownOpen = !providerDropdownOpen}
-            aria-label="Select mail provider"
+            aria-label={$t('mailProvider.selectMailProvider')}
           >
             <span>
               {#each allProviders as provider}
@@ -295,7 +300,7 @@ async function applyDomainSwitch() {
                 {/if}
               {/each}
             </span>
-            <IconChevronDown class="w-4 h-4 ml-2" />
+            <Icon name="chevronDown" class="w-4 h-4 ml-2" />
           </button>
           {#if providerDropdownOpen}
             <div class="absolute top-full left-0 right-0 mt-1 bg-md-primary-container rounded-xl shadow-lg border border-md-secondary-container z-50 max-h-60 overflow-y-auto">
@@ -326,22 +331,22 @@ async function applyDomainSwitch() {
       <!-- Instance Selection -->
       {#if loadProviderConfig(selectedProvider).multiInstance?.enabled}
         <div class="bg-md-primary-container rounded-xl px-4 py-3">
-          <div class="text-[10px] font-semibold text-md-on-surface/40 uppercase tracking-wider mb-1.5">Instance</div>
+          <div class="text-[10px] font-semibold text-md-on-surface/40 uppercase tracking-wider mb-1.5">{$t('mailProvider.instance')}</div>
           <div class="relative">
             <button
               class="w-full bg-transparent text-sm outline-none text-md-on-surface appearance-none cursor-pointer font-medium flex items-center justify-between"
               onclick={() => instanceDropdownOpen = !instanceDropdownOpen}
-              aria-label="Select provider instance"
+              aria-label={$t('mailProvider.selectProviderInstance')}
             >
               <span>
                 {#if selectedProviderInstance === 'random' || !selectedProviderInstance}
-                  Random Instance (Default)
+                  {$t('mailProvider.randomInstance')}
                 {:else}
                   {#each providerInstances as instance}
                     {#if instance.id === selectedProviderInstance}
                       {@const pingResults = providerPingResults.get(selectedProvider)}
                       {@const instancePing = pingResults?.get(instance.id)}
-                      {instance.displayName}{instance.isCustom ? ' (Custom)' : ''}
+                      {instance.displayName}{instance.isCustom ? $t('mailProvider.instanceCustom') : ''}
                       {#if instancePing !== undefined && instancePing !== null}
                         <span class="text-xs text-md-on-surface/50 ml-2">{getPingDot(instancePing)} {PingService.formatPing(instancePing)}</span>
                       {:else}
@@ -351,14 +356,14 @@ async function applyDomainSwitch() {
                   {/each}
                 {/if}
               </span>
-              <IconChevronDown class="w-4 h-4 ml-2" />
+              <Icon name="chevronDown" class="w-4 h-4 ml-2" />
             </button>
             {#if instanceDropdownOpen}
               <div class="absolute top-full left-0 right-0 mt-1 bg-md-primary-container rounded-xl shadow-lg border border-md-secondary-container z-50 max-h-60 overflow-y-auto">
                 <button
                   class="w-full px-4 py-2 text-sm text-left hover:bg-md-secondary-container"
                   onclick={() => { onSetProviderInstance('random'); instanceDropdownOpen = false; }}
-                >Random Instance (Default)</button>
+                >{$t('mailProvider.randomInstance')}</button>
                 {#each providerInstances as instance}
                   {@const pingResults = providerPingResults.get(selectedProvider)}
                   {@const instancePing = pingResults?.get(instance.id)}
@@ -366,7 +371,7 @@ async function applyDomainSwitch() {
                     class="w-full px-4 py-2 text-sm text-left hover:bg-md-secondary-container flex items-center justify-between"
                     onclick={() => { onSetProviderInstance(instance.id); instanceDropdownOpen = false; }}
                   >
-                    <span>{instance.displayName}{instance.isCustom ? ' (Custom)' : ''}</span>
+                    <span>{instance.displayName}{instance.isCustom ? $t('mailProvider.instanceCustom') : ''}</span>
                     {#if instancePing !== undefined && instancePing !== null}
                       <span class="text-xs text-md-on-surface/50">{getPingDot(instancePing)} {PingService.formatPing(instancePing)}</span>
                     {:else}
@@ -381,40 +386,40 @@ async function applyDomainSwitch() {
 
         {#if !showCustomInstanceForm}
           <button class="btn-primary w-full rounded-xl py-2.5 flex items-center justify-center gap-2 text-sm" onclick={showAddCustomInstance}>
-            <IconPlus class="w-4 h-4" />Add instance
+            <Icon name="plus" class="w-4 h-4" />{$t('mailProvider.addInstance')}
           </button>
         {:else}
           <div class="bg-md-primary-container rounded-xl px-4 py-3 space-y-3">
             <div>
-              <div class="text-xs font-semibold text-md-tertiary uppercase tracking-wider mb-1.5">Instance Name</div>
-              <input type="text" class="w-full bg-transparent text-sm outline-none text-md-on-surface placeholder:text-md-on-surface/30" placeholder="My Instance" bind:value={customInstanceName} />
+              <div class="text-xs font-semibold text-md-tertiary uppercase tracking-wider mb-1.5">{$t('mailProvider.instanceName')}</div>
+              <input type="text" class="w-full bg-transparent text-sm outline-none text-md-on-surface placeholder:text-md-on-surface/30" placeholder={$t('mailProvider.instanceNamePlaceholder')} bind:value={customInstanceName} />
             </div>
             <div class="border-t border-md-secondary-container"></div>
             <div>
-              <div class="text-[10px] font-semibold text-md-on-surface/40 uppercase tracking-wider mb-1.5">API URL</div>
-              <input type="url" class="w-full bg-transparent text-sm outline-none text-md-on-surface placeholder:text-md-on-surface/30" placeholder="https://example.com/api" bind:value={customInstanceUrl} />
+              <div class="text-[10px] font-semibold text-md-on-surface/40 uppercase tracking-wider mb-1.5">{$t('mailProvider.apiUrl')}</div>
+              <input type="url" class="w-full bg-transparent text-sm outline-none text-md-on-surface placeholder:text-md-on-surface/30" placeholder={$t('mailProvider.apiUrlPlaceholder')} bind:value={customInstanceUrl} />
             </div>
             <div class="flex gap-2">
-              <button class="flex-1 px-3 py-1.5 text-sm rounded-xl bg-md-primary text-md-on-primary hover:bg-md-primary/90 transition-colors" onclick={saveCustomInstance}>Save</button>
-              <button class="flex-1 px-3 py-1.5 text-sm rounded-xl bg-md-secondary text-md-on-secondary hover:bg-md-secondary/90 transition-colors" onclick={hideCustomInstanceForm}>Cancel</button>
+              <button class="flex-1 px-3 py-1.5 text-sm rounded-xl bg-md-primary text-md-on-primary hover:bg-md-primary/90 transition-colors" onclick={saveCustomInstance}>{$t('mailProvider.save')}</button>
+              <button class="flex-1 px-3 py-1.5 text-sm rounded-xl bg-md-secondary text-md-on-secondary hover:bg-md-secondary/90 transition-colors" onclick={hideCustomInstanceForm}>{$t('mailProvider.cancel')}</button>
             </div>
           </div>
         {/if}
       {/if}
 
-      <!-- Default Domain (Guerrilla) -->
+      <!-- Default Domain -->
       {#if loadProviderConfig(selectedProvider).multiDomain?.enabled}
         {@const md = loadProviderConfig(selectedProvider).multiDomain}
-        {@const guerrillaActive = allInboxes.filter((a: Account) => a.provider === 'guerrilla' && a.status === 'active')}
-        {@const _overrides = guerrillaDomainOverrides}
+        {@const multiDomainActive = allInboxes.filter((a: Account) => a.provider === selectedProvider && a.status === 'active')}
+        {@const _overrides = domainOverrides}
         <div class="bg-md-tertiary-container rounded-xl px-4 py-3">
-          <div class="text-[10px] font-semibold text-md-on-surface/40 uppercase tracking-wider mb-1.5">Default Domain</div>
+          <div class="text-[10px] font-semibold text-md-on-surface/40 uppercase tracking-wider mb-1.5">{$t('mailProvider.defaultDomain')}</div>
 
           <!-- Domain address count stats -->
-          {#if guerrillaActive.length > 0}
+          {#if multiDomainActive.length > 0}
             <div class="flex flex-wrap gap-x-3 gap-y-1 mb-2.5">
               {#each md?.domains || [] as d}
-                {@const count = guerrillaActive.filter((a: Account) => getEffectiveDomain(a) === d).length}
+                {@const count = multiDomainActive.filter((a: Account) => getEffectiveDomain(a) === d).length}
                 <div class="flex items-center gap-1.5">
                   <span class="text-[11px] font-medium text-md-on-surface">@{d}</span>
                   <span class="text-[10px] px-1.5 py-0.5 rounded-full font-semibold {count > 0 ? 'bg-md-primary/15 text-md-primary' : 'bg-md-secondary-container text-md-on-surface/40'}">{count}</span>
@@ -426,56 +431,56 @@ async function applyDomainSwitch() {
           <div class="relative">
             <select
               class="w-full bg-transparent text-sm outline-none text-md-on-surface appearance-none cursor-pointer font-medium"
-              value={guerrillaDefaultDomain || ''}
+              value={defaultDomain || ''}
               onchange={(e) => openDomainSwitchDialog(e.currentTarget.value)}
             >
-              <option value="">Cycle (no default)</option>
+              <option value="">{$t('mailProvider.cycleNoDefault')}</option>
               {#each md?.domains || [] as domain}
                 <option value={domain}>@{domain}</option>
               {/each}
             </select>
           </div>
-          <div class="text-[10px] text-md-on-surface/50 mt-1">Set a default domain for new Guerrilla Mail addresses</div>
+          <div class="text-[10px] text-md-on-surface/50 mt-1">{$t('mailProvider.defaultDomainDescription')}</div>
         </div>
       {/if}
     </section>
 
     <!-- Inbox Behaviour -->
     <section class="space-y-2">
-      <div class="text-xs font-semibold text-md-on-surface/50 uppercase tracking-wider px-1">Inbox Behaviour</div>
+      <div class="text-xs font-semibold text-md-on-surface/50 uppercase tracking-wider px-1">{$t('mailProvider.inboxBehaviour')}</div>
 
       <!-- Auto-Renew -->
       <div class="bg-md-primary-container rounded-xl px-4 py-3 flex items-center justify-between">
         <div>
-          <div class="text-sm font-medium text-md-on-surface">Auto-Renew</div>
-          <div class="text-xs text-md-on-surface/50">Automatically renew expiring inboxes</div>
+          <div class="text-sm font-medium text-md-on-surface">{$t('mailProvider.autoRenew')}</div>
+          <div class="text-xs text-md-on-surface/50">{$t('mailProvider.autoRenewDescription')}</div>
         </div>
         <button
           class="w-8 h-8 flex items-center justify-center rounded-xl border-0 {autoRenew ? 'bg-md-primary/10 hover:bg-md-primary/20 text-md-primary' : 'bg-md-secondary-container hover:bg-md-outline-variant text-md-on-surface/60'} transition-colors"
           onclick={() => { onSetAutoRenew?.(!autoRenew); onSaveSettings(); }}
-          aria-label="Toggle auto-renew"
+          aria-label={$t('mailProvider.toggleAutoRenew')}
         >
-          <IconRefresh class="w-5 h-5" />
+          <Icon name="refresh" class="w-5 h-5" />
         </button>
       </div>
 
       <!-- Auto-Refresh Interval -->
       <div class="bg-md-primary-container rounded-xl px-4 py-3">
-        <div class="text-sm font-medium text-md-on-surface mb-3">Auto-Refresh Interval</div>
+        <div class="text-sm font-medium text-md-on-surface mb-3">{$t('mailProvider.autoRefreshInterval')}</div>
         <div class="flex items-center justify-between gap-3">
-          <p class="text-xs text-md-on-surface/60 flex-1">How often to automatically check for new emails.</p>
+          <p class="text-xs text-md-on-surface/60 flex-1">{$t('mailProvider.autoRefreshDescription')}</p>
           <select
             class="text-xs bg-md-surface border border-md-outline-variant rounded-lg px-2 py-1.5 text-md-on-surface focus:outline-none focus:ring-2 focus:ring-md-primary flex-shrink-0"
             value={autoRefreshInterval}
             onchange={(e) => { onSetAutoRefreshInterval?.(Number((e.target as HTMLSelectElement).value)); onSaveSettings?.(); }}
           >
-            <option value={0}>Manual only</option>
-            <option value={10000}>10 seconds</option>
-            <option value={30000}>30 seconds</option>
-            <option value={60000}>1 minute</option>
-            <option value={120000}>2 minutes</option>
-            <option value={300000}>5 minutes</option>
-            <option value={600000}>10 minutes</option>
+            <option value={0}>{$t('mailProvider.manualOnly')}</option>
+            <option value={10000}>{$t('mailProvider.tenSeconds')}</option>
+            <option value={30000}>{$t('mailProvider.thirtySeconds')}</option>
+            <option value={60000}>{$t('mailProvider.oneMinute')}</option>
+            <option value={120000}>{$t('mailProvider.twoMinutes')}</option>
+            <option value={300000}>{$t('mailProvider.fiveMinutes')}</option>
+            <option value={600000}>{$t('mailProvider.tenMinutes')}</option>
           </select>
         </div>
       </div>
@@ -484,13 +489,13 @@ async function applyDomainSwitch() {
       <div class="bg-md-primary-container rounded-xl px-4 py-3">
         <div class="flex items-center justify-between">
           <div>
-            <div class="text-sm text-md-on-surface">Email Preview Tooltip</div>
-            <div class="text-xs text-md-on-surface/50">Show email preview on hover</div>
+            <div class="text-sm text-md-on-surface">{$t('mailProvider.emailPreviewTooltip')}</div>
+            <div class="text-xs text-md-on-surface/50">{$t('mailProvider.emailPreviewTooltipDescription')}</div>
           </div>
           <button
             class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors {emailPreviewEnabled ? 'bg-md-primary' : 'bg-md-surface-variant'}"
             onclick={() => { onSetEmailPreviewEnabled?.(!emailPreviewEnabled); onSaveSettings?.(); }}
-            aria-label="Toggle email preview"
+            aria-label={$t('mailProvider.toggleEmailPreview')}
           >
             <span class="inline-block h-4 w-4 transform rounded-full bg-white transition-transform {emailPreviewEnabled ? 'translate-x-6' : 'translate-x-1'}"></span>
           </button>
@@ -500,12 +505,12 @@ async function applyDomainSwitch() {
 
     <!-- Notifications -->
     <section class="space-y-2">
-      <div class="text-xs font-semibold text-md-on-surface/50 uppercase tracking-wider px-1">Notifications</div>
+      <div class="text-xs font-semibold text-md-on-surface/50 uppercase tracking-wider px-1">{$t('mailProvider.notifications')}</div>
       <div class="bg-md-primary-container rounded-xl px-4 py-3 space-y-3">
         <div class="flex items-center justify-between">
           <div>
-            <div class="text-sm text-md-on-surface">Enable Notifications</div>
-            <div class="text-xs text-md-on-surface/50">Show notifications for new emails and expiry</div>
+            <div class="text-sm text-md-on-surface">{$t('mailProvider.enableNotifications')}</div>
+            <div class="text-xs text-md-on-surface/50">{$t('mailProvider.enableNotificationsDescription')}</div>
           </div>
           <label class="cursor-pointer">
             <input type="checkbox" class="sr-only peer" checked={notificationsEnabled}
@@ -516,8 +521,8 @@ async function applyDomainSwitch() {
         <div class="h-px bg-md-secondary-container"></div>
         <div class="flex items-center justify-between">
           <div>
-            <div class="text-sm text-md-on-surface">Notification Sound</div>
-            <div class="text-xs text-md-on-surface/50">Play sound for new emails</div>
+            <div class="text-sm text-md-on-surface">{$t('mailProvider.notificationSound')}</div>
+            <div class="text-xs text-md-on-surface/50">{$t('mailProvider.notificationSoundDescription')}</div>
           </div>
           <label class="cursor-pointer">
             <input type="checkbox" class="sr-only peer" checked={soundEnabled}
@@ -528,18 +533,18 @@ async function applyDomainSwitch() {
         <div class="h-px bg-md-secondary-container"></div>
         <div class="flex items-center justify-between">
           <div>
-            <div class="text-sm text-md-on-surface">Expiry Warning</div>
-            <div class="text-xs text-md-on-surface/50">When to warn before inbox expires</div>
+            <div class="text-sm text-md-on-surface">{$t('mailProvider.expiryWarning')}</div>
+            <div class="text-xs text-md-on-surface/50">{$t('mailProvider.expiryWarningDescription')}</div>
           </div>
           <select
             class="bg-md-secondary-container text-sm text-md-on-surface px-3 py-1.5 rounded-lg outline-none border-0 cursor-pointer font-medium"
             value={expiryWarningThreshold}
             onchange={(e) => { onSetExpiryWarningThreshold?.(Number((e.target as HTMLSelectElement).value)); onSaveSettings(); }}
           >
-            <option value={15 * 60 * 1000}>15 minutes</option>
-            <option value={5 * 60 * 1000}>5 minutes</option>
-            <option value={60 * 1000}>1 minute</option>
-            <option value={60 * 60 * 1000}>1 hour</option>
+            <option value={15 * 60 * 1000}>{$t('mailProvider.fifteenMinutes')}</option>
+            <option value={5 * 60 * 1000}>{$t('mailProvider.fiveMinutesShort')}</option>
+            <option value={60 * 1000}>{$t('mailProvider.oneMinuteShort')}</option>
+            <option value={60 * 60 * 1000}>{$t('mailProvider.oneHour')}</option>
           </select>
         </div>
       </div>
@@ -553,12 +558,12 @@ async function applyDomainSwitch() {
   {@const { pendingDomain, domains, domainCounts } = domainSwitchDialog}
   <div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" role="dialog" aria-modal="true" aria-labelledby="domain-switch-title">
     <div class="bg-md-surface rounded-2xl p-5 w-full max-w-sm shadow-2xl">
-      <div id="domain-switch-title" class="text-sm font-semibold text-md-on-surface mb-1">Switch Default Domain</div>
+      <div id="domain-switch-title" class="text-sm font-semibold text-md-on-surface mb-1">{$t('mailProvider.switchDefaultDomain')}</div>
       <div class="text-xs text-md-on-surface/60 mb-4">
         {#if pendingDomain}
-          Switching default to <span class="font-medium text-md-primary">@{pendingDomain}</span>
+          {$t('mailProvider.switchingTo')} <span class="font-medium text-md-primary">@{pendingDomain}</span>
         {:else}
-          Removing default domain (cycle mode)
+          {$t('mailProvider.removingDefaultDomain')}
         {/if}
       </div>
 
@@ -568,7 +573,7 @@ async function applyDomainSwitch() {
           {@const count = domainCounts[d] ?? 0}
           <div class="flex justify-between items-center text-xs">
             <span class="text-md-on-surface/70">@{d}</span>
-            <span class="font-medium text-md-on-surface">{count} address{count === 1 ? '' : 'es'}</span>
+            <span class="font-medium text-md-on-surface">{$t('mailProvider.addressCount', { default: 'mailProvider.addressCountPlural', values: { n: count } })}</span>
           </div>
         {/each}
       </div>
@@ -583,8 +588,8 @@ async function applyDomainSwitch() {
             {#if domainSwitchScope === 'new'}<div class="w-2 h-2 rounded-full bg-md-primary"></div>{/if}
           </div>
           <div>
-            <div class="text-sm font-medium text-md-on-surface">New addresses only</div>
-            <div class="text-xs text-md-on-surface/50">Only newly created inboxes use this domain</div>
+            <div class="text-sm font-medium text-md-on-surface">{$t('mailProvider.newAddressesOnly')}</div>
+            <div class="text-xs text-md-on-surface/50">{$t('mailProvider.newAddressesOnlyDescription')}</div>
           </div>
         </button>
         {#if pendingDomain}
@@ -596,8 +601,8 @@ async function applyDomainSwitch() {
               {#if domainSwitchScope === 'existing'}<div class="w-2 h-2 rounded-full bg-md-primary"></div>{/if}
             </div>
             <div>
-              <div class="text-sm font-medium text-md-on-surface">Also change existing addresses</div>
-              <div class="text-xs text-md-on-surface/50">Update displayed domain for current active inboxes</div>
+              <div class="text-sm font-medium text-md-on-surface">{$t('mailProvider.alsoChangeExisting')}</div>
+              <div class="text-xs text-md-on-surface/50">{$t('mailProvider.alsoChangeExistingDescription')}</div>
             </div>
           </button>
         {/if}
@@ -610,22 +615,22 @@ async function applyDomainSwitch() {
             <div class="w-4 h-4 rounded-full border-2 flex items-center justify-center shrink-0 {domainSwitchAll ? 'border-md-primary' : 'border-md-outline-variant'}">
               {#if domainSwitchAll}<div class="w-2 h-2 rounded-full bg-md-primary"></div>{/if}
             </div>
-            <span class="text-xs text-md-on-surface">Change all addresses</span>
+            <span class="text-xs text-md-on-surface">{$t('mailProvider.changeAllAddresses')}</span>
           </button>
           <button class="w-full flex items-center gap-2 text-left" onclick={() => { domainSwitchAll = false; }}>
             <div class="w-4 h-4 rounded-full border-2 flex items-center justify-center shrink-0 {!domainSwitchAll ? 'border-md-primary' : 'border-md-outline-variant'}">
               {#if !domainSwitchAll}<div class="w-2 h-2 rounded-full bg-md-primary"></div>{/if}
             </div>
-            <span class="text-xs text-md-on-surface">Only addresses using a specific domain</span>
+            <span class="text-xs text-md-on-surface">{$t('mailProvider.onlyAddressesUsingDomain')}</span>
           </button>
           {#if !domainSwitchAll}
             <select
               class="w-full mt-1 bg-md-primary-container text-sm text-md-on-surface rounded-lg px-3 py-2 outline-none border border-md-secondary-container"
               bind:value={domainSwitchFromDomain}
             >
-              <option value="">Select domain to change from...</option>
+              <option value="">{$t('mailProvider.selectDomainFrom')}</option>
               {#each domains.filter(d => (domainCounts[d] ?? 0) > 0) as d}
-                <option value={d}>@{d} ({domainCounts[d]} address{domainCounts[d] === 1 ? '' : 'es'})</option>
+                <option value={d}>@{d} ({$t('mailProvider.addressCount', { default: 'mailProvider.addressCountPlural', values: { n: domainCounts[d] } })})</option>
               {/each}
             </select>
           {/if}
@@ -637,12 +642,12 @@ async function applyDomainSwitch() {
         <button
           class="flex-1 px-4 py-2 text-sm rounded-xl bg-md-secondary-container text-md-on-surface hover:bg-md-secondary-container/80 transition-colors"
           onclick={() => { domainSwitchDialog = null; }}
-        >Cancel</button>
+        >{$t('mailProvider.cancel')}</button>
         <button
           class="flex-1 px-4 py-2 text-sm rounded-xl bg-md-primary text-md-on-primary hover:bg-md-primary/90 transition-colors disabled:opacity-50"
           disabled={domainSwitchScope === 'existing' && !domainSwitchAll && !domainSwitchFromDomain}
           onclick={applyDomainSwitch}
-        >Apply</button>
+        >{$t('mailProvider.apply')}</button>
       </div>
     </div>
   </div>

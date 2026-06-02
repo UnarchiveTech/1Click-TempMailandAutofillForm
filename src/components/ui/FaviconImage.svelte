@@ -42,7 +42,7 @@ let strippedDomain = $derived(getStrippedDomain(fullDomain));
 let rootDomain = $derived(getRootDomain(fullDomain));
 
 // Build URLs for each attempt
-let cachedUrl = $derived(getCachedFaviconUrl(rootDomain));
+let cachedUrl = $state<string | null>(null);
 let fullUrl = $derived(getFaviconUrl(fullDomain));
 let strippedUrl = $derived(getFaviconUrl(strippedDomain));
 let rootUrl = $derived(getFaviconUrl(rootDomain));
@@ -52,14 +52,27 @@ let googleUrl = $derived(getGoogleFaviconUrl(strippedDomain, size));
 let attempt = $state<'cached' | 'full' | 'stripped' | 'root' | 'google' | 'failed'>('cached');
 let googleBlobUrl = $state('');
 let loaded = $state(false);
-let hasRecentErr = $derived(hasRecentFaviconError(rootDomain));
+let hasRecentErr = $state(false);
 
-// Reset when domain changes
+// Reset when domain changes and fetch async cache state
 $effect(() => {
-  const hasCache = !!cachedUrl;
-  attempt = hasCache ? 'cached' : 'full';
+  let isCancelled = false;
+
   googleBlobUrl = '';
   loaded = false;
+
+  Promise.all([getCachedFaviconUrl(rootDomain), hasRecentFaviconError(rootDomain)]).then(
+    ([url, err]) => {
+      if (isCancelled) return;
+      cachedUrl = url;
+      hasRecentErr = err;
+      attempt = url ? 'cached' : 'full';
+    }
+  );
+
+  return () => {
+    isCancelled = true;
+  };
 });
 
 async function handleGoogleFetch() {

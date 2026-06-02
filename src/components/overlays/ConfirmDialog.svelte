@@ -1,5 +1,5 @@
 <script lang="ts">
-import IconTrashBox from '@/components/icons/IconTrashBox.svelte';
+import Icon from '@/components/icons/Icon.svelte';
 import { setupFocusTrap } from '@/utils/focusTrap.js';
 
 interface Props {
@@ -45,7 +45,7 @@ $effect(() => {
       role="button"
       tabindex="-1"
       aria-label="Close dialog"
-      onclick={onClose}
+      onclick={(e) => { e.stopPropagation(); onClose(); }}
       onkeydown={(e) => e.key === 'Escape' && onClose()}
     ></div>
     <div class="bg-md-surface rounded-xl px-4 py-4 shadow-xl max-w-xs w-full relative mx-4" bind:this={dialogRef} tabindex="-1">
@@ -58,15 +58,15 @@ $effect(() => {
         <button
           class="w-full mb-2 px-3 py-2 text-sm font-medium rounded-xl bg-md-primary/10 hover:bg-md-primary/20 text-md-primary transition-colors text-left flex items-center gap-2"
           aria-label={confirmDialog.secondaryLabel}
-          onclick={confirmDialog.onSecondary}
+          onclick={(e) => { e.stopPropagation(); confirmDialog.onSecondary?.(); }}
         >
-          <IconTrashBox class="w-4 h-4 shrink-0" />
+          <Icon name="trashBox" class="w-4 h-4 shrink-0" />
           {confirmDialog.secondaryLabel}
         </button>
       {/if}
       <div class="flex justify-end gap-2">
-        <button class="px-3 py-1.5 text-sm rounded-lg bg-md-surface-variant hover:bg-md-surface-variant/80 text-md-on-surface transition-colors" aria-label="Cancel action" onclick={onClose}>Cancel</button>
-        <button class="px-3 py-1.5 text-sm rounded-lg bg-md-error text-md-on-error hover:bg-md-error/90 transition-colors" aria-label="Confirm action" onclick={confirmDialog.onConfirm}>{confirmDialog.confirmLabel ?? 'Confirm'}</button>
+        <button class="px-3 py-1.5 text-sm rounded-lg bg-md-surface-variant hover:bg-md-surface-variant/80 text-md-on-surface transition-colors" aria-label="Cancel action" onclick={(e) => { e.stopPropagation(); onClose(); }}>Cancel</button>
+        <button class="px-3 py-1.5 text-sm rounded-lg bg-md-error text-md-on-error hover:bg-md-error/90 transition-colors" aria-label="Confirm action" onclick={(e) => { e.stopPropagation(); confirmDialog.onConfirm(); }}>{confirmDialog.confirmLabel ?? 'Confirm'}</button>
       </div>
     </div>
   </div>

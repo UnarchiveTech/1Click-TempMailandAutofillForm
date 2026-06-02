@@ -15,6 +15,7 @@ import {
 } from '@/utils/errors.js';
 import { getProviderInstances } from '@/utils/instance-manager.js';
 import { log, logError } from '@/utils/logger.js';
+import { randomItem } from '@/utils/secure-random.js';
 import { getInboxes, getSelectedProvider } from '@/utils/storage-keys.js';
 import type {
   Account,
@@ -34,14 +35,29 @@ export interface DeleteInboxResult {
 /**
  * Creates a new email inbox using the specified provider
  * @param provider - Optional mail provider to use (defaults to selected provider in storage)
- * @param instanceId - Optional burner instance ID to use (only for burner provider)
- * @param emailUser - Optional email username for custom address (only for Guerrilla Mail)
+ * @param instanceId - Optional provider instance ID to use
+ * @param emailUser - Optional email username for custom address
  * @returns Promise resolving to the created inbox account
  * @throws InboxCreationError if inbox creation fails
  * @throws ProviderUnsupportedError if the provider is not supported
  * @throws ApiError for other API-related errors
  */
-export async function createInbox(
+let createInboxQueue = Promise.resolve();
+
+export function createInbox(
+  provider?: MailProvider,
+  instanceId?: string,
+  emailUser?: string
+): Promise<Account> {
+  return new Promise((resolve, reject) => {
+    createInboxQueue = createInboxQueue
+      .then(() => _createInbox(provider, instanceId, emailUser))
+      .then(resolve)
+      .catch(reject);
+  });
+}
+
+async function _createInbox(
   provider?: MailProvider,
   instanceId?: string,
   emailUser?: string
@@ -80,7 +96,7 @@ export async function createInbox(
             reason: `No instances available for ${activeProvider}. Please add instances in settings.`,
           });
         }
-        selectedInstance = instances[Math.floor(Math.random() * instances.length)];
+        selectedInstance = randomItem(instances) ?? null;
       }
 
       if (!selectedInstance) {
@@ -125,7 +141,7 @@ export async function createInbox(
     // Use address as id if id is not present
     const inboxId = (id || address) as string;
 
-    // Allow empty token for Guerrilla Mail (API sometimes returns empty token)
+    // Allow empty token for providers that sometimes return empty token (like Guerrilla Mail)
     if (!address) {
       logError('Missing required fields in API response', { result, address, token });
       throw new InboxCreationError(
@@ -330,6 +346,7 @@ export async function deleteInbox(
         delete archivedEmails[inbox.address];
 
         for (const emailId of deletedEmailIds) {
+          delete readEmails[`${inbox.address}_${emailId}`];
           delete readEmails[emailId];
         }
 

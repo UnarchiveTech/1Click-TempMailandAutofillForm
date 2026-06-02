@@ -1,9 +1,6 @@
 <script lang="ts">
-import QRCode from 'qrcode';
 import { onMount } from 'svelte';
-import IconCopy from '@/components/icons/IconCopy.svelte';
-import IconDownload from '@/components/icons/IconDownload.svelte';
-import IconX from '@/components/icons/IconX.svelte';
+import Icon from '@/components/icons/Icon.svelte';
 import { rgbToHex } from '@/utils/color-utils.js';
 import { setupFocusTrap } from '@/utils/focusTrap.js';
 import { logError } from '@/utils/logger.js';
@@ -69,6 +66,7 @@ async function generateQR() {
         '#ffffff'
     );
 
+    const QRCode = await import('qrcode');
     await QRCode.toCanvas(localCanvas, selectedEmail, {
       width: 160,
       margin: 2,
@@ -106,16 +104,16 @@ $effect(() => {
       class="absolute inset-0 bg-md-surface/30 backdrop-blur-sm"
       role="button"
       tabindex="-1"
-      onclick={onClose}
+      onclick={(e) => { e.stopPropagation(); onClose(); }}
       onkeydown={(e) => e.key === 'Escape' && onClose()}
     ></div>
 
     <button
       class="absolute top-4 right-4 z-10 w-9 h-9 rounded-full bg-md-surface hover:bg-md-surface-variant flex items-center justify-center shadow-md transition-colors"
       aria-label="Close dialog"
-      onclick={onClose}
+      onclick={(e) => { e.stopPropagation(); onClose(); }}
     >
-      <IconX class="w-4 h-4 text-md-on-surface/70" />
+      <Icon name="x" class="w-4 h-4 text-md-on-surface/70" />
     </button>
 
     <div
@@ -133,17 +131,17 @@ $effect(() => {
         <button
           class="w-full px-3 py-1.5 text-sm font-semibold rounded-xl bg-md-primary text-md-on-primary hover:bg-md-primary/90 gap-2 transition-colors flex items-center justify-center"
           aria-label="Download QR code"
-          onclick={onDownload}
+          onclick={(e) => { e.stopPropagation(); onDownload(); }}
         >
-          <IconDownload class="w-3.5 h-3.5" />
+          <Icon name="download" class="w-3.5 h-3.5" />
           Download QR
         </button>
         <button
           class="w-full px-3 py-1.5 text-sm font-semibold rounded-xl bg-md-primary/10 hover:bg-md-primary/20 text-md-primary border-0 gap-2 transition-colors flex items-center justify-center"
           aria-label="Copy QR code as image"
-          onclick={onCopyImage}
+          onclick={(e) => { e.stopPropagation(); onCopyImage(); }}
         >
-          <IconCopy class="w-3.5 h-3.5" />
+          <Icon name="copy" class="w-3.5 h-3.5" />
           Copy QR Image
         </button>
       </div>

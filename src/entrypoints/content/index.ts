@@ -2,9 +2,11 @@ import { browser } from 'wxt/browser';
 import { defineContentScript } from 'wxt/utils/define-content-script';
 import { getErrorMessage } from '@/utils/errors.js';
 import { logError } from '@/utils/logger.js';
+import { isDomainBlocked } from '@/utils/storage-keys.js';
 import { injectAutoFillButtons, removeInjectedButtons } from './autofill/autofill-buttons.js';
 import { findSignupForm } from './autofill/form-detector.js';
 import { fillSignupForm } from './autofill/form-filler.js';
+import { attachDisposableHint } from './disposable/disposable-detector.js';
 import { fillOtp } from './otp/otp-handler.js';
 
 export default defineContentScript({
@@ -18,6 +20,10 @@ export default defineContentScript({
     const autoFillButtonsInjected = { value: false };
     const injectedButtons: HTMLElement[] = [];
     const updatePositionListeners: Array<() => void> = [];
+    const disposableTrackers = new Set<{ cleanup: () => void }>();
+    let initialScanTimer: ReturnType<typeof setTimeout> | null = null;
+    let rescanTimer: ReturnType<typeof setTimeout> | null = null;
+    let currentUrl = window.location.href;
 
     async function updateAndCopyCredentials(
       credentialsToUpdate: Record<string, string>
@@ -34,6 +40,12 @@ export default defineContentScript({
 
     async function scanForFormsAndInjectButtons(): Promise<void> {
       try {
+        // Check if current domain is blocked from autofill
+        const currentDomain = window.location.hostname;
+        if (await isDomainBlocked(currentDomain)) {
+          return;
+        }
+
         const form = await findSignupForm();
         if (form) {
           await injectAutoFillButtons(
@@ -49,9 +61,68 @@ export default defineContentScript({
       }
     }
 
-    window.addEventListener('load', () => {
-      setTimeout(scanForFormsAndInjectButtons, 1000);
-    });
+    function scheduleScan(delay = 0): void {
+      if (rescanTimer) clearTimeout(rescanTimer);
+      rescanTimer = setTimeout(() => {
+        rescanTimer = null;
+        void scanForFormsAndInjectButtons();
+      }, delay);
+    }
+
+    function clearInjectedUi(): void {
+      removeInjectedButtons(injectedButtons, updatePositionListeners);
+      autoFillButtonsInjected.value = false;
+      disposableTrackers.forEach((t) => {
+        try {
+          t.cleanup();
+        } catch (error: unknown) {
+          logError('Failed to clean up disposable tracker', error);
+        }
+      });
+      disposableTrackers.clear();
+    }
+
+    function scanForDisposableHints(): void {
+      const emailFields = document.querySelectorAll<HTMLInputElement>(
+        'input[type="email"], input[name*="email" i], input[id*="email" i], input[autocomplete="email"]'
+      );
+      emailFields.forEach((field: HTMLInputElement) => {
+        const tracker = attachDisposableHint(field, updatePositionListeners);
+        if (tracker) disposableTrackers.add(tracker);
+      });
+    }
+
+    function handlePageLoad(): void {
+      scheduleScan(0);
+    }
+
+    function handleSpaNavigation(): void {
+      if (window.location.href === currentUrl) return;
+      currentUrl = window.location.href;
+      clearInjectedUi();
+      scheduleScan(0);
+    }
+
+    const originalPushState = history.pushState.bind(history);
+    const originalReplaceState = history.replaceState.bind(history);
+    history.pushState = (...args) => {
+      originalPushState(...args);
+      handleSpaNavigation();
+    };
+    history.replaceState = (...args) => {
+      originalReplaceState(...args);
+      handleSpaNavigation();
+    };
+
+    window.addEventListener('load', handlePageLoad);
+    window.addEventListener('popstate', handleSpaNavigation);
+    scheduleScan(0);
+    scanForDisposableHints();
+    initialScanTimer = setTimeout(() => {
+      initialScanTimer = null;
+      scheduleScan(0);
+      scanForDisposableHints();
+    }, 1000);
 
     const observer = new MutationObserver((mutations: MutationRecord[]) => {
       const mightHaveAddedForm = mutations.some(
@@ -64,23 +135,49 @@ export default defineContentScript({
           )
       );
       if (mightHaveAddedForm && !autoFillButtonsInjected.value) {
-        scanForFormsAndInjectButtons();
+        scheduleScan(100);
       }
     });
 
+    const disposableObserver = new MutationObserver(() => {
+      scanForDisposableHints();
+    });
+    disposableObserver.observe(document.body, { childList: true, subtree: true });
+
     observer.observe(document.body, { childList: true, subtree: true });
 
-    window.addEventListener('unload', () => {
+    function teardown(): void {
+      if (initialScanTimer) clearTimeout(initialScanTimer);
+      if (rescanTimer) clearTimeout(rescanTimer);
       observer.disconnect();
-      removeInjectedButtons(injectedButtons, updatePositionListeners);
-    });
+      disposableObserver.disconnect();
+      clearInjectedUi();
+      window.removeEventListener('load', handlePageLoad);
+      window.removeEventListener('popstate', handleSpaNavigation);
+      window.removeEventListener('pagehide', teardown);
+      history.pushState = originalPushState;
+      history.replaceState = originalReplaceState;
+    }
+
+    window.addEventListener('pagehide', teardown);
 
     browser.runtime.onMessage.addListener(
-      // biome-ignore lint/suspicious/noExplicitAny: Chrome runtime message listener requires any for discriminated union
-      (message: any, _sender: any, sendResponse: (r: unknown) => void) => {
-        if (message.action === 'startSignup') {
+      (message: unknown, _sender: unknown, sendResponse: (r: unknown) => void) => {
+        if (typeof message !== 'object' || message === null) return false;
+        const runtimeMessage = message as Record<string, unknown>;
+        if (runtimeMessage.action === 'startSignup') {
           (async () => {
             try {
+              // Check if current domain is blocked from autofill
+              const currentDomain = window.location.hostname;
+              if (await isDomainBlocked(currentDomain)) {
+                browser.runtime.sendMessage({
+                  status: 'Autofill is disabled for this website',
+                  isError: true,
+                });
+                return;
+              }
+
               const form = await findSignupForm();
               if (!form) {
                 browser.runtime.sendMessage({
@@ -137,10 +234,10 @@ export default defineContentScript({
           return true;
         }
 
-        if (message.type === 'fillOTP') {
+        if (runtimeMessage.type === 'fillOTP') {
           (async () => {
             try {
-              await fillOtp(message.otp);
+              await fillOtp(typeof runtimeMessage.otp === 'string' ? runtimeMessage.otp : '');
             } catch (error: unknown) {
               logError('Error filling OTP', error);
             }
@@ -149,20 +246,37 @@ export default defineContentScript({
           return true;
         }
 
-        if (message.type === 'checkFormDetected') {
+        if (runtimeMessage.type === 'checkFormDetected') {
           (async () => {
             try {
               const form = await findSignupForm();
               sendResponse({ formDetected: !!form });
-            } catch {
+            } catch (error: unknown) {
+              logError('Error checking whether a signup form is present', error);
               sendResponse({ formDetected: false });
             }
           })();
           return true;
         }
 
-        if (message.type === 'autofillForm') {
-          scanForFormsAndInjectButtons();
+        if (runtimeMessage.type === 'autofillForm') {
+          scheduleScan(0);
+          return true;
+        }
+
+        if (runtimeMessage.type === 'autofillBlocklistChanged') {
+          (async () => {
+            const currentDomain = window.location.hostname;
+            const blocked = await isDomainBlocked(currentDomain);
+            if (blocked) {
+              // Remove any injected buttons if domain was just blocked
+              clearInjectedUi();
+            } else {
+              // Re-scan and inject buttons if domain was just unblocked
+              clearInjectedUi();
+              scheduleScan(0);
+            }
+          })();
           return true;
         }
       }

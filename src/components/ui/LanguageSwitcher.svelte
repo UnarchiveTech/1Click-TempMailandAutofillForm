@@ -1,7 +1,7 @@
 <script lang="ts">
 import { onMount } from 'svelte';
-import IconCheck from '@/components/icons/IconCheck.svelte';
-import IconChevronDown from '@/components/icons/IconChevronDown.svelte';
+import { browser } from 'wxt/browser';
+import Icon from '@/components/icons/Icon.svelte';
 import { isRTL, locale, setLanguage } from '@/lib/i18n';
 
 const languages = [
@@ -24,17 +24,19 @@ onMount(() => {
   });
 
   // Priority: saved storage > auto-detected (already in locale store)
-  const savedLang = localStorage.getItem('preferredLanguage');
-  if (savedLang && languages.some((lang) => lang.code === savedLang)) {
-    setLanguage(savedLang);
-  }
+  browser.storage.local.get('preferredLanguage').then((res) => {
+    const savedLang = res.preferredLanguage as string | undefined;
+    if (savedLang && languages.some((lang) => lang.code === savedLang)) {
+      void setLanguage(savedLang);
+    }
+  });
 
   return unsubscribe;
 });
 
 async function handleLanguageChange(langCode: string) {
   await setLanguage(langCode);
-  localStorage.setItem('preferredLanguage', langCode);
+  await browser.storage.local.set({ preferredLanguage: langCode });
 
   // Update document direction for RTL languages
   if (isRTL(langCode)) {
@@ -56,7 +58,7 @@ function toggleDropdown() {
 <div class="relative">
   <button
     class="flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-md-surface-variant transition-colors"
-    onclick={toggleDropdown}
+    onclick={(e) => { e.stopPropagation(); toggleDropdown(); }}
     aria-label="Change language"
   >
     <img
@@ -66,7 +68,7 @@ function toggleDropdown() {
       loading="lazy"
     />
     <span class="text-sm font-medium">{languages.find(lang => lang.code === currentLanguage)?.name}</span>
-    <IconChevronDown class="w-4 h-4 {isOpen ? 'rotate-180' : ''} transition-transform" />
+    <Icon name="chevronDown" class="w-4 h-4 {isOpen ? 'rotate-180' : ''} transition-transform" />
   </button>
 
   {#if isOpen}
@@ -74,7 +76,7 @@ function toggleDropdown() {
       {#each languages as lang}
         <button
           class="w-full flex items-center gap-3 px-4 py-3 hover:bg-md-surface-variant transition-colors text-left {currentLanguage === lang.code ? 'bg-md-surface-variant' : ''}"
-          onclick={() => handleLanguageChange(lang.code)}
+          onclick={(e) => { e.stopPropagation(); void handleLanguageChange(lang.code); }}
           aria-label="Switch to {lang.name}"
           aria-current={currentLanguage === lang.code ? 'true' : undefined}
         >
@@ -86,7 +88,7 @@ function toggleDropdown() {
           />
           <span class="text-sm font-medium">{lang.name}</span>
           {#if currentLanguage === lang.code}
-            <IconCheck class="w-4 h-4 text-md-primary ml-auto" />
+            <Icon name="check" class="w-4 h-4 text-md-primary ml-auto" />
           {/if}
         </button>
       {/each}

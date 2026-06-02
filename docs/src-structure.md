@@ -69,8 +69,8 @@ src/
 **Purpose:** Application configuration
 
 - `providers/` - Email provider configurations (burner.json, guerrilla.json, etc.)
-- `providers.json` - Main providers configuration
-- `providers.schema.json` - Schema validation
+- `providers.jsonc` - Main providers configuration (JSONC: comments + trailing commas allowed)
+- `providers.schema.jsonc` - Schema validation (JSONC for inline docs)
 
 ### entrypoints/
 **Purpose:** Extension entry points (popup, sidepanel, background, content scripts)

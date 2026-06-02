@@ -20,11 +20,18 @@ import type { Account, Email, EmailFilters, NotificationSettings } from '@/utils
  */
 function playNotificationSound() {
   try {
-    // Create audio context
-    const audioContext = new (
-      window.AudioContext ||
-      (window as typeof window & { webkitAudioContext: typeof AudioContext }).webkitAudioContext
-    )();
+    // We only initialize audio context if we are in a DOM environment (popup/sidepanel).
+    // Service workers do not have access to window or AudioContext.
+    const audioContext =
+      typeof window !== 'undefined'
+        ? new (
+            window.AudioContext ||
+            (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
+          )()
+        : null;
+
+    if (!audioContext) return;
+
     const oscillator = audioContext.createOscillator();
     const gainNode = audioContext.createGain();
 
@@ -195,6 +202,9 @@ export async function storeNewMessages(inboxAddress: string, newMessages: Email[
   const uniqueNewMessages = newMessages.filter((msg: Email) => !existingIds.has(msg.id));
 
   if (uniqueNewMessages.length > 0) {
+    for (const msg of uniqueNewMessages) {
+      if (!msg.original_inbox) msg.original_inbox = inboxAddress;
+    }
     storedEmails[inboxAddress].push(...uniqueNewMessages);
     storedEmails[inboxAddress].sort((a: Email, b: Email) => b.received_at - a.received_at);
 
@@ -236,8 +246,7 @@ export async function applyFiltersAndProcessMessages(
 
     if (latestNewMessageWithOtp) {
       try {
-        // biome-ignore lint/suspicious/noExplicitAny: Chrome tabs API callback type not fully typed in WXT
-        browser.tabs.query({ active: true, currentWindow: true }, (tabs: any[]) => {
+        browser.tabs.query({ active: true, currentWindow: true }, (tabs) => {
           if (tabs.length > 0 && tabs[0].id) {
             browser.tabs
               .sendMessage(tabs[0].id, {
@@ -322,12 +331,12 @@ export async function applyFiltersAndProcessMessages(
     }
   }
 
-  // Update OTP analytics
-  const otpCount = messages.filter((msg: Email) => msg.otp).length;
-  if (otpCount > 0) {
+  // Update OTP analytics — only count new OTPs to avoid double-counting on refresh
+  const newOtpCount = newMessages.filter((msg: Email) => msg.otp).length;
+  if (newOtpCount > 0) {
     // Re-read analytics to get latest value after the notifications write above
     const latestAnalytics = await getAnalyticsRecord();
-    latestAnalytics.otpsDetected = (latestAnalytics.otpsDetected || 0) + otpCount;
+    latestAnalytics.otpsDetected = (latestAnalytics.otpsDetected || 0) + newOtpCount;
     await setAnalyticsRecord(latestAnalytics);
   }
 

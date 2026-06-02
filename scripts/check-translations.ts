@@ -15,7 +15,7 @@
  * detected, summary at the bottom with counts).
  */
 
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 // ─── Configuration ────────────────────────────────────────────────────────────
@@ -56,10 +56,8 @@ function extractVars(str: string): Set<string> {
   return vars;
 }
 
-/** Load and parse a JSON locale file */
-function loadLocale(file: string): LocaleData {
-  const raw = readFileSync(join(LOCALES_DIR, file), 'utf8');
-  return JSON.parse(raw) as LocaleData;
+async function loadLocale(file: string): Promise<LocaleData> {
+  return (await Bun.file(join(LOCALES_DIR, file)).json()) as LocaleData;
 }
 
 /** Detect TTY to decide whether to use ANSI colours */
@@ -88,7 +86,7 @@ if (!files.includes(sourceFile)) {
   process.exit(1);
 }
 
-const sourceData = loadLocale(sourceFile);
+const sourceData = await loadLocale(sourceFile);
 const sourceKeys = flattenKeys(sourceData);
 const otherFiles = files.filter((f) => f !== sourceFile);
 
@@ -106,7 +104,7 @@ for (const file of otherFiles) {
   let data: LocaleData;
 
   try {
-    data = loadLocale(file);
+    data = await loadLocale(file);
   } catch (e) {
     console.error(red(`  [${locale}] Failed to parse JSON: ${(e as Error).message}`));
     totalErrors++;

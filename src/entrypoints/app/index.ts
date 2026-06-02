@@ -1,5 +1,10 @@
+import { mount } from 'svelte';
 import App from './App.svelte';
 import '../../styles.css';
-import { mountEntrypoint } from '../entrypoint.js';
 
-mountEntrypoint(App);
+const api =
+  (window as { browser?: unknown }).browser ?? (window as { chrome?: unknown }).chrome ?? {};
+(window as { browser?: unknown; chrome?: unknown }).browser = api;
+(window as { browser?: unknown; chrome?: unknown }).chrome = api;
+
+mount(App, { target: document.getElementById('app')! });

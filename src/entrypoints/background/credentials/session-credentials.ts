@@ -6,6 +6,7 @@
 import { browser } from 'wxt/browser';
 import { ValidationError } from '@/utils/errors.js';
 import { logError } from '@/utils/logger.js';
+import { isRecord } from '@/utils/storage-keys.js';
 import type { SessionCredentials } from '@/utils/types.js';
 
 export interface UpdateCredentialsMessage {
@@ -27,13 +28,12 @@ export async function handleUpdateSessionCredentials(
     });
   }
 
-  const sessionResult = (await browser.storage.session.get('sessionCredentials')) as {
-    sessionCredentials?: SessionCredentials;
-  };
-  const sessionCredentials: SessionCredentials = sessionResult.sessionCredentials ?? {};
-  const { autoCopy = false } = (await browser.storage.local.get('autoCopy')) as {
-    autoCopy?: boolean;
-  };
+  const sessionResult = await browser.storage.session.get('sessionCredentials');
+  const sessionCredentials: SessionCredentials = isRecord(sessionResult.sessionCredentials)
+    ? sessionResult.sessionCredentials
+    : {};
+  const autoCopyResult = await browser.storage.local.get('autoCopy');
+  const autoCopy = typeof autoCopyResult.autoCopy === 'boolean' ? autoCopyResult.autoCopy : false;
 
   const updatedCredentials = { ...sessionCredentials, ...message.credentials };
   await browser.storage.session.set({ sessionCredentials: updatedCredentials });

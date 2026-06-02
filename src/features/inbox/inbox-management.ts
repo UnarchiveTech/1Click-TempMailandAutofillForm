@@ -1,5 +1,5 @@
 import type { ToastType } from '@/components/feedback/Toast.svelte';
-import { EmailService, loadProviderConfig } from '@/utils/email-service.js';
+import { loadProviderConfig } from '@/utils/email-service.js';
 import { getErrorMessage } from '@/utils/errors.js';
 import { detectIconFromMessage } from '@/utils/iconMapping.js';
 import { logError } from '@/utils/logger.js';
@@ -28,8 +28,6 @@ export interface ManagementSetters {
   ) => void;
   loadInboxes: (skipEmailSelection?: boolean) => Promise<void>;
   setDropdownOpen: (open: boolean) => void;
-  setEditingAccount: (account: Account | null) => void;
-  setEditEmailDialogOpen: (open: boolean) => void;
   setArchivedSectionOpen?: (open: boolean) => Promise<void>;
   showOnboarding?: () => void;
   setAllInboxes?: (inboxes: Account[] | ((prev: Account[]) => Account[])) => void;
@@ -134,7 +132,9 @@ export async function removeAccount(
 
     // Handle navigation after deletion — only if it was the active selected account
     if (wasActiveAndSelected) {
-      const updatedInboxes = (await (await ext.storage.local.get(['inboxes']))?.inboxes) || [];
+      const { inboxes: updatedInboxes = [] } = (await ext.storage.local.get(['inboxes'])) as {
+        inboxes?: Account[];
+      };
       const activeAccountsAfter = updatedInboxes.filter(
         (a: Account) => a.accountStatus !== 'archived' && a.accountStatus !== 'deleted'
       );
@@ -257,7 +257,9 @@ export async function archiveAccount(
 
     // If the active selected account was archived, navigate to next active account
     if (wasActiveAndSelected) {
-      const updatedInboxes = (await (await ext.storage.local.get(['inboxes']))?.inboxes) || [];
+      const { inboxes: updatedInboxes = [] } = (await ext.storage.local.get(['inboxes'])) as {
+        inboxes?: Account[];
+      };
       const activeAccounts = updatedInboxes.filter(
         (a: Account) => a.accountStatus !== 'archived' && a.accountStatus !== 'deleted'
       );
@@ -290,7 +292,7 @@ export async function archiveAccount(
       }
     );
   } catch (e) {
-    logError('archiveAccount error:', e);
+    logError('archiveAccount error:', undefined, e instanceof Error ? e : new Error(String(e)));
     setters.setShowToast({ message: 'Failed to archive', type: 'error' });
   }
 }
@@ -315,7 +317,7 @@ export async function unarchiveAccount(ext: Browser, account: Account, setters: 
       type: iconType,
     });
   } catch (e) {
-    logError('unarchiveAccount error:', e);
+    logError('unarchiveAccount error:', undefined, e instanceof Error ? e : new Error(String(e)));
     setters.setShowToast({ message: 'Failed to unarchive', type: 'error' });
   }
 }
@@ -340,7 +342,7 @@ export async function restoreAccount(ext: Browser, account: Account, setters: Ma
       type: iconType,
     });
   } catch (e) {
-    logError('restoreAccount error:', e);
+    logError('restoreAccount error:', undefined, e instanceof Error ? e : new Error(String(e)));
     setters.setShowToast({ message: 'Failed to restore', type: 'error' });
   }
 }
@@ -354,10 +356,10 @@ export function canUnarchive(account: Account): boolean {
   const config = loadProviderConfig(account.provider);
   const canUnarchiveRule = config.ui?.canUnarchive;
 
-  if (canUnarchiveRule === true) {
-    return true;
-  } else if (canUnarchiveRule === 'ifNotExpired') {
+  if (canUnarchiveRule === 'ifNotExpired') {
     return account.status !== 'expired';
+  } else if (canUnarchiveRule) {
+    return true;
   }
   return false;
 }
@@ -383,7 +385,7 @@ export async function extendAccount(ext: Browser, account: Account, setters: Man
     setters.setShowToast('Extending email expiry...');
 
     const result = await ext.runtime.sendMessage({
-      type: 'extendInbox',
+      type: 'renewInbox',
       inboxId: account.id,
     });
 
@@ -395,142 +397,7 @@ export async function extendAccount(ext: Browser, account: Account, setters: Man
       setters.setShowToast('Failed to extend email expiry', 'error');
     }
   } catch (e) {
-    logError('extendAccount error:', e);
+    logError('extendAccount error:', undefined, e instanceof Error ? e : new Error(String(e)));
     setters.setShowToast('Failed to extend email expiry', 'error');
-  }
-}
-
-/**
- * Open the edit email dialog
- * @param account - Account to edit
- * @param setters - Management setter functions
- */
-export function openEditEmailDialog(account: Account, setters: ManagementSetters) {
-  setters.setEditingAccount(account);
-  setters.setEditEmailDialogOpen(true);
-}
-
-/**
- * Close the edit email dialog
- * @param setters - Management setter functions
- */
-export function closeEditEmailDialog(setters: ManagementSetters) {
-  setters.setEditEmailDialogOpen(false);
-  setters.setEditingAccount(null);
-}
-
-/**
- * Edit an account
- * @param ext - Browser extension API
- * @param account - Account to edit
- * @param setters - Management setter functions
- */
-export async function editAccount(ext: Browser, account: Account, setters: ManagementSetters) {
-  try {
-    if (!(await canRenew(account.provider))) {
-      setters.setShowToast('Edit functionality is not available for this provider', 'error');
-      return;
-    }
-
-    const currentAddress = account.address;
-    const _currentUser = currentAddress.split('@')[0];
-
-    setters.setShowToast('Editing email address...');
-
-    const result = await ext.runtime.sendMessage({
-      type: 'editInbox',
-      inboxId: account.id,
-    });
-
-    if (result.success) {
-      await setters.loadInboxes();
-      const iconType = detectIconFromMessage('Email address edited successfully');
-      setters.setShowToast('Email address edited successfully', iconType);
-    } else {
-      setters.setShowToast('Failed to edit email address', 'error');
-    }
-  } catch (e) {
-    logError('editAccount error:', e);
-    setters.setShowToast('Failed to edit email address', 'error');
-  }
-}
-
-/**
- * Edit an account's email address
- * @param account - Account to edit
- * @param setters - Management setter functions
- */
-export async function editEmailAddress(account: Account, setters: ManagementSetters) {
-  if (!(await canRenew(account.provider))) {
-    setters.setShowToast('Edit functionality is not available for this provider', 'error');
-    return;
-  }
-
-  openEditEmailDialog(account, setters);
-}
-
-/**
- * Handle saving email username
- * @param ext - Browser extension API
- * @param username - New username to save
- * @param account - Account being edited
- * @param setters - Management setter functions
- */
-export async function handleSaveEmailUsername(
-  ext: Browser,
-  newUsername: string,
-  editingAccount: Account | null,
-  setters: ManagementSetters
-) {
-  if (!editingAccount) return;
-
-  try {
-    const config = loadProviderConfig(editingAccount.provider);
-
-    // Check if provider supports setEmailUser operation
-    if (!config.operations?.setEmailUser) {
-      setters.setShowToast('Email username change not supported for this provider', 'error');
-      return;
-    }
-
-    const currentAddress = editingAccount.address;
-    const domain = currentAddress.split('@')[1];
-    const newAddress = `${newUsername}@${domain}`;
-
-    // Use EmailService to change email address
-    const service = new EmailService(config, ext);
-    const response = await service.executeOperation('setEmailUser', {
-      auth: { token: editingAccount.sidToken as string },
-      variables: { emailUser: newUsername },
-    });
-
-    if (response) {
-      // Update inbox with new address
-      const { inboxes = [] } = (await ext.storage.local.get(['inboxes'])) as {
-        inboxes?: Account[];
-      };
-      const inboxIndex = inboxes.findIndex((i) => i.id === editingAccount!.id);
-      if (inboxIndex !== -1) {
-        inboxes[inboxIndex].address = newAddress;
-        inboxes[inboxIndex].id = newAddress;
-        await ext.storage.local.set({ inboxes });
-      }
-
-      // Reload inboxes
-      await setters.loadInboxes();
-      const iconType = detectIconFromMessage('Email address updated successfully');
-      setters.setShowToast('Email address updated successfully', iconType);
-      closeEditEmailDialog(setters);
-    } else {
-      setters.setShowToast('Failed to update email address', 'error');
-    }
-  } catch (error: unknown) {
-    const errorMessage = getErrorMessage(error);
-    logError(
-      'Error updating email address:',
-      { account: editingAccount?.address, error: errorMessage },
-      error instanceof Error ? error : new Error(errorMessage)
-    );
-    setters.setShowToast('Failed to update email address', 'error');
   }
 }

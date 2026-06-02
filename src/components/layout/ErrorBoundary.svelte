@@ -1,6 +1,6 @@
 <script lang="ts">
 import type { Snippet } from 'svelte';
-import IconAlertTriangle from '@/components/icons/IconAlertTriangle.svelte';
+import Icon from '@/components/icons/Icon.svelte';
 import { logError } from '@/utils/logger.js';
 
 let { children }: { children: Snippet } = $props();
@@ -21,7 +21,7 @@ function reset() {
   <div class="flex items-center justify-center min-h-screen bg-md-error/10 p-4">
     <div class="max-w-md w-full bg-md-surface rounded-lg shadow-lg p-6">
       <div class="flex items-center gap-3 mb-4">
-        <IconAlertTriangle class="w-8 h-8 text-md-error" />
+        <Icon name="alertTriangle" class="w-8 h-8 text-md-error" />
         <h2 class="text-xl font-bold text-md-error">Something went wrong</h2>
       </div>
       <p class="text-md-on-surface/70 mb-4">
@@ -34,10 +34,10 @@ function reset() {
         </details>
       {/if}
       <div class="flex gap-2">
-        <button class="flex-1 px-3 py-1.5 text-sm rounded-lg bg-md-primary text-md-on-primary hover:bg-md-primary/90 transition-colors" onclick={reset}>
+        <button class="flex-1 px-3 py-1.5 text-sm rounded-lg bg-md-primary text-md-on-primary hover:bg-md-primary/90 transition-colors" onclick={(e) => { e.stopPropagation(); reset(); }}>
           Try Again
         </button>
-        <button class="px-3 py-1.5 text-sm rounded-lg bg-transparent hover:bg-md-surface-variant transition-colors" onclick={() => window.location.reload()}>
+        <button class="px-3 py-1.5 text-sm rounded-lg bg-transparent hover:bg-md-surface-variant transition-colors" onclick={(e) => { e.stopPropagation(); window.location.reload(); }}>
           Refresh Page
         </button>
       </div>

@@ -1,17 +1,13 @@
 <script lang="ts">
+import { get } from 'svelte/store';
 import { t } from 'svelte-i18n';
 import { browser } from 'wxt/browser';
 import ToastContainer from '@/components/feedback/ToastContainer.svelte';
-import IconChevronDown from '@/components/icons/IconChevronDown.svelte';
-import IconChevronRight from '@/components/icons/IconChevronRight.svelte';
-import IconMail from '@/components/icons/IconMail.svelte';
-import IconSettings from '@/components/icons/IconSettings.svelte';
-import IconSun from '@/components/icons/IconSun.svelte';
-import IconUser from '@/components/icons/IconUser.svelte';
-import IconX from '@/components/icons/IconX.svelte';
+import Icon from '@/components/icons/Icon.svelte';
 import ConfirmDialog from '@/components/overlays/ConfirmDialog.svelte';
 import ErrorBoundary from '@/components/ui/ErrorBoundary.svelte';
 import LanguageSwitcher from '@/components/ui/LanguageSwitcher.svelte';
+import SettingsSubNav from '@/components/ui/SettingsSubNav.svelte';
 import { setupFocusTrap } from '@/utils/focusTrap.js';
 import { toastStore } from '@/utils/toastStore.js';
 import type { Account, Identity, Keybindings, ProviderInstance } from '@/utils/types.js';
@@ -74,9 +70,11 @@ let {
   onSetAutoRefreshInterval = undefined,
   emailPreviewEnabled = true,
   onSetEmailPreviewEnabled = undefined,
-  guerrillaDefaultDomain = '',
+  defaultDomain = '',
   onSetGuerrillaDefaultDomain = undefined,
   allInboxes = [] as Account[],
+  autofillBlocklist = [] as string[],
+  onRemoveFromBlocklist = undefined,
 }: {
   context?: 'popup' | 'sidepanel' | 'app';
   onBack?: () => void;
@@ -134,9 +132,11 @@ let {
   onSetAutoRefreshInterval?: (value: number) => void;
   emailPreviewEnabled?: boolean;
   onSetEmailPreviewEnabled?: (value: boolean) => void;
-  guerrillaDefaultDomain?: string;
+  defaultDomain?: string;
   onSetGuerrillaDefaultDomain?: (value: string) => void;
   allInboxes?: Account[];
+  autofillBlocklist?: string[];
+  onRemoveFromBlocklist?: (domain: string) => void;
 } = $props();
 
 let confirmDialog = $state<{ message: string; onConfirm: () => void } | null>(null);
@@ -155,10 +155,11 @@ function formatKeybinding(binding: {
   shiftKey?: boolean;
   altKey?: boolean;
 }): string {
+  const tr = get(t);
   const parts: string[] = [];
-  if (binding.ctrlKey || binding.metaKey) parts.push('Ctrl/Cmd');
-  if (binding.shiftKey) parts.push('Shift');
-  if (binding.altKey) parts.push('Alt');
+  if (binding.ctrlKey || binding.metaKey) parts.push(tr('keyboardShortcuts.ctrlCmd'));
+  if (binding.shiftKey) parts.push(tr('keyboardShortcuts.shift'));
+  if (binding.altKey) parts.push(tr('keyboardShortcuts.alt'));
   parts.push(binding.key.toUpperCase());
   return parts.join(' + ');
 }
@@ -175,10 +176,11 @@ function handleRecordingKeydown(event: KeyboardEvent) {
   event.preventDefault();
   event.stopPropagation();
 
+  const tr = get(t);
   const parts: string[] = [];
-  if (event.ctrlKey || event.metaKey) parts.push('Ctrl/Cmd');
-  if (event.shiftKey) parts.push('Shift');
-  if (event.altKey) parts.push('Alt');
+  if (event.ctrlKey || event.metaKey) parts.push(tr('keyboardShortcuts.ctrlCmd'));
+  if (event.shiftKey) parts.push(tr('keyboardShortcuts.shift'));
+  if (event.altKey) parts.push(tr('keyboardShortcuts.alt'));
   parts.push(event.key.toUpperCase());
 
   recordedKeys = parts.join(' + ');
@@ -239,10 +241,24 @@ function closeConfirmDialog() {
 
 // Dropdown state (identity only — others moved to sub-pages)
 let identityDropdownOpen = $state(false);
+
+// Settings sub-navigation — which subpage pill is highlighted
+let currentSubPage = $state<string | null>(null);
+
+const settingsSubPages = [
+  { label: 'Provider',  icon: 'mail',         action: () => { currentSubPage = 'Provider';  onNavigateToMailProvider(); } },
+  { label: 'Storage',   icon: 'barChart',      action: () => { currentSubPage = 'Storage';   onNavigateToStoragePerformance(); } },
+  { label: 'Shortcuts', icon: 'settings',      action: () => { currentSubPage = 'Shortcuts'; onNavigateToKeybindings(); } },
+  { label: 'Tags',      icon: 'tag',           action: () => { currentSubPage = 'Tags';      onNavigateToTagManagement(); } },
+  { label: 'Filters',   icon: 'filter',        action: () => { currentSubPage = 'Filters';   onNavigateToFiltersManagement(); } },
+  { label: 'Labels',    icon: 'tag',           action: () => { currentSubPage = 'Labels';    onNavigateToLabelManagement(); } },
+  { label: 'Mailboxes', icon: 'archive',       action: () => { currentSubPage = 'Mailboxes'; onNavigateToMailboxManagement(); } },
+  { label: 'Identities',icon: 'user',          action: () => { currentSubPage = 'Identities';onNavigateToIdentities(); } },
+];
 </script>
 
 {#if loading}
-  <div class="flex-1 overflow-y-auto px-4 py-4 space-y-4" style="scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--md-outline, #75777f) 0.2, transparent) transparent;">
+  <div class="flex-1 overflow-y-auto px-4 py-4 space-y-4">
     {#each [1,2,3,4,5] as _}
       <div class="rounded-xl bg-md-primary-container p-4 space-y-2 animate-pulse">
         <div class="h-3 w-24 bg-md-outline-variant rounded"></div>
@@ -251,28 +267,28 @@ let identityDropdownOpen = $state(false);
     {/each}
   </div>
 {:else}
-<ErrorBoundary fallback="Failed to load settings">
+<ErrorBoundary fallback={$t('preferences.failedToLoadSettings')}>
   {#snippet children()}
-    <div class="flex-1 overflow-y-auto px-4 py-4 space-y-5 pb-20" style="scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--md-outline, #75777f) 0.2, transparent) transparent;">
+    <div class="flex-1 overflow-y-auto px-4 py-4 space-y-5 pb-20">
 
   <!-- Page heading -->
   <div class="pt-1">
-    <h1 class="text-lg font-bold text-md-on-surface">Preferences</h1>
-    <p class="text-xs text-md-on-surface/50 mt-0.5">Configure your extension identity.</p>
+    <h1 class="text-lg font-bold text-md-on-surface">{$t('preferences.title')}</h1>
+    <p class="text-xs text-md-on-surface/50 mt-0.5">{$t('preferences.subtitle')}</p>
   </div>
 
   <!-- ── General ── -->
   <section class="space-y-2">
     <div class="flex items-center gap-2 mb-1">
-      <IconSettings class="w-4 h-4 text-md-primary" />
-      <span class="text-sm font-semibold text-md-on-surface">General</span>
+      <Icon name="settings" class="w-4 h-4 text-md-primary" />
+      <span class="text-sm font-semibold text-md-on-surface">{$t('preferences.general')}</span>
     </div>
 
     <!-- Language Switcher -->
     <div class="bg-md-primary-container rounded-xl px-4 py-3 flex items-center justify-between">
       <div>
-        <div class="text-sm font-medium text-md-on-surface">Language</div>
-        <div class="text-xs text-md-on-surface/50">Select your preferred language</div>
+        <div class="text-sm font-medium text-md-on-surface">{$t('preferences.language')}</div>
+        <div class="text-xs text-md-on-surface/50">{$t('preferences.languageDescription')}</div>
       </div>
       <LanguageSwitcher />
     </div>
@@ -284,7 +300,7 @@ let identityDropdownOpen = $state(false);
         <div class="text-xs text-md-on-surface/50">{$t('settings.autoCopyDescription')}</div>
       </div>
       <label class="cursor-pointer">
-        <input type="checkbox" class="sr-only peer" aria-label="Toggle auto-copy" checked={autoCopy} onchange={(e) => { if (onSetAutoCopy) onSetAutoCopy((e.target as HTMLInputElement).checked); onSaveSettings(); }} />
+        <input type="checkbox" class="sr-only peer" aria-label={$t('preferences.toggleAutoCopy')} checked={autoCopy} onchange={(e) => { if (onSetAutoCopy) onSetAutoCopy((e.target as HTMLInputElement).checked); onSaveSettings(); }} />
         <div class="relative w-9 h-5 bg-md-outline-variant peer-checked:bg-md-primary rounded-full peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all"></div>
       </label>
     </div>
@@ -296,10 +312,10 @@ let identityDropdownOpen = $state(false);
     >
       <div class="flex items-center justify-between">
         <div>
-          <div class="text-sm font-medium text-md-on-surface">Storage &amp; Performance</div>
-          <div class="text-xs text-md-on-surface/50 mt-0.5">Favicon caching, storage usage and email retention</div>
+          <div class="text-sm font-medium text-md-on-surface">{$t('preferences.storageAndPerformance')}</div>
+          <div class="text-xs text-md-on-surface/50 mt-0.5">{$t('preferences.storageAndPerformanceDescription')}</div>
         </div>
-        <IconChevronRight class="w-4 h-4 text-md-primary/70" />
+        <Icon name="chevronRight" class="w-4 h-4 text-md-primary/70" />
       </div>
     </button>
   </section>
@@ -308,39 +324,39 @@ let identityDropdownOpen = $state(false);
   <!-- ── Identity ── -->
   <section class="space-y-2">
     <div class="flex items-center gap-2 mb-1">
-      <IconUser class="w-4 h-4 text-md-primary" />
+      <Icon name="user" class="w-4 h-4 text-md-primary" />
       <span class="text-sm font-semibold text-md-on-surface">{$t('identities.title')}</span>
     </div>
 
     <!-- Default Identity for Autofill -->
     <div class="bg-md-primary-container rounded-xl px-4 py-3">
-      <div class="text-sm font-medium text-md-on-surface mb-2">Default for Autofill</div>
+      <div class="text-sm font-medium text-md-on-surface mb-2">{$t('preferences.defaultForAutofill')}</div>
       <div class="relative">
         <button
           class="w-full bg-transparent text-sm outline-none text-md-on-surface appearance-none cursor-pointer font-medium flex items-center justify-between"
           onclick={() => identityDropdownOpen = !identityDropdownOpen}
-          aria-label="Select default identity for autofill"
+          aria-label={$t('preferences.selectDefaultIdentity')}
           disabled={identities.length === 0}
         >
           <span class={identities.length === 0 ? 'text-md-on-surface/40' : ''}>
             {#if identities.length === 0}
-              No identities created yet
+              {$t('preferences.noIdentities')}
             {:else}
-              {identities.find(i => i.id === selectedIdentityId)?.name ?? 'None'}
+              {identities.find(i => i.id === selectedIdentityId)?.name ?? $t('preferences.none')}
             {/if}
           </span>
           {#if identities.length > 0}
-            <IconChevronDown class="w-4 h-4 ml-2" />
+            <Icon name="chevronDown" class="w-4 h-4 ml-2" />
           {/if}
         </button>
         {#if identityDropdownOpen && identities.length > 0}
-          <button class="fixed inset-0 z-40 bg-transparent cursor-default" aria-label="Close dropdown" onclick={() => identityDropdownOpen = false}></button>
+          <button class="fixed inset-0 z-40 bg-transparent cursor-default" aria-label={$t('preferences.closeDropdown')} onclick={() => identityDropdownOpen = false}></button>
           <div class="absolute top-full left-0 right-0 mt-1 bg-md-primary-container rounded-xl shadow-lg border border-md-secondary-container z-50 max-h-60 overflow-y-auto">
             <button
               class="w-full px-4 py-2 text-sm text-left hover:bg-md-secondary-container {!selectedIdentityId ? 'font-semibold text-md-primary' : 'text-md-on-surface'}"
               onclick={() => { if (onSetSelectedIdentityId) onSetSelectedIdentityId(null); identityDropdownOpen = false; }}
             >
-              None
+              {$t('preferences.none')}
             </button>
             {#each identities as identity}
               <button
@@ -360,14 +376,14 @@ let identityDropdownOpen = $state(false);
       class="w-full bg-md-secondary-container hover:bg-md-secondary-container/80 text-sm font-medium text-md-on-surface rounded-xl px-4 py-3 transition-colors"
       onclick={onNavigateToIdentities}
     >
-      View All Identities
+      {$t('preferences.viewAllIdentities')}
     </button>
   </section>
 
   <!-- ── Mail Provider ── -->
   <section class="space-y-2">
     <div class="flex items-center gap-2 mb-1">
-      <IconMail class="w-4 h-4 text-md-primary" />
+      <Icon name="mail" class="w-4 h-4 text-md-primary" />
       <span class="text-sm font-semibold text-md-on-surface">{$t('inbox.title')}</span>
     </div>
 
@@ -378,10 +394,10 @@ let identityDropdownOpen = $state(false);
     >
       <div class="flex items-center justify-between">
         <div>
-          <div class="text-sm font-medium text-md-on-surface">Mail Provider Settings</div>
-          <div class="text-xs text-md-on-surface/50 mt-0.5">Provider, auto-renew, notifications and refresh interval</div>
+          <div class="text-sm font-medium text-md-on-surface">{$t('preferences.mailProviderSettings')}</div>
+          <div class="text-xs text-md-on-surface/50 mt-0.5">{$t('preferences.mailProviderDescription')}</div>
         </div>
-        <IconChevronRight class="w-4 h-4 text-md-primary/70" />
+        <Icon name="chevronRight" class="w-4 h-4 text-md-primary/70" />
       </div>
     </button>
 
@@ -391,16 +407,16 @@ let identityDropdownOpen = $state(false);
       onclick={onNavigateToKeybindings}
     >
       <div class="flex items-center justify-between mb-2">
-        <div class="text-sm font-medium text-md-on-surface">Keyboard Shortcuts</div>
+        <div class="text-sm font-medium text-md-on-surface">{$t('preferences.keyboardShortcuts')}</div>
         <div class="flex items-center gap-1 text-md-primary/70">
           {#if customKeybindingCount > 0}
-            <span class="text-[10px] font-semibold text-md-primary bg-md-primary/15 px-1.5 py-0.5 rounded-full mr-1">{customKeybindingCount} custom</span>
+            <span class="text-[10px] font-semibold text-md-primary bg-md-primary/15 px-1.5 py-0.5 rounded-full mr-1">{$t('keyboardShortcuts.customCount', { values: { n: customKeybindingCount } })}</span>
           {/if}
-          <IconChevronRight class="w-4 h-4" />
+          <Icon name="chevronRight" class="w-4 h-4" />
         </div>
       </div>
       <div class="space-y-1 mb-1">
-        {#each [{ k: 'refreshInbox', label: 'Refresh Inbox' }, { k: 'createInbox', label: 'Create Inbox' }, { k: 'copyEmail', label: 'Copy Email' }] as row}
+        {#each [{ k: 'refreshInbox', label: $t('keyboardShortcuts.refreshInbox') }, { k: 'createInbox', label: $t('keyboardShortcuts.createInbox') }, { k: 'copyEmail', label: $t('keyboardShortcuts.copyEmail') }] as row}
           <div class="flex items-center justify-between text-xs text-md-on-surface/60">
             <span>{row.label}</span>
             <span class="font-mono bg-md-secondary-container px-1.5 py-0.5 rounded text-md-on-surface">{formatKeybinding(keybindings[row.k as keyof typeof keybindings])}</span>
@@ -416,10 +432,10 @@ let identityDropdownOpen = $state(false);
     >
       <div class="flex items-center justify-between">
         <div>
-          <div class="text-sm font-medium text-md-on-surface">Tag Management</div>
-          <div class="text-xs text-md-on-surface/50 mt-0.5">Rename and manage mailbox tags</div>
+          <div class="text-sm font-medium text-md-on-surface">{$t('preferences.tagManagement')}</div>
+          <div class="text-xs text-md-on-surface/50 mt-0.5">{$t('preferences.tagManagementDescription')}</div>
         </div>
-        <IconChevronRight class="w-4 h-4 text-md-primary/70" />
+        <Icon name="chevronRight" class="w-4 h-4 text-md-primary/70" />
       </div>
     </button>
 
@@ -430,10 +446,10 @@ let identityDropdownOpen = $state(false);
     >
       <div class="flex items-center justify-between">
         <div>
-          <div class="text-sm font-medium text-md-on-surface">Filters Management</div>
-          <div class="text-xs text-md-on-surface/50 mt-0.5">View and delete your saved search filters</div>
+          <div class="text-sm font-medium text-md-on-surface">{$t('preferences.filtersManagement')}</div>
+          <div class="text-xs text-md-on-surface/50 mt-0.5">{$t('preferences.filtersManagementDescription')}</div>
         </div>
-        <IconChevronRight class="w-4 h-4 text-md-primary/70" />
+        <Icon name="chevronRight" class="w-4 h-4 text-md-primary/70" />
       </div>
     </button>
 
@@ -444,10 +460,10 @@ let identityDropdownOpen = $state(false);
     >
       <div class="flex items-center justify-between">
         <div>
-          <div class="text-sm font-medium text-md-on-surface">Email Label Management</div>
-          <div class="text-xs text-md-on-surface/50 mt-0.5">Rename or delete email labels</div>
+          <div class="text-sm font-medium text-md-on-surface">{$t('preferences.emailLabelManagement')}</div>
+          <div class="text-xs text-md-on-surface/50 mt-0.5">{$t('preferences.emailLabelManagementDescription')}</div>
         </div>
-        <IconChevronRight class="w-4 h-4 text-md-primary/70" />
+        <Icon name="chevronRight" class="w-4 h-4 text-md-primary/70" />
       </div>
     </button>
 
@@ -458,65 +474,97 @@ let identityDropdownOpen = $state(false);
     >
       <div class="flex items-center justify-between">
         <div>
-          <div class="text-sm font-medium text-md-on-surface">Mailbox Management</div>
-          <div class="text-xs text-md-on-surface/50 mt-0.5">Archive, delete and manage all inboxes</div>
+          <div class="text-sm font-medium text-md-on-surface">{$t('preferences.mailboxManagement')}</div>
+          <div class="text-xs text-md-on-surface/50 mt-0.5">{$t('preferences.mailboxManagementDescription')}</div>
         </div>
-        <IconChevronRight class="w-4 h-4 text-md-primary/70" />
+        <Icon name="chevronRight" class="w-4 h-4 text-md-primary/70" />
       </div>
     </button>
+  </section>
+
+  <!-- ── Autofill Blocklist ── -->
+  <section class="space-y-2">
+    <div class="flex items-center gap-2 mb-1">
+      <Icon name="lock" class="w-4 h-4 text-md-primary" />
+      <span class="text-sm font-semibold text-md-on-surface">{$t('settings.autofillBlocklist')}</span>
+    </div>
+
+    <div class="bg-md-primary-container rounded-xl px-4 py-3">
+      <div class="text-xs text-md-on-surface/50 mb-2">{$t('settings.autofillBlocklistDescription')}</div>
+      {#if autofillBlocklist.length === 0}
+        <div class="text-sm text-md-on-surface/40 py-2">{$t('settings.autofillBlocklistEmpty')}</div>
+        <div class="text-xs text-md-on-surface/30">{$t('settings.autofillBlocklistEmptyDescription')}</div>
+      {:else}
+        <div class="space-y-1">
+          {#each autofillBlocklist as domain (domain)}
+            <div class="flex items-center justify-between py-1.5 px-2 rounded-lg hover:bg-md-secondary-container/50 transition-colors">
+              <span class="text-sm text-md-on-surface font-mono">{domain}</span>
+              {#if onRemoveFromBlocklist}
+                <button
+                  class="text-xs text-md-error hover:text-md-error/80 px-2 py-0.5 rounded hover:bg-md-error-container/30 transition-colors"
+                  onclick={() => onRemoveFromBlocklist(domain)}
+                >
+                  {$t('settings.removeFromBlocklist')}
+                </button>
+              {/if}
+            </div>
+          {/each}
+        </div>
+      {/if}
+    </div>
   </section>
 
   <!-- ── Appearance ── -->
   <section class="space-y-2">
     <div class="flex items-center gap-2 mb-1">
-      <IconSun class="w-4 h-4 text-md-primary" />
+      <Icon name="sun" class="w-4 h-4 text-md-primary" />
       <span class="text-sm font-semibold text-md-on-surface">{$t('settings.appearance')}</span>
     </div>
 
     <div class="bg-md-primary-container rounded-xl px-4 py-3 flex items-center justify-between">
       <div>
-        <div class="text-sm font-medium text-md-on-surface">Theme accent</div>
-        <div class="text-xs text-md-on-surface/50">Browser color picker</div>
+        <div class="text-sm font-medium text-md-on-surface">{$t('preferences.themeAccent')}</div>
+        <div class="text-xs text-md-on-surface/50">{$t('preferences.themeAccentDescription')}</div>
       </div>
       <div class="flex items-center gap-2">
         {#if customColor}
-          <button class="w-5 h-5 flex items-center justify-center rounded-full bg-transparent hover:bg-md-secondary-container transition-colors" aria-label="Reset color" onclick={() => onColorChange('')}>
-            <IconX class="w-3 h-3" />
+          <button class="w-5 h-5 flex items-center justify-center rounded-full bg-transparent hover:bg-md-secondary-container transition-colors" aria-label={$t('preferences.resetColor')} onclick={() => onColorChange('')}>
+            <Icon name="x" class="w-3 h-3" />
           </button>
         {/if}
         <label class="cursor-pointer relative">
-          <div class="w-8 h-8 rounded-full border-4 border-md-secondary-container shadow-md" style="background:{customColor || 'var(--md-primary)'}"></div>
-          <input type="color" class="absolute inset-0 opacity-0 w-full h-full cursor-pointer" aria-label="Choose theme color" value={customColor || '#4c662b'} oninput={(e) => onColorChange((e.target as HTMLInputElement).value)} />
+          <div class="w-8 h-8 rounded-full border-4 border-md-secondary-container shadow-md bg-[{customColor || 'var(--md-primary)'}]"></div>
+          <input type="color" class="absolute inset-0 opacity-0 w-full h-full cursor-pointer" aria-label={$t('preferences.chooseThemeColor')} value={customColor || '#4c662b'} oninput={(e) => onColorChange((e.target as HTMLInputElement).value)} />
         </label>
       </div>
     </div>
 
     <div class="bg-md-primary-container rounded-xl px-4 py-3 flex items-center justify-between">
       <div>
-        <div class="text-sm font-medium text-md-on-surface">Contrast level</div>
-        <div class="text-xs text-md-on-surface/50">Adjust contrast for accessibility</div>
+        <div class="text-sm font-medium text-md-on-surface">{$t('preferences.contrastLevel')}</div>
+        <div class="text-xs text-md-on-surface/50">{$t('preferences.contrastLevelDescription')}</div>
       </div>
       <div class="flex items-center gap-1">
         <button
           class="px-3 py-1.5 text-xs rounded-lg transition-colors {contrastLevel === 'standard' ? 'bg-md-primary text-md-on-primary' : 'bg-md-secondary-container text-md-on-surface hover:bg-md-secondary-container/80'}"
           onclick={() => onContrastLevelChange('standard')}
-          aria-label="Standard contrast"
+          aria-label={$t('preferences.standardContrast')}
         >
-          Standard
+          {$t('preferences.contrastStandard')}
         </button>
         <button
           class="px-3 py-1.5 text-xs rounded-lg transition-colors {contrastLevel === 'medium' ? 'bg-md-primary text-md-on-primary' : 'bg-md-secondary-container text-md-on-surface hover:bg-md-secondary-container/80'}"
           onclick={() => onContrastLevelChange('medium')}
-          aria-label="Medium contrast"
+          aria-label={$t('preferences.mediumContrast')}
         >
-          Medium
+          {$t('preferences.contrastMedium')}
         </button>
         <button
           class="px-3 py-1.5 text-xs rounded-lg transition-colors {contrastLevel === 'high' ? 'bg-md-primary text-md-on-primary' : 'bg-md-secondary-container text-md-on-surface hover:bg-md-secondary-container/80'}"
           onclick={() => onContrastLevelChange('high')}
-          aria-label="High contrast"
+          aria-label={$t('preferences.highContrast')}
         >
-          High
+          {$t('preferences.contrastHigh')}
         </button>
       </div>
     </div>
@@ -525,17 +573,17 @@ let identityDropdownOpen = $state(false);
   <!-- ── Developer Settings ── -->
   <section class="space-y-2">
     <div class="flex items-center gap-2 mb-1">
-      <IconSettings class="w-4 h-4 text-md-primary" />
+      <Icon name="settings" class="w-4 h-4 text-md-primary" />
       <span class="text-sm font-semibold text-md-on-surface">{$t('settings.developer')}</span>
     </div>
 
     <div class="bg-md-primary-container rounded-xl px-4 py-3 flex items-center justify-between">
       <div>
-        <div class="text-sm font-medium text-md-on-surface">Show Developer Options</div>
-        <div class="text-xs text-md-on-surface/50">Enable developer tools</div>
+        <div class="text-sm font-medium text-md-on-surface">{$t('preferences.showDeveloperOptions')}</div>
+        <div class="text-xs text-md-on-surface/50">{$t('preferences.showDeveloperOptionsDescription')}</div>
       </div>
       <label class="cursor-pointer">
-        <input type="checkbox" class="sr-only peer" aria-label="Toggle developer settings" checked={showDeveloperSettings} onchange={onToggleDeveloperSettings} />
+        <input type="checkbox" class="sr-only peer" aria-label={$t('preferences.toggleDeveloperSettings')} checked={showDeveloperSettings} onchange={onToggleDeveloperSettings} />
         <div class="relative w-9 h-5 bg-md-outline-variant peer-checked:bg-md-primary rounded-full peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all"></div>
       </label>
     </div>
@@ -543,11 +591,11 @@ let identityDropdownOpen = $state(false);
     {#if showDeveloperSettings}
       <div class="bg-md-primary-container rounded-xl px-4 py-3 flex items-center justify-between">
         <div>
-          <div class="text-sm font-medium text-md-on-surface">Enable Logging</div>
-          <div class="text-xs text-md-on-surface/50">Show console logs for debugging</div>
+          <div class="text-sm font-medium text-md-on-surface">{$t('preferences.enableLogging')}</div>
+          <div class="text-xs text-md-on-surface/50">{$t('preferences.enableLoggingDescription')}</div>
         </div>
         <label class="cursor-pointer">
-          <input type="checkbox" class="sr-only peer" aria-label="Toggle logging" checked={enableLogging} onchange={onToggleEnableLogging} />
+          <input type="checkbox" class="sr-only peer" aria-label={$t('preferences.toggleLogging')} checked={enableLogging} onchange={onToggleEnableLogging} />
           <div class="relative w-9 h-5 bg-md-outline-variant peer-checked:bg-md-primary rounded-full peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all"></div>
         </label>
       </div>
@@ -556,18 +604,24 @@ let identityDropdownOpen = $state(false);
 
   <!-- ── Data ── -->
   <div class="flex gap-2">
-    <button class="flex-1 px-3 py-1.5 text-sm rounded-xl border border-md-primary text-md-primary hover:bg-md-primary/10 transition-colors" aria-label="Export data" onclick={onExportData}>Export Data</button>
-    <button class="flex-1 px-3 py-1.5 text-sm rounded-xl border border-md-primary text-md-primary hover:bg-md-primary/10 transition-colors" aria-label="Import data" onclick={onImportData}>Import Data</button>
+    <button class="flex-1 px-3 py-1.5 text-sm rounded-xl border border-md-primary text-md-primary hover:bg-md-primary/10 transition-colors" aria-label={$t('preferences.exportDataAria')} onclick={onExportData}>{$t('preferences.exportData')}</button>
+    <button class="flex-1 px-3 py-1.5 text-sm rounded-xl border border-md-primary text-md-primary hover:bg-md-primary/10 transition-colors" aria-label={$t('preferences.importDataAria')} onclick={onImportData}>{$t('preferences.importData')}</button>
   </div>
 
   <!-- ── Danger Zone ── -->
   <section class="rounded-xl border border-md-error/30 bg-md-error/5 px-4 py-4 space-y-2">
-    <div class="text-sm font-bold text-md-error">Danger Zone</div>
-    <div class="text-xs text-md-on-surface/50">Irreversibly reset all configuration to factory defaults.</div>
-    <button class="w-full px-3 py-1.5 text-sm rounded-xl border border-md-error text-md-error hover:bg-md-error/10 mt-1 font-semibold transition-colors" aria-label="Perform hard reset" onclick={() => showConfirmDialog('Are you sure you want to perform a hard reset? This action cannot be undone.', onHardReset)}>Hard Reset</button>
+    <div class="text-sm font-bold text-md-error">{$t('preferences.dangerZone')}</div>
+    <div class="text-xs text-md-on-surface/50">{$t('preferences.dangerZoneDescription')}</div>
+    <button class="w-full px-3 py-1.5 text-sm rounded-xl border border-md-error text-md-error hover:bg-md-error/10 mt-1 font-semibold transition-colors" aria-label={$t('preferences.performHardReset')} onclick={() => showConfirmDialog($t('preferences.hardResetConfirm'), onHardReset)}>{$t('preferences.hardReset')}</button>
   </section>
 
     </div>
+
+  <!-- ── Settings Sub-Navigation Bar ── -->
+  <div class="px-0 pb-1">
+    <SettingsSubNav subPages={settingsSubPages} {currentSubPage} />
+  </div>
+
   {/snippet}
 </ErrorBoundary>
 {/if}

@@ -181,43 +181,11 @@ export async function convertToWebP(
 
 // ── Shared Storage Setup ────────────────────────────────────────────────────
 
-let _sharedListenerRegistered = false;
-
-/**
- * Initialize favicon shared storage.
- * Registers a storage.onChanged listener so localStorage stays in sync with
- * browser.storage.local across all extension contexts (popup, sidepanel, app).
- * Call this once in each entrypoint's onMount.
- */
 export async function initFaviconStorage(): Promise<void> {
-  if (_sharedListenerRegistered) return;
-  _sharedListenerRegistered = true;
-
-  browser.storage.onChanged.addListener((changes, areaName) => {
-    if (areaName !== 'local') return;
-    if (changes[FAVICON_CACHE_KEY]) {
-      const val = changes[FAVICON_CACHE_KEY].newValue;
-      if (val) localStorage.setItem(FAVICON_CACHE_KEY, JSON.stringify(val));
-    }
-    if (changes[FAVICON_ERROR_CACHE_KEY]) {
-      const val = changes[FAVICON_ERROR_CACHE_KEY].newValue;
-      if (val) localStorage.setItem(FAVICON_ERROR_CACHE_KEY, JSON.stringify(val));
-    }
-  });
-
-  logDebug('favicon: shared storage listener registered');
+  // No longer needed, as we only use browser.storage.local directly
 }
 
 // ── Cache Management ──────────────────────────────────────────────────────
-
-function parseCache<T>(raw: string | null): T | null {
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw) as T;
-  } catch {
-    return null;
-  }
-}
 
 /** Enforce max cache entry count via LRU eviction. */
 function _evictIfNeeded(
@@ -234,18 +202,9 @@ function _evictIfNeeded(
 }
 
 /**
- * Persist cache data.
- * Always writes to localStorage for fast synchronous reads.
- * Also writes to browser.storage.local to share state across extension contexts,
- * respecting storage limits.
+ * Persist cache data to browser.storage.local
  */
 async function storeCache<T>(key: string, data: T): Promise<void> {
-  try {
-    localStorage.setItem(key, JSON.stringify(data));
-  } catch (e) {
-    logError('favicon: failed to write to localStorage', e);
-  }
-
   try {
     const estimatedSize = JSON.stringify(data).length;
     const { canWrite, shouldPromptPermission } = await beforeStorageWrite(estimatedSize);
@@ -275,17 +234,14 @@ function cleanExpiredEntries<T extends { timestamp: number }>(
   return cleaned;
 }
 
-export function getFaviconCache(): Record<string, FaviconCacheEntry> {
-  return (
-    parseCache<Record<string, FaviconCacheEntry>>(localStorage.getItem(FAVICON_CACHE_KEY)) ?? {}
-  );
+export async function getFaviconCache(): Promise<Record<string, FaviconCacheEntry>> {
+  const data = await browser.storage.local.get(FAVICON_CACHE_KEY);
+  return (data[FAVICON_CACHE_KEY] as Record<string, FaviconCacheEntry>) || {};
 }
 
-export function getFaviconErrorCache(): Record<string, FaviconErrorEntry> {
-  return (
-    parseCache<Record<string, FaviconErrorEntry>>(localStorage.getItem(FAVICON_ERROR_CACHE_KEY)) ??
-    {}
-  );
+export async function getFaviconErrorCache(): Promise<Record<string, FaviconErrorEntry>> {
+  const data = await browser.storage.local.get(FAVICON_ERROR_CACHE_KEY);
+  return (data[FAVICON_ERROR_CACHE_KEY] as Record<string, FaviconErrorEntry>) || {};
 }
 
 export async function setFaviconCacheSuccess(
@@ -293,7 +249,7 @@ export async function setFaviconCacheSuccess(
   url: string,
   originalUrl?: string
 ): Promise<void> {
-  let cache = getFaviconCache();
+  let cache = await getFaviconCache();
   cache = cleanExpiredEntries(cache);
 
   const settings = (await browser.storage.local.get(['faviconCaching'])) as {
@@ -315,7 +271,7 @@ export async function setFaviconCacheSuccess(
   await storeCache(FAVICON_CACHE_KEY, cache);
 
   // Remove from error cache if present
-  const errorCache = getFaviconErrorCache();
+  const errorCache = await getFaviconErrorCache();
   if (errorCache[domain]) {
     delete errorCache[domain];
     await storeCache(FAVICON_ERROR_CACHE_KEY, errorCache);
@@ -323,32 +279,34 @@ export async function setFaviconCacheSuccess(
 }
 
 export async function setFaviconCacheError(domain: string): Promise<void> {
-  const errorCache = getFaviconErrorCache();
+  const errorCache = await getFaviconErrorCache();
   errorCache[domain] = { timestamp: Date.now() };
   await storeCache(FAVICON_ERROR_CACHE_KEY, errorCache);
 }
 
-export function getCachedFaviconUrl(domain: string): string | null {
-  let cache = getFaviconCache();
+export async function getCachedFaviconUrl(domain: string): Promise<string | null> {
+  let cache = await getFaviconCache();
   cache = cleanExpiredEntries(cache);
   const entry = cache[domain];
   if (!entry) {
     // Persist cleaned cache if anything expired
-    if (Object.keys(cache).length !== Object.keys(getFaviconCache()).length) {
-      storeCache(FAVICON_CACHE_KEY, cache);
+    const newCache = await getFaviconCache();
+    if (Object.keys(cache).length !== Object.keys(newCache).length) {
+      await storeCache(FAVICON_CACHE_KEY, cache);
     }
     return null;
   }
   return entry.webpDataUrl || entry.url || null;
 }
 
-export function hasRecentFaviconError(domain: string): boolean {
-  let cache = getFaviconErrorCache();
+export async function hasRecentFaviconError(domain: string): Promise<boolean> {
+  let cache = await getFaviconErrorCache();
   cache = cleanExpiredEntries(cache);
   const entry = cache[domain];
   if (!entry) {
-    if (Object.keys(cache).length !== Object.keys(getFaviconErrorCache()).length) {
-      storeCache(FAVICON_ERROR_CACHE_KEY, cache);
+    const newCache = await getFaviconErrorCache();
+    if (Object.keys(cache).length !== Object.keys(newCache).length) {
+      await storeCache(FAVICON_ERROR_CACHE_KEY, cache);
     }
     return false;
   }
@@ -356,18 +314,16 @@ export function hasRecentFaviconError(domain: string): boolean {
 }
 
 export async function clearFaviconCache(domain: string): Promise<void> {
-  const cache = getFaviconCache();
+  const cache = await getFaviconCache();
   if (!(domain in cache)) return;
   delete cache[domain];
   await storeCache(FAVICON_CACHE_KEY, cache);
 }
 
 /**
- * Clear all favicon cache from both localStorage and browser.storage.local.
+ * Clear all favicon cache from browser.storage.local.
  */
 export async function clearAllFaviconCache(): Promise<void> {
-  localStorage.removeItem(FAVICON_CACHE_KEY);
-  localStorage.removeItem(FAVICON_ERROR_CACHE_KEY);
   try {
     await browser.storage.local.remove([FAVICON_CACHE_KEY, FAVICON_ERROR_CACHE_KEY]);
   } catch (e) {
@@ -376,13 +332,12 @@ export async function clearAllFaviconCache(): Promise<void> {
 }
 
 /** Get cache stats for the settings UI */
-export function getFaviconCacheStats(): { count: number; sizeBytes: number } {
+export async function getFaviconCacheStats(): Promise<{ count: number; sizeBytes: number }> {
   try {
-    const raw = localStorage.getItem(FAVICON_CACHE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      return { count: Object.keys(parsed).length, sizeBytes: raw.length };
-    }
-  } catch {}
-  return { count: 0, sizeBytes: 0 };
+    const cache = await getFaviconCache();
+    const str = JSON.stringify(cache);
+    return { count: Object.keys(cache).length, sizeBytes: str.length };
+  } catch {
+    return { count: 0, sizeBytes: 0 };
+  }
 }

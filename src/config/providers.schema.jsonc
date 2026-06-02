@@ -1,0 +1,249 @@
+// =============================================================================
+// JSON Schema for the providers DSL (providers.jsonc).
+//
+// This schema is intentionally NOT enforced at runtime — it serves as
+// documentation and editor intellisense. Provider configs are validated by
+// src/utils/provider-validation.ts which performs a hand-rolled structural
+// check. Keep this file in sync with the ProviderConfig / OperationConfig
+// TypeScript interfaces in src/utils/email-service.ts.
+//
+// KNOWN DRIFT (tracked in AUDIT.md §A):
+//   - successPath accepts null at runtime (Burner fetchEmails)
+//   - renewalMethod accepts null at runtime (Burner)
+//   - canUnarchive accepts "ifNotExpired" string in addition to boolean
+//   - multiDomain block is not declared here
+//   - multiInstance.instances[] array is not declared here
+//   - emailFetching, ui, retry blocks are not declared here
+//   - randomSelectionDefault is declared but never used
+// =============================================================================
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Provider Configuration Schema",
+  "description": "Schema for email provider configuration in the DSL",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "required": ["id", "name", "apiUrl", "auth", "operations", "expiry"],
+    "properties": {
+      "id": {
+        "type": "string",
+        "description": "Unique identifier for the provider"
+      },
+      "name": {
+        "type": "string",
+        "description": "Human-readable name of the provider"
+      },
+      "apiUrl": {
+        "type": "string",
+        "description": "Base API URL, can include template variables like {instanceUrl}"
+      },
+      "auth": {
+        "type": "object",
+        "required": ["type", "paramName", "description"],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["query_parameter", "header"],
+            "description": "Authentication method type"
+          },
+          "paramName": {
+            "type": "string",
+            "description": "Parameter or header name for the auth token"
+          },
+          "description": {
+            "type": "string",
+            "description": "Description of how authentication works"
+          }
+        }
+      },
+      "operations": {
+        "type": "object",
+        "description": "API operations supported by this provider",
+        "additionalProperties": {
+          "$ref": "#/definitions/operation"
+        }
+      },
+      "expiry": {
+        "type": "object",
+        "required": ["duration", "renewable"],
+        "properties": {
+          "duration": {
+            "type": "number",
+            "description": "Default inbox expiry duration in milliseconds"
+          },
+          "renewable": {
+            "type": "boolean",
+            "description": "Whether inboxes can be renewed"
+          },
+          "renewalMethod": {
+            // Runtime allows null for non-renewable providers (Burner).
+            // Keep the schema strict to flag drift; validation code handles
+            // the null case.
+            "type": ["string", "null"],
+            "description": "Operation name used for renewal (null if non-renewable)"
+          }
+        }
+      },
+      "customEmail": {
+        "type": "object",
+        "properties": {
+          "supported": {
+            "type": "boolean",
+            "description": "Whether custom email addresses are supported"
+          },
+          "operation": {
+            "type": ["string", "null"],
+            "description": "Operation name for setting custom email (null if unsupported)"
+          }
+        }
+      },
+      "headers": {
+        "type": "object",
+        "properties": {
+          "default": {
+            "type": "object",
+            "description": "Default headers to include in all requests"
+          },
+          "credentials": {
+            "type": "string",
+            "enum": ["include", "omit", "same-origin"],
+            "description": "Credentials mode for fetch requests"
+          },
+          "cache": {
+            "type": "string",
+            "enum": ["default", "no-cache", "no-store"],
+            "description": "Cache mode for fetch requests"
+          }
+        }
+      },
+      "forceNewSession": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether force new session is supported"
+          },
+          "params": {
+            "type": "object",
+            "description": "Additional params to force new session"
+          },
+          "headers": {
+            "type": "object",
+            "description": "Additional headers to force new session"
+          },
+          "credentials": {
+            "type": "string",
+            "enum": ["include", "omit", "same-origin"]
+          },
+          "cache": {
+            "type": "string",
+            "enum": ["default", "no-cache", "no-store"]
+          }
+        }
+      },
+      "multiInstance": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether provider supports multiple instances"
+          },
+          "randomSelectionDefault": {
+            "type": "boolean",
+            "description": "Whether to randomly select instance by default"
+          },
+          "instances": {
+            // NOTE: not previously declared in the schema. Added for
+            // completeness — runtime data has this array (Burner).
+            "type": "array",
+            "description": "Available instances for multi-instance providers",
+            "items": {
+              "type": "object",
+              "required": ["id", "apiUrl"],
+              "properties": {
+                "id": { "type": "string" },
+                "name": { "type": "string" },
+                "displayName": { "type": "string" },
+                "apiUrl": { "type": "string", "format": "uri" }
+              }
+            }
+          }
+        }
+      },
+      "multiDomain": {
+        // NOTE: not previously declared in the schema. Added for Guerrilla.
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether provider supports multiple domains"
+          },
+          "domains": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Available domains for the provider"
+          }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "operation": {
+      "type": "object",
+      "required": ["method", "function", "requiredParams", "response", "errorHandling"],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": ["GET", "POST", "PUT", "DELETE"],
+          "description": "HTTP method"
+        },
+        "function": {
+          "type": "string",
+          "description": "API function name or path (e.g., 'get_email_address' or '/inbox/{inboxId}')"
+        },
+        "requiredParams": {
+          "type": "object",
+          "description": "Required parameters with template variable support"
+        },
+        "optionalParams": {
+          "type": "object",
+          "description": "Optional parameters with template variable support"
+        },
+        "response": {
+          "type": "object",
+          "required": ["fields", "errorHandling"],
+          "properties": {
+            "successPath": {
+              // Runtime accepts null (Burner fetchEmails) and "!" negation
+              // prefix (e.g. "!error" = field is absent).
+              "type": ["string", "null"],
+              "description": "Path to check for success (supports ! for negation, null = always assume success)"
+            },
+            "dataPath": {
+              "type": ["string", "null"],
+              "description": "Path to extract data from response"
+            },
+            "fields": {
+              "type": "object",
+              "description": "Field mappings from API response to internal format"
+            }
+          }
+        },
+        "errorHandling": {
+          "type": "object",
+          "required": ["errorPath", "errorMessagePath"],
+          "properties": {
+            "errorPath": {
+              "type": "string",
+              "description": "Path to error field in response"
+            },
+            "errorMessagePath": {
+              "type": "string",
+              "description": "Path to error message in response"
+            }
+          }
+        }
+      }
+    }
+  }
+}

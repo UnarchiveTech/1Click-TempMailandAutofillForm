@@ -1,0 +1,397 @@
+// =============================================================================
+// Mail Provider DSL — configuration-driven backend registry.
+//
+// This file declares every mail provider the extension integrates with. New
+// providers are added by appending an entry; no TypeScript changes are
+// required. See providers.schema.jsonc for the authoritative type contract.
+//
+// Loading contract:
+//   - Bundled at build time via Vite (wxt.config.ts installs a tiny transform
+//     plugin that strips // and /* */ comments + trailing commas).
+//   - Validated at module load in src/utils/email-service.ts.
+//   - First entry is the default provider (DEFAULT_PROVIDER constant).
+//
+// Per-provider template variables used in params / URLs:
+//   {auth.token}         — the session/header token returned by createInbox
+//   {email_id}          — single message ID (single_step providers may not need)
+//   {seq}               — sequence number for incremental fetching
+//   {timestamp}         — ms since epoch (forceNewSession cache busting)
+//   {random}            — Math.random-style nonce (forceNewSession)
+//   {instanceUrl}       — multi-instance base URL (Burner)
+//   {inboxId}           — server-side inbox ID
+//   {emailUser}         — custom username for setEmailUser operations
+// =============================================================================
+
+[
+  {
+    // ─── Guerrilla Mail ────────────────────────────────────────────────────
+    // Free disposable email service, 1h auto-renewable inboxes, 11 domains,
+    // custom-username support. Auth via sid_token query parameter.
+    // Docs: https://docs.guerrillamail.com/
+    "id": "guerrilla",
+    "name": "Guerrilla Mail",
+    "displayName": "Guerrilla Mail",
+    "apiUrl": "https://api.guerrillamail.com/ajax.php",
+    "websiteUrl": "https://guerrillamail.com",
+    "auth": {
+      "type": "query_parameter",
+      "paramName": "sid_token",
+      "description": "Session token returned by get_email_address, must be included in all subsequent requests"
+    },
+    "retry": {
+      "maxAttempts": 3,
+      "delayMs": 1000,
+      "backoffMultiplier": 2
+    },
+    "operations": {
+      "createInbox": {
+        "method": "GET",
+        "function": "get_email_address",
+        "requiredParams": {
+          "ip": "127.0.0.1",
+          "agent": "1ClickExt"
+        },
+        "optionalParams": {
+          "_t": "{timestamp}",
+          "_r": "{random}",
+          "_fresh": "1"
+        },
+        "response": {
+          // `!error` means "field is absent" — Guerrilla returns 200 with an
+          // error object on failure rather than using HTTP status codes.
+          "successPath": "!error",
+          "dataPath": null,
+          "fields": {
+            "address": "email_addr",
+            "token": "sid_token",
+            "timestamp": "email_timestamp",
+            "username": "email_user"
+          }
+        },
+        "errorHandling": {
+          "errorPath": "error",
+          "errorMessagePath": "error"
+        }
+      },
+      "checkEmail": {
+        "method": "GET",
+        "function": "check_email",
+        "requiredParams": {
+          "sid_token": "{auth.token}"
+        },
+        "optionalParams": {
+          "seq": "{seq}"
+        },
+        "response": {
+          "successPath": "!error",
+          "dataPath": null,
+          "fields": {}
+        },
+        "errorHandling": {
+          "errorPath": "error",
+          "errorMessagePath": "error"
+        }
+      },
+      "fetchEmail": {
+        "method": "GET",
+        "function": "fetch_email",
+        "requiredParams": {
+          "sid_token": "{auth.token}",
+          "email_id": "{email_id}"
+        },
+        "optionalParams": {},
+        "response": {
+          "successPath": "!error",
+          "dataPath": null,
+          "fields": {}
+        },
+        "errorHandling": {
+          "errorPath": "error",
+          "errorMessagePath": "error"
+        }
+      },
+      "forgetMe": {
+        "method": "GET",
+        "function": "forget_me",
+        "requiredParams": {
+          "sid_token": "{auth.token}"
+        },
+        "optionalParams": {},
+        "response": {
+          "successPath": "!error",
+          "dataPath": null,
+          "fields": {}
+        },
+        "errorHandling": {
+          "errorPath": "error",
+          "errorMessagePath": "error"
+        }
+      },
+      // Used both for renewal (during expiry handling) and for custom
+      // username setting.
+      "setEmailUser": {
+        "method": "POST",
+        "function": "set_email_user",
+        "requiredParams": {
+          "sid_token": "{auth.token}",
+          "email_user": "{emailUser}"
+        },
+        "optionalParams": {},
+        "response": {
+          "successPath": "!error",
+          "dataPath": null,
+          "fields": {
+            "address": "email_addr",
+            "timestamp": "email_timestamp"
+          }
+        },
+        "errorHandling": {
+          "errorPath": "error",
+          "errorMessagePath": "error"
+        }
+      }
+    },
+    "emailFetching": {
+      "type": "multi_step",
+      "operation": null,
+      "listOperation": "checkEmail",
+      "listPath": "list",
+      "listItemIdField": "mail_id",
+      "detailOperation": "fetchEmail",
+      "detailItemIdParam": "email_id",
+      "detailResponseMapping": {
+        "id": "mail_id",
+        "from": "mail_from",
+        "from_name": "mail_from",
+        "subject": "mail_subject",
+        "body_html": "mail_body",
+        "body_plain": "mail_excerpt",
+        "timestamp_field": "mail_timestamp",
+        "date_field": "mail_date",
+        "fallback_timestamp_field": "ts"
+      },
+      "responseMapping": null,
+      // Sequence tracking enables incremental polling: the client stores the
+      // highest seen `mail_id` and only fetches messages after that.
+      "sequenceTracking": {
+        "enabled": true,
+        "sequenceField": "lastSequence",
+        "listSequenceField": "mail_id",
+        "sequenceOperation": "max"
+      }
+    },
+    "expiry": {
+      // 1 hour
+      "duration": 3600000,
+      "renewable": true,
+      "renewalMethod": "setEmailUser"
+    },
+    "customEmail": {
+      "supported": true,
+      "operation": "setEmailUser"
+    },
+    // Guerrilla offers 11 alternate domains to make address rotation easier.
+    "multiDomain": {
+      "enabled": true,
+      "domains": [
+        "guerrillamail.com",
+        "sharklasers.com",
+        "guerrillamail.info",
+        "grr.la",
+        "guerrillamail.biz",
+        "guerrillamail.de",
+        "guerrillamail.net",
+        "guerrillamail.org",
+        "guerrillamailblock.com",
+        "pokemail.net",
+        "spam4.me"
+      ]
+    },
+    "multiInstance": {
+      "enabled": false,
+      "instances": []
+    },
+    // Guerrilla aggressively caches, so we always send cache-busting params
+    // and headers on session-creating requests.
+    "forceNewSession": {
+      "enabled": true,
+      "params": {
+        "_t": "{timestamp}",
+        "_r": "{random}",
+        "_fresh": "1"
+      },
+      "headers": {
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+        "Pragma": "no-cache",
+        "Expires": "0",
+        "X-Requested-With": "XMLHttpRequest"
+      },
+      "credentials": "omit",
+      "cache": "no-cache"
+    },
+    "headers": {
+      "default": {},
+      "credentials": "include",
+      "cache": "default"
+    },
+    "ui": {
+      "canUnarchive": true,
+      "supportsCustomEmail": true,
+      "multiInstance": false,
+      "supportsCustomInstance": false,
+      "icon": "envelope",
+      "color": "text-md-warning",
+      "description": "Auto-renewing · Editable address"
+    }
+  },
+  {
+    // ─── Burner.kiwi ───────────────────────────────────────────────────────
+    // Custom API contract (see docs/BURNER_API.md) implemented by 3 community
+    // instances. 24h non-renewable inboxes, header-based auth. No custom
+    // username. Users may add their own self-hosted instance via
+    // addCustomInstance in settings.
+    "id": "burner",
+    "name": "Burner.kiwi",
+    "displayName": "Burner.kiwi",
+    // {instanceUrl} is replaced at runtime with the user-selected instance's
+    // apiUrl (or a random one when in default rotation).
+    "apiUrl": "{instanceUrl}",
+    "websiteUrl": "https://burner.kiwi",
+    "auth": {
+      "type": "header",
+      "headerName": "X-Burner-Key",
+      "description": "Bearer token returned by createInbox, must be included in all subsequent requests"
+    },
+    "retry": {
+      "maxAttempts": 3,
+      "delayMs": 1000,
+      "backoffMultiplier": 2
+    },
+    "operations": {
+      "createInbox": {
+        "method": "GET",
+        "function": "/inbox",
+        "requiredParams": {},
+        "optionalParams": {},
+        "response": {
+          "successPath": "success",
+          "dataPath": "result",
+          "fields": {
+            "address": "email.address",
+            "id": "email.id",
+            "token": "token"
+          }
+        },
+        "errorHandling": {
+          "errorPath": "errors",
+          "errorMessagePath": "errors.msg"
+        }
+      },
+      "fetchEmails": {
+        "method": "GET",
+        "function": "/inbox/{inboxId}/messages",
+        "requiredParams": {},
+        "optionalParams": {},
+        "response": {
+          // Burner returns 200 with an empty list when there are no new
+          // messages; we treat any non-error HTTP response as success.
+          "successPath": null,
+          "dataPath": null,
+          "fields": {}
+        },
+        "errorHandling": {
+          "errorPath": "errors",
+          "errorMessagePath": "errors.msg"
+        }
+      },
+      "setEmailUser": {
+        "method": "POST",
+        "function": "/set",
+        "requiredParams": {},
+        "optionalParams": {},
+        "response": {
+          "successPath": "success",
+          "dataPath": null,
+          "fields": {}
+        },
+        "errorHandling": {
+          "errorPath": "errors",
+          "errorMessagePath": "errors.msg"
+        }
+      }
+    },
+    "emailFetching": {
+      "type": "single_step",
+      "operation": "fetchEmails",
+      "dataPath": null,
+      "responseMapping": {
+        "id": "id",
+        "from_name": "from_name",
+        "from": "from_address",
+        "subject": "subject",
+        "body_html": "body_html",
+        "body_plain": "body_plain",
+        "timestamp_field": "received_at"
+      }
+    },
+    "expiry": {
+      // 24 hours
+      "duration": 86400000,
+      "renewable": false,
+      "renewalMethod": null
+    },
+    "customEmail": {
+      "supported": false,
+      "operation": null
+    },
+    "multiInstance": {
+      "enabled": true,
+      "instances": [
+        {
+          "id": "alphac",
+          "name": "alphac",
+          "displayName": "Alphac",
+          "apiUrl": "https://alphac.qzz.io/api/v2"
+        },
+        {
+          "id": "raceco",
+          "name": "raceco",
+          "displayName": "Raceco",
+          "apiUrl": "https://raceco.dpdns.org/api/v2"
+        },
+        {
+          "id": "burnerkiwi",
+          "name": "burnerkiwi",
+          "displayName": "Burner.kiwi",
+          "apiUrl": "https://burner.kiwi/api/v2"
+        }
+      ]
+    },
+    "forceNewSession": {
+      "enabled": false,
+      "params": {},
+      "headers": {},
+      "credentials": "include",
+      "cache": "default"
+    },
+    "headers": {
+      "default": {
+        "Accept": "application/json",
+        "Content-Type": "application/json"
+      },
+      "credentials": "include",
+      "cache": "default"
+    },
+    "ui": {
+      // "ifNotExpired" lets the UI enable the unarchive button conditionally
+      // based on the inbox's current expiry state.
+      "canUnarchive": "ifNotExpired",
+      "supportsCustomEmail": false,
+      "multiInstance": true,
+      "supportsCustomInstance": true,
+      "icon": "flame",
+      "color": "text-md-primary",
+      "description": "24-hour expiry · Multiple instances"
+    }
+  }
+]

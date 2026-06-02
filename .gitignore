@@ -9,9 +9,12 @@ node_modules/
 
 package-lock.json
 
+
 .DS_Store
 *.log
-reference/
-temp_old_inbox.svelte
 
-temp_old_popup.css
+.commandcode/taste/taste.md
+docs/BUNDLE_OPTIMIZATION.md
+reference/
+docs/OTP_EXTRACTION.md
+AUDIT.md

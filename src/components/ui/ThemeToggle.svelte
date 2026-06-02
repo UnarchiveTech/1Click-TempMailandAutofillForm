@@ -1,7 +1,5 @@
 <script lang="ts">
-import IconMonitor from '@/components/icons/IconMonitor.svelte';
-import IconMoon from '@/components/icons/IconMoon.svelte';
-import IconSun from '@/components/icons/IconSun.svelte';
+import Icon from '@/components/icons/Icon.svelte';
 
 let { themeMode = 'system', onThemeChange = () => {} } = $props<{
   themeMode?: 'light' | 'auto' | 'dark';
@@ -15,9 +13,9 @@ let { themeMode = 'system', onThemeChange = () => {} } = $props<{
     class="w-7 h-7 flex items-center justify-center rounded-lg transition-all duration-200 ease-out {themeMode === 'light' ? 'bg-md-primary text-md-on-primary shadow-sm' : 'text-md-on-surface/50 hover:text-md-on-surface hover:bg-md-outline-variant'} active:scale-95"
     title="Light mode"
     aria-label="Light mode"
-    onclick={() => onThemeChange('light')}
+    onclick={(e) => { e.stopPropagation(); onThemeChange('light'); }}
   >
-    <IconSun class="w-4 h-4" />
+    <Icon name="sun" class="w-4 h-4" />
   </button>
 
   <!-- Auto/System Mode -->
@@ -25,9 +23,9 @@ let { themeMode = 'system', onThemeChange = () => {} } = $props<{
     class="w-7 h-7 flex items-center justify-center rounded-lg transition-all duration-200 ease-out {themeMode === 'auto' ? 'bg-md-primary text-md-on-primary shadow-sm' : 'text-md-on-surface/50 hover:text-md-on-surface hover:bg-md-outline-variant'} active:scale-95"
     title="System mode"
     aria-label="System mode"
-    onclick={() => onThemeChange('auto')}
+    onclick={(e) => { e.stopPropagation(); onThemeChange('auto'); }}
   >
-    <IconMonitor class="w-4 h-4" />
+    <Icon name="monitor" class="w-4 h-4" />
   </button>
 
   <!-- Dark Mode -->
@@ -35,8 +33,8 @@ let { themeMode = 'system', onThemeChange = () => {} } = $props<{
     class="w-7 h-7 flex items-center justify-center rounded-lg transition-all duration-200 ease-out {themeMode === 'dark' ? 'bg-md-primary text-md-on-primary shadow-sm' : 'text-md-on-surface/50 hover:text-md-on-surface hover:bg-md-outline-variant'} active:scale-95"
     title="Dark mode"
     aria-label="Dark mode"
-    onclick={() => onThemeChange('dark')}
+    onclick={(e) => { e.stopPropagation(); onThemeChange('dark'); }}
   >
-    <IconMoon class="w-4 h-4" />
+    <Icon name="moon" class="w-4 h-4" />
   </button>
 </div>

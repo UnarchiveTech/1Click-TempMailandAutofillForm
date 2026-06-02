@@ -1,7 +1,10 @@
 import type { browser } from 'wxt/browser';
+import { extractLatestOtp, mapEmailsForDisplay } from '@/utils/email-mapper.js';
 import { ApiError } from '@/utils/errors.js';
-import { logDebug, logError } from '@/utils/logger.js';
-import { formatDate, formatTimeLeft, getEmailStatus, timeAgo } from '@/utils/time.js';
+import { t } from '@/utils/i18n-utils.js';
+import { logError } from '@/utils/logger.js';
+import { getStoredEmailsMap } from '@/utils/storage-keys.js';
+import { formatDate, formatTimeLeft, getEmailStatus } from '@/utils/time.js';
 import type { Account, Email, NotificationSettings } from '@/utils/types.js';
 
 export interface InboxState {
@@ -52,6 +55,8 @@ export async function loadInboxes(
     const activeId = result.activeInboxId;
     const now = Date.now();
 
+    const storedEmailsMap = await getStoredEmailsMap();
+
     const allInboxes = inboxes.map((inbox: Account) => ({
       id: inbox.id,
       address: inbox.address,
@@ -65,7 +70,7 @@ export async function loadInboxes(
           : 'Expired',
       created: formatDate(inbox.createdAt),
       lastUsed: formatDate(inbox.createdAt),
-      received: 0,
+      received: (storedEmailsMap[inbox.address] || []).length,
       expiresAt: inbox.expiresAt,
       sidToken: inbox.sidToken,
       token: inbox.token,
@@ -111,50 +116,25 @@ export async function checkMessages(
     });
     if (response?.success) {
       const msgs = response.messages || [];
-      const { readEmails = {} } = (await ext.storage.local.get(['readEmails'])) as {
+      const { readEmails = {}, inboxes = [] } = (await ext.storage.local.get([
+        'readEmails',
+        'inboxes',
+      ])) as {
         readEmails?: Record<string, boolean>;
+        inboxes?: Account[];
       };
-      const emails = msgs.map((m: Email) => ({
-        id: m.id,
-        from:
-          (m as Email & { from_address?: string }).from_address ||
-          m.from ||
-          m.from_name ||
-          'Unknown',
-        from_name:
-          m.from_name || (m as Email & { from_address?: string }).from_address || m.from || '',
-        subject: m.subject || 'No Subject',
-        time: timeAgo(m.received_at),
-        isOtp: !!m.otp,
-        otp: m.otp || null,
-        body: m.body_plain || (m.body_html || '').replace(/<[^>]*>/g, ''),
-        body_html: m.body_html,
-        unread: !readEmails[m.id],
-        received_at: m.received_at,
-        local_only: m.local_only,
-      }));
+      const inbox = inboxes.find((i) => i.id === inboxId);
+      const emails = mapEmailsForDisplay(msgs, readEmails, inbox?.address || '');
       // Force a new array reference to trigger Svelte reactivity
       setters.setEmails([...emails]);
 
-      const latestOtpMsg = msgs
-        .filter((m: Email) => m.otp)
-        .sort((a: Email, b: Email) => b.received_at - a.received_at)[0];
-      logDebug(`[inbox-actions] latestOtpMsg: ${JSON.stringify(latestOtpMsg)}`);
-      if (latestOtpMsg) {
-        setters.setLatestOtp(latestOtpMsg.otp);
-        setters.setLatestOtpSender(latestOtpMsg.from || '');
-        setters.setLatestOtpSenderName(latestOtpMsg.from_name || '');
-        logDebug(
-          `[inbox-actions] Set OTP - from: ${latestOtpMsg.from}, from_name: ${latestOtpMsg.from_name}`
-        );
-        setters.setOtpContext(
-          [
-            latestOtpMsg.from_name ? `From: ${latestOtpMsg.from_name}` : '',
-            timeAgo(latestOtpMsg.received_at),
-          ]
-            .filter(Boolean)
-            .join(' | ')
-        );
+      const storageForOtp = { _temp: msgs } as Record<string, Email[]>;
+      const otpResult = extractLatestOtp(storageForOtp, 'inbox-actions');
+      if (otpResult) {
+        setters.setLatestOtp(otpResult.otp);
+        setters.setLatestOtpSender(otpResult.sender);
+        setters.setLatestOtpSenderName(otpResult.senderName);
+        setters.setOtpContext(otpResult.context);
       } else {
         setters.setLatestOtp('------');
         setters.setLatestOtpSender('');
@@ -190,9 +170,17 @@ export async function selectAccount(
   }
 }
 
-export function copyEmail(selectedEmail: string, showToast: (message: string) => void) {
-  navigator.clipboard.writeText(selectedEmail);
-  showToast('Email copied to clipboard');
+export async function copyEmail(selectedEmail: string, showToast: (message: string) => void) {
+  try {
+    await navigator.clipboard.writeText(selectedEmail);
+    showToast(await t('toasts.emailCopiedToClipboard'));
+  } catch (error) {
+    logError(
+      'Failed to copy email',
+      undefined,
+      error instanceof Error ? error : new Error(String(error))
+    );
+  }
 }
 
 export async function createInbox(
@@ -220,11 +208,11 @@ export async function createInbox(
       await loadInboxes(ext, setters, true);
       setters.setSelectedEmail(newInbox.address);
       await checkMessages(ext, newInbox.id, '', false, setters);
-      setters.setShowToast('New inbox created', 'success');
+      setters.setShowToast(await t('toasts.newInboxCreated'), 'success');
     } else throw new ApiError(response?.error || 'Failed to create inbox', { response });
   } catch (e: unknown) {
     logError('createInbox error:', undefined, e instanceof Error ? e : new Error(String(e)));
-    setters.setShowToast('Failed to create inbox', 'error');
+    setters.setShowToast(await t('toasts.inboxCreateFailed'), 'error');
   } finally {
     setters.setLoading(false);
   }
@@ -239,20 +227,28 @@ export async function refreshInbox(
   try {
     if (activeInboxId) {
       await checkMessages(ext, activeInboxId, '', false, setters);
-      setters.setShowToast('Inbox refreshed', 'success');
+      setters.setShowToast(await t('toasts.inboxRefreshed'), 'success');
     }
   } catch (e: unknown) {
     logError('refreshInbox error:', undefined, e instanceof Error ? e : new Error(String(e)));
-    setters.setShowToast('Failed to refresh inbox', 'error');
+    setters.setShowToast(await t('toasts.inboxRefreshFailed'), 'error');
   } finally {
     setters.setLoading(false);
   }
 }
 
-export function copyOtp(latestOtp: string, showToast: (message: string) => void) {
+export async function copyOtp(latestOtp: string, showToast: (message: string) => void) {
   if (latestOtp && latestOtp !== '------') {
-    navigator.clipboard.writeText(latestOtp);
-    showToast('OTP copied to clipboard');
+    try {
+      await navigator.clipboard.writeText(latestOtp);
+      showToast(await t('inbox.otpCopied'));
+    } catch (error) {
+      logError(
+        'Failed to copy OTP',
+        undefined,
+        error instanceof Error ? error : new Error(String(error))
+      );
+    }
   }
 }
 
@@ -274,7 +270,10 @@ export async function toggleNotifications(
         currentSettings.notificationSettings?.expiryWarningThreshold ?? 60 * 60 * 1000,
     },
   });
-  setters.setShowToast(`Notifications ${newEnabled ? 'enabled' : 'disabled'}`, 'success');
+  setters.setShowToast(
+    await t('toasts.notificationsToggled', { state: newEnabled ? 'enabled' : 'disabled' }),
+    'success'
+  );
 }
 
 export async function toggleSoundNotifications(
@@ -294,7 +293,10 @@ export async function toggleSoundNotifications(
         currentSettings.notificationSettings?.expiryWarningThreshold ?? 60 * 60 * 1000,
     },
   });
-  setters.setShowToast(`Sound notifications ${newEnabled ? 'enabled' : 'disabled'}`, 'success');
+  setters.setShowToast(
+    await t('toasts.soundNotificationsToggled', { state: newEnabled ? 'enabled' : 'disabled' }),
+    'success'
+  );
 }
 
 export async function setExpiryWarningThreshold(
@@ -313,7 +315,7 @@ export async function setExpiryWarningThreshold(
     },
   });
   setters.setExpiryWarningThreshold(threshold);
-  setters.setShowToast('Expiry warning threshold updated', 'success');
+  setters.setShowToast(await t('toasts.expiryWarningThresholdUpdated'), 'success');
 }
 
 export async function autofillForm(
@@ -323,15 +325,77 @@ export async function autofillForm(
 ) {
   ext.tabs
     .query({ active: true, currentWindow: true })
-    .then(([tab]: Array<{ id?: number }>) => {
+    .then(async ([tab]: Array<{ id?: number }>) => {
       if (tab?.id) {
         ext.tabs
           .sendMessage(tab.id, { action: 'startSignup', email: selectedEmail })
-          .then(() => showToast('Autofill started', 'success'))
-          .catch(() => showToast('Failed to start autofill (content script not loaded)', 'error'));
+          .then(async () => showToast(await t('toasts.autofillStarted'), 'success'))
+          .catch(async () => showToast(await t('toasts.autofillFailedNoContentScript'), 'error'));
       } else {
-        showToast('No active tab found', 'error');
+        showToast(await t('toasts.noActiveTabFound'), 'error');
       }
     })
-    .catch(() => showToast('Failed to start autofill', 'error'));
+    .catch(async () => showToast(await t('toasts.autofillFailed'), 'error'));
+}
+
+type EmailLocalAction = 'archive' | 'delete' | 'restore';
+
+export async function applyEmailLocalAction(
+  ext: typeof browser,
+  emails: Email[],
+  action: EmailLocalAction
+): Promise<{ updated: number; notFound: number }> {
+  if (emails.length === 0) return { updated: 0, notFound: 0 };
+  const storedEmails = await getStoredEmailsMap();
+  const now = Date.now();
+  let updated = 0;
+  let notFound = 0;
+
+  for (const email of emails) {
+    let addr = email.original_inbox;
+    let list = addr ? storedEmails[addr] : undefined;
+    let idx = list ? list.findIndex((e: Email) => e.id === email.id) : -1;
+
+    // Fallback: search all inboxes for the email by id (covers older stored
+    // emails that were stored before storeNewMessages stamped original_inbox).
+    if (idx === -1) {
+      for (const [candidateAddr, candidateList] of Object.entries(storedEmails)) {
+        const candidateIdx = (candidateList as Email[]).findIndex((e) => e.id === email.id);
+        if (candidateIdx !== -1) {
+          addr = candidateAddr;
+          list = candidateList as Email[];
+          idx = candidateIdx;
+          // Stamp original_inbox on the stored copy so future lookups are fast
+          (list[idx] as Email & Record<string, unknown>).original_inbox = candidateAddr;
+          break;
+        }
+      }
+    }
+
+    if (idx === -1 || !list || !addr) {
+      notFound++;
+      continue;
+    }
+
+    const target = list[idx] as Email & Record<string, unknown>;
+    if (action === 'archive') {
+      target.local_archived = true;
+      target.local_archived_at = now;
+    } else if (action === 'delete') {
+      target.local_deleted = true;
+      target.local_deleted_at = now;
+    } else {
+      delete target.local_archived;
+      delete target.local_archived_at;
+      delete target.local_deleted;
+      delete target.local_deleted_at;
+    }
+    list[idx] = target as Email;
+    updated++;
+  }
+
+  if (updated > 0) {
+    await ext.storage.local.set({ storedEmails });
+  }
+  return { updated, notFound };
 }

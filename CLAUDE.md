@@ -20,9 +20,9 @@ This ensures consistency across all entrypoints (Popup, Sidepanel, and App views
 
 ### 2. JSON-Driven Mail Provider Configuration
 
-All mail provider logic must be JSON-driven using `src/config/providers.json`. Do not hardcode provider-specific logic in the code. Instead:
+All mail provider logic must be JSON-driven using `src/config/providers.jsonc`. Do not hardcode provider-specific logic in the code. Instead:
 
-- Read provider configuration from `providers.json`
+- Read provider configuration from `providers.jsonc`
 - Use `loadProviderConfig(provider)` to get provider settings
 - Check configuration flags like `customEmail.supported`, `expiry.renewable`, etc.
 - All provider-specific behaviors should be controlled via JSON configuration

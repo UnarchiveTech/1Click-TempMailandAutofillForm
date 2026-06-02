@@ -3,6 +3,7 @@
  */
 
 import { browser } from 'wxt/browser';
+import { randomToken } from '@/utils/secure-random.js';
 import type { ActivityEvent, ActivityEventType } from '@/utils/types.js';
 
 const MAX_ACTIVITY_EVENTS = 100;
@@ -20,7 +21,7 @@ export async function addActivityEvent(
 ): Promise<void> {
   const events = await getActivityEvents();
   const newEvent: ActivityEvent = {
-    id: `${type}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+    id: `${type}_${Date.now()}_${randomToken(9)}`,
     type,
     timestamp: Date.now(),
     data,

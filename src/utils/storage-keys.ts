@@ -51,16 +51,22 @@ export async function setStorage(key: StorageKey, value: unknown): Promise<void>
   await browser.storage.local.set({ [key]: value });
 }
 
+export function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+export function isBooleanRecord(value: unknown): value is Record<string, boolean> {
+  return isRecord(value) && Object.values(value).every((entry) => typeof entry === 'boolean');
+}
+
 // ---------------------------------------------------------------------------
 // Common typed helpers — eliminate repeated cast boilerplate across the codebase
 // ---------------------------------------------------------------------------
 
 /** Returns the stored inboxes array (defaults to []). */
 export async function getInboxes(): Promise<Account[]> {
-  const { inboxes = [] } = (await browser.storage.local.get(['inboxes'])) as {
-    inboxes?: Account[];
-  };
-  return inboxes;
+  const result = await browser.storage.local.get(['inboxes']);
+  return Array.isArray(result.inboxes) ? (result.inboxes as Account[]) : [];
 }
 
 /** Persists the inboxes array. */
@@ -82,6 +88,12 @@ export async function getStoredEmailsMap(): Promise<Record<string, Email[]>> {
     storedEmails?: Record<string, Email[]>;
   };
   return storedEmails;
+}
+
+/** Returns the read-state map (defaults to {} when storage is malformed). */
+export async function getReadEmailsMap(): Promise<Record<string, boolean>> {
+  const result = await browser.storage.local.get(['readEmails']);
+  return isBooleanRecord(result.readEmails) ? result.readEmails : {};
 }
 
 /** Returns archived emails map (defaults to {}). */
@@ -170,4 +182,39 @@ export async function getProviderInstancesList(): Promise<ProviderInstance[]> {
     providerInstances?: ProviderInstance[];
   };
   return providerInstances;
+}
+
+/** Returns the autofill blocklist (list of blocked domain strings). */
+export async function getAutofillBlocklist(): Promise<string[]> {
+  const { autofillBlocklist = [] } = (await browser.storage.local.get(['autofillBlocklist'])) as {
+    autofillBlocklist?: string[];
+  };
+  return autofillBlocklist;
+}
+
+/** Persists the autofill blocklist. */
+export async function setAutofillBlocklist(blocklist: string[]): Promise<void> {
+  await browser.storage.local.set({ autofillBlocklist: blocklist });
+}
+
+/** Check if a domain is in the autofill blocklist. */
+export async function isDomainBlocked(domain: string): Promise<boolean> {
+  const blocklist = await getAutofillBlocklist();
+  return blocklist.includes(domain);
+}
+
+/** Add a domain to the autofill blocklist. */
+export async function addToAutofillBlocklist(domain: string): Promise<void> {
+  const blocklist = await getAutofillBlocklist();
+  if (!blocklist.includes(domain)) {
+    blocklist.push(domain);
+    await setAutofillBlocklist(blocklist);
+  }
+}
+
+/** Remove a domain from the autofill blocklist. */
+export async function removeFromAutofillBlocklist(domain: string): Promise<void> {
+  const blocklist = await getAutofillBlocklist();
+  const filtered = blocklist.filter((d) => d !== domain);
+  await setAutofillBlocklist(filtered);
 }

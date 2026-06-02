@@ -1,5 +1,5 @@
 <script lang="ts">
-import MainView from '@/components/MainView.svelte';
+import AppLayout from '@/components/AppLayout.svelte';
 </script>
 
-<MainView context="sidepanel" />
+<AppLayout context="sidepanel" />

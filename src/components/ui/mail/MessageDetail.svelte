@@ -1,35 +1,86 @@
 <script lang="ts">
-import DOMPurify from 'dompurify';
+import { onDestroy, onMount, tick } from 'svelte';
 import { browser } from 'wxt/browser';
-import IconBack from '@/components/icons/IconBack.svelte';
-import IconCopy from '@/components/icons/IconCopy.svelte';
-import IconDownload from '@/components/icons/IconDownload.svelte';
-import IconEnvelope from '@/components/icons/IconEnvelope.svelte';
-import IconMonitor from '@/components/icons/IconMonitor.svelte';
-import IconTag from '@/components/icons/IconTag.svelte';
-import IconX from '@/components/icons/IconX.svelte';
+import Icon from '@/components/icons/Icon.svelte';
 import { generateSingleEMLContent } from '@/features/inbox/inbox-export.js';
+import { logError } from '@/utils/logger.js';
+import { initSanitize, sanitizeHtml } from '@/utils/sanitize-html.js';
 import type { Account, Email } from '@/utils/types.js';
 
-let { onBack = () => {}, selectedMessage = null } = $props<{
+let {
+  onBack = () => {},
+  selectedMessage = null,
+  onMarkUnread = () => {},
+} = $props<{
   onBack?: () => void;
   selectedMessage?: Email | null;
+  onMarkUnread?: () => void;
 }>();
 
-// Email tags state
+let sanitizedBody = $state('');
+let _loaded = $state(false);
+
+// Email tags state (declared early so onMount and storage listener can use it)
 let emailTagsMap = $state<Record<string, string[]>>({});
 let tagDialogOpen = $state(false);
 let tagDialogInput = $state('');
+
+let currentEmailTags = $derived(selectedMessage ? emailTagsMap[selectedMessage.id] || [] : []);
+
+onMount(async () => {
+  await initSanitize();
+  _loaded = true;
+  if (selectedMessage) {
+    sanitizedBody = sanitizeHtml(
+      selectedMessage.body_html || `<pre>${selectedMessage.body || ''}</pre>`
+    );
+  }
+});
+
+onMount(() => {
+  void loadEmailTags();
+
+  const handleStorageChange = (
+    changes: Record<string, { oldValue?: unknown; newValue?: unknown }>,
+    areaName: string
+  ) => {
+    if (areaName !== 'local') return;
+    if (changes.emailTags) void loadEmailTags();
+  };
+
+  browser.storage.onChanged.addListener(handleStorageChange);
+  onDestroy(() => {
+    browser.storage.onChanged.removeListener(handleStorageChange);
+  });
+});
+
+// Re-sanitize when message changes
+$effect(() => {
+  if (_loaded && selectedMessage) {
+    sanitizedBody = sanitizeHtml(
+      selectedMessage.body_html || `<pre>${selectedMessage.body || ''}</pre>`
+    );
+  }
+});
 
 async function loadEmailTags() {
   const result = (await browser.storage.local.get(['emailTags'])) as {
     emailTags?: Record<string, string[]>;
   };
-  emailTagsMap = result.emailTags || {};
+  const loaded = result.emailTags || {};
+  // Deep-equal guard: avoid reassigning when the loaded value matches current
+  // state. Reassigning a $state proxy to an equivalent object can cause
+  // {#each} blocks keyed on inner arrays to drop their children.
+  if (!sameTagsMap(loaded, emailTagsMap)) {
+    emailTagsMap = loaded;
+  }
 }
 
 async function saveEmailTagsToStorage() {
-  await browser.storage.local.set({ emailTags: emailTagsMap });
+  // Snapshot the $state proxy into a plain object so structured-clone
+  // serialization in chrome.storage.local is deterministic.
+  const snapshot = $state.snapshot(emailTagsMap) as Record<string, string[]>;
+  await browser.storage.local.set({ emailTags: snapshot });
 }
 
 function openTagDialog() {
@@ -49,25 +100,48 @@ async function saveEmailTags() {
     .split(',')
     .map((t) => t.trim())
     .filter(Boolean);
-  if (tags.length === 0) {
-    const next = { ...emailTagsMap };
-    delete next[selectedMessage.id];
-    emailTagsMap = next;
-  } else {
-    emailTagsMap = { ...emailTagsMap, [selectedMessage.id]: tags };
+  // Build a fresh top-level object so Svelte 5's proxy treats the assignment
+  // as a structural change and notifies every reader (including the
+  // {#each} over the inner array).
+  const newMap: Record<string, string[]> = {};
+  for (const [k, v] of Object.entries(emailTagsMap)) {
+    if (Array.isArray(v)) newMap[k] = v.slice();
   }
+  if (tags.length === 0) {
+    delete newMap[selectedMessage.id];
+  } else {
+    newMap[selectedMessage.id] = tags.slice();
+  }
+  emailTagsMap = newMap;
+  // Force the DOM commit before persisting so storage + UI stay in sync.
+  await tick();
   await saveEmailTagsToStorage();
   closeTagDialog();
 }
 
+function sameTagsMap(a: Record<string, string[]>, b: Record<string, string[]>): boolean {
+  const aKeys = Object.keys(a);
+  const bKeys = Object.keys(b);
+  if (aKeys.length !== bKeys.length) return false;
+  for (const k of aKeys) {
+    const av = a[k];
+    const bv = b[k];
+    if (!Array.isArray(av) || !Array.isArray(bv)) return false;
+    if (av.length !== bv.length) return false;
+    for (let i = 0; i < av.length; i++) {
+      if (av[i] !== bv[i]) return false;
+    }
+  }
+  return true;
+}
+
 let allEmailTags = $derived.by(() => {
   const set = new Set<string>();
-  for (const tags of Object.values(emailTagsMap)) for (const t of tags) set.add(t);
+  for (const tags of Object.values(emailTagsMap)) {
+    if (!Array.isArray(tags)) continue;
+    for (const t of tags) set.add(t);
+  }
   return Array.from(set).sort();
-});
-
-$effect(() => {
-  loadEmailTags();
 });
 
 function _forwardMessage() {
@@ -82,7 +156,7 @@ function _forwardMessage() {
       `${selectedMessage.body || 'No content'}`
   );
   const mailtoLink = `mailto:?subject=${subject}&body=${body}`;
-  window.open(mailtoLink, '_self');
+  browser.tabs.create({ url: mailtoLink });
 }
 
 async function _expandView() {
@@ -119,7 +193,7 @@ async function _downloadAsEML() {
 
     const currentInbox = inboxes.find((inbox) => inbox.id === activeInboxId);
     if (!currentInbox) {
-      console.error('No current inbox found');
+      logError('No current inbox found');
       return;
     }
 
@@ -137,7 +211,11 @@ async function _downloadAsEML() {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   } catch (error) {
-    console.error('Failed to download email as EML:', error);
+    logError(
+      'Failed to download email as EML:',
+      undefined,
+      error instanceof Error ? error : new Error(String(error))
+    );
   }
 }
 </script>
@@ -146,25 +224,29 @@ async function _downloadAsEML() {
 <div class="sticky top-0 bg-md-surface z-10">
   <div class="flex items-center justify-between px-1 py-2 border-b border-md-outline-variant">
     <button id="button-back" class="px-2 py-1 text-md-primary rounded-lg bg-transparent hover:bg-md-surface-variant transition-colors flex items-center gap-1" aria-label="Go back" onclick={onBack}>
-      <IconBack class="w-4 h-4" />
+      <Icon name="back" class="w-4 h-4" />
       Back
     </button>
     <div class="flex items-center gap-1">
       <button id="button-expand-view" class="px-2 py-1 text-md-primary rounded-lg bg-transparent hover:bg-md-surface-variant transition-colors flex items-center gap-1" aria-label="Expand view" onclick={_expandView}>
-        <IconMonitor class="w-4 h-4" />
+        <Icon name="monitor" class="w-4 h-4" />
         Expand View
       </button>
       <button id="button-download" class="px-2 py-1 text-md-primary rounded-lg bg-transparent hover:bg-md-surface-variant transition-colors flex items-center gap-1" aria-label="Download as EML" onclick={_downloadAsEML}>
-        <IconDownload class="w-4 h-4" />
+        <Icon name="download" class="w-4 h-4" />
         Download
       </button>
       <button id="button-forward" class="px-2 py-1 text-md-primary rounded-lg bg-transparent hover:bg-md-surface-variant transition-colors flex items-center gap-1" aria-label="Forward message" onclick={_forwardMessage}>
-        <IconEnvelope class="w-4 h-4" />
+        <Icon name="envelope" class="w-4 h-4" />
         Forward
       </button>
       <button id="button-tag" class="px-2 py-1 text-md-primary rounded-lg bg-transparent hover:bg-md-surface-variant transition-colors flex items-center gap-1" aria-label="Tag email" onclick={openTagDialog}>
-        <IconTag class="w-4 h-4" />
+        <Icon name="tag" class="w-4 h-4" />
         Tag
+      </button>
+      <button id="button-mark-unread" class="px-2 py-1 text-md-primary rounded-lg bg-transparent hover:bg-md-surface-variant transition-colors flex items-center gap-1" aria-label="Mark as unread" onclick={() => onMarkUnread()}>
+        <Icon name="mail" class="w-4 h-4" />
+        Mark unread
       </button>
     </div>
   </div>
@@ -175,9 +257,9 @@ async function _downloadAsEML() {
         <div>From: {selectedMessage.from}</div>
         <div>{selectedMessage.time}</div>
       </div>
-      {#if emailTagsMap[selectedMessage.id]?.length}
+      {#if currentEmailTags.length}
         <div class="flex flex-wrap gap-1.5 mt-2">
-          {#each emailTagsMap[selectedMessage.id] as tag}
+          {#each currentEmailTags as tag (tag)}
             <span class="px-2 py-0.5 text-[10px] font-semibold rounded-full bg-md-primary/15 text-md-primary">{tag}</span>
           {/each}
         </div>
@@ -195,7 +277,7 @@ async function _downloadAsEML() {
       <div class="flex items-center justify-between mb-3">
         <h3 class="text-sm font-bold text-md-on-surface">Tag Email</h3>
         <button class="w-7 h-7 flex items-center justify-center rounded-full hover:bg-md-surface-variant transition-colors" onclick={closeTagDialog} aria-label="Close">
-          <IconX class="w-4 h-4 text-md-on-surface/60" />
+          <Icon name="x" class="w-4 h-4 text-md-on-surface/60" />
         </button>
       </div>
       <p class="text-xs text-md-on-surface/60 mb-2">Enter comma-separated tags (e.g. Banking, Shopping)</p>
@@ -233,16 +315,16 @@ async function _downloadAsEML() {
               <div class="text-xs font-medium text-md-primary mb-1">Verification Code</div>
               <div class="text-2xl font-bold text-md-primary font-mono">{selectedMessage.otp}</div>
             </div>
-            <button id="button-copy-otp" class="w-8 h-8 flex items-center justify-center rounded-lg bg-transparent hover:bg-md-surface-variant transition-colors" aria-label="Copy OTP" onclick={() => navigator.clipboard.writeText(selectedMessage.otp)}>
-              <IconCopy class="w-5 h-5 text-md-primary" />
+            <button id="button-copy-otp" class="w-8 h-8 flex items-center justify-center rounded-lg bg-transparent hover:bg-md-surface-variant transition-colors" aria-label="Copy OTP" onclick={async () => { try { await navigator.clipboard.writeText(selectedMessage.otp); } catch(e) { logError('Failed to copy', undefined, e instanceof Error ? e : new Error(String(e))); } }}>
+              <Icon name="copy" class="w-5 h-5 text-md-primary" />
             </button>
           </div>
         </div>
       </div>
     {/if}
-    <div class="bg-md-surface-container-low rounded-xl flex-1 overflow-y-auto mt-3" style="scrollbar-width: thin; scrollbar-color: var(--md-primary) transparent;">
+    <div class="bg-md-surface-container-low rounded-xl flex-1 overflow-y-auto mt-3">
       <div class="p-3">
-        <div class="text-sm">{@html DOMPurify.sanitize(selectedMessage.body_html || `<pre>${selectedMessage.body || ''}</pre>`)}</div>
+        <div class="text-sm">{@html sanitizedBody}</div>
       </div>
     </div>
   </div>

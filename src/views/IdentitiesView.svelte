@@ -1,15 +1,14 @@
 <script lang="ts">
+import { onDestroy } from 'svelte';
 import { t } from 'svelte-i18n';
 import { browser } from 'wxt/browser';
-import IconChevronDown from '@/components/icons/IconChevronDown.svelte';
-import IconPlus from '@/components/icons/IconPlus.svelte';
-import IconTrash from '@/components/icons/IconTrash.svelte';
-import IconUser from '@/components/icons/IconUser.svelte';
-import IconX from '@/components/icons/IconX.svelte';
+import Icon from '@/components/icons/Icon.svelte';
+import DragHint from '@/components/ui/DragHint.svelte';
 import FaviconImage from '@/components/ui/FaviconImage.svelte';
 import {
   deleteIdentity,
   loadIdentities,
+  reorderIdentities,
   saveIdentity,
   selectIdentity,
 } from '@/features/identities/identity-actions.js';
@@ -90,6 +89,59 @@ let selectionMode = $state(false);
 let selectedIds = $state<Set<string>>(new Set());
 let holdTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
+// Drag-and-drop state
+let draggedIdentityId = $state<string | null>(null);
+let dropTargetIdentityId = $state<string | null>(null);
+let dragHintDismissed = $state(false);
+function handleIdentityDragHintDismiss(): void {
+  dragHintDismissed = true;
+}
+
+function handleIdentityDragStart(e: DragEvent, identityId: string) {
+  if (selectionMode) {
+    e.preventDefault();
+    return;
+  }
+  draggedIdentityId = identityId;
+  dragHintDismissed = true;
+  if (e.dataTransfer) {
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', identityId);
+  }
+}
+
+function handleIdentityDragOver(e: DragEvent, identityId: string) {
+  if (!draggedIdentityId || draggedIdentityId === identityId) return;
+  e.preventDefault();
+  dropTargetIdentityId = identityId;
+  if (e.dataTransfer) {
+    e.dataTransfer.dropEffect = 'move';
+  }
+}
+
+function handleIdentityDragLeave(identityId: string) {
+  if (dropTargetIdentityId === identityId) {
+    dropTargetIdentityId = null;
+  }
+}
+
+async function handleIdentityDrop(e: DragEvent, targetId: string) {
+  e.preventDefault();
+  const sourceId = draggedIdentityId;
+  draggedIdentityId = null;
+  dropTargetIdentityId = null;
+  if (!sourceId || sourceId === targetId) return;
+  const fromIndex = identities.findIndex((i: Identity) => i.id === sourceId);
+  const toIndex = identities.findIndex((i: Identity) => i.id === targetId);
+  if (fromIndex === -1 || toIndex === -1) return;
+  await reorderIdentities(browser, identitySetters, fromIndex, toIndex);
+}
+
+function handleIdentityDragEnd() {
+  draggedIdentityId = null;
+  dropTargetIdentityId = null;
+}
+
 let newIdentityFirstNames = $state('');
 let newIdentityLastNames = $state('');
 let newIdentityName = $state('');
@@ -97,7 +149,16 @@ let newIdentityUseRandomPassword = $state(true);
 let newIdentityCustomPassword = $state('');
 let newIdentityPhone = $state('');
 let newIdentityPin = $state('');
+let newIdentityDomainHints = $state<string[]>([]);
+let newDomainHintInput = $state('');
 let validationError = $state('');
+
+onDestroy(() => {
+  for (const timer of holdTimers.values()) {
+    clearTimeout(timer);
+  }
+  holdTimers.clear();
+});
 
 const identitySetters = {
   setIdentities: (ids: Identity[]) => {
@@ -121,6 +182,8 @@ function openIdentityEditor(identity: Identity) {
   newIdentityCustomPassword = identity.customPassword || '';
   newIdentityPhone = identity.phone || '';
   newIdentityPin = identity.pin || '';
+  newIdentityDomainHints = identity.domainHints ? [...identity.domainHints] : [];
+  newDomainHintInput = '';
 }
 
 function closeIdentityEditor() {
@@ -132,6 +195,8 @@ function closeIdentityEditor() {
   newIdentityCustomPassword = '';
   newIdentityPhone = '';
   newIdentityPin = '';
+  newIdentityDomainHints = [];
+  newDomainHintInput = '';
   validationError = '';
 }
 
@@ -161,6 +226,7 @@ async function saveIdentityChanges() {
         : validateOptionalPassword(newIdentityCustomPassword),
       phone: validateOptionalPhone(newIdentityPhone),
       pin: validateOptionalPin(newIdentityPin),
+      domainHints: newIdentityDomainHints.filter((h) => h.trim()),
     };
 
     await saveIdentity(browser, updatedIdentity, identitySetters);
@@ -318,18 +384,18 @@ loadIdentitiesData();
           disabled={selectedIds.size === 0}
           onclick={deleteSelected}
         >
-          <IconTrash class="w-4 h-4" />
+          <Icon name="trash" class="w-4 h-4" />
           Delete
         </button>
         <button
           class="px-3 py-1.5 text-sm rounded-lg bg-md-secondary-container text-md-on-surface hover:bg-md-secondary-container/80 transition-colors"
           onclick={exitSelectionMode}
         >
-          <IconX class="w-4 h-4" />
+          <Icon name="x" class="w-4 h-4" />
         </button>
       {:else}
         <button class="btn-primary px-3 py-1.5 text-sm rounded-lg flex items-center gap-2" onclick={openCreateDialog}>
-          <IconPlus class="w-4 h-4" />
+          <Icon name="plus" class="w-4 h-4" />
           {$t('identities.create')}
         </button>
       {/if}
@@ -337,13 +403,13 @@ loadIdentitiesData();
   </div>
 
   <!-- Content -->
-  <div class="flex-1 overflow-y-auto pb-16" style="scrollbar-width: thin; scrollbar-color: var(--md-primary) transparent;">
+  <div class="flex-1 overflow-y-auto pb-16">
     {#if editingIdentity}
       <!-- Identity Editor -->
       <div class="p-5">
         <div class="flex items-center gap-3 mb-6">
           <button class="w-8 h-8 flex items-center justify-center rounded-lg bg-transparent hover:bg-md-secondary-container transition-colors" onclick={closeIdentityEditor} aria-label="Close">
-            <IconX class="w-5 h-5" />
+            <Icon name="x" class="w-5 h-5" />
           </button>
           <h3 class="font-semibold text-base">{$t('identities.edit')}</h3>
         </div>
@@ -435,6 +501,60 @@ loadIdentitiesData();
             />
           </div>
 
+          <!-- Domain Hints -->
+          <div class="bg-md-primary-container rounded-xl px-4 py-3">
+            <div class="text-sm font-medium text-md-secondary mb-1">{$t('identities.domainHints')}</div>
+            <p class="text-xs text-md-on-surface/50 mb-3">{$t('identities.domainHintsDescription')}</p>
+            <div class="flex gap-2 mb-2">
+              <input
+                type="text"
+                class="flex-1 px-3 py-2 rounded-lg border border-md-outline-variant text-sm bg-md-secondary-container outline-none focus:border-md-primary focus:ring-1 focus:ring-md-primary"
+                placeholder="github.com"
+                bind:value={newDomainHintInput}
+                onkeydown={(e) => {
+                  if (e.key === 'Enter' && newDomainHintInput.trim()) {
+                    e.preventDefault();
+                    const hint = newDomainHintInput.trim().toLowerCase();
+                    if (!newIdentityDomainHints.includes(hint)) {
+                      newIdentityDomainHints = [...newIdentityDomainHints, hint];
+                    }
+                    newDomainHintInput = '';
+                  }
+                }}
+              />
+              <button
+                class="px-3 py-2 rounded-lg bg-md-secondary-container text-md-on-surface hover:bg-md-secondary-container/80 transition-colors text-sm"
+                onclick={() => {
+                  if (newDomainHintInput.trim()) {
+                    const hint = newDomainHintInput.trim().toLowerCase();
+                    if (!newIdentityDomainHints.includes(hint)) {
+                      newIdentityDomainHints = [...newIdentityDomainHints, hint];
+                    }
+                    newDomainHintInput = '';
+                  }
+                }}
+              >
+                {$t('common.add')}
+              </button>
+            </div>
+            {#if newIdentityDomainHints.length > 0}
+              <div class="flex flex-wrap gap-1.5">
+                {#each newIdentityDomainHints as hint, i}
+                  <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-md-secondary-container text-xs text-md-on-surface">
+                    {hint}
+                    <button
+                      class="w-3.5 h-3.5 flex items-center justify-center rounded-full hover:bg-md-error/20 transition-colors"
+                      onclick={() => { newIdentityDomainHints = newIdentityDomainHints.filter((_, idx) => idx !== i); }}
+                      aria-label="Remove"
+                    >
+                      <Icon name="x" class="w-2.5 h-2.5" />
+                    </button>
+                  </span>
+                {/each}
+              </div>
+            {/if}
+          </div>
+
           {#if validationError}
             <p class="text-xs text-md-error">{validationError}</p>
           {/if}
@@ -450,32 +570,52 @@ loadIdentitiesData();
       <div class="p-5 space-y-3">
         {#each identities as identity}
           {@const isChecked = selectedIds.has(identity.id)}
+          {@const isDragging = draggedIdentityId === identity.id}
+          {@const isDropTarget = dropTargetIdentityId === identity.id}
           {@const linkedDomains = [...new Set(savedLogins.filter((l: CredentialsHistoryItem) => l.identityId != null && String(l.identityId) === identity.id).map((l: CredentialsHistoryItem) => {
               try {
-                const site = (l as any).website || l.domain || '';
+                const site = l.website || l.domain || '';
                 return site.startsWith('http') ? new URL(site).hostname : site;
               } catch { return l.domain || ''; }
             }).filter(Boolean))].slice(0, 5)}
           <div
-            class="bg-md-tertiary-container rounded-xl px-4 py-3 flex items-center justify-between transition-all {selectedIdentityId === identity.id && !selectionMode ? 'ring-2 ring-md-primary' : ''} {selectionMode && isChecked ? 'ring-2 ring-md-secondary' : ''}"
-            onclick={() => {
-              if (selectionMode) { toggleSelect(identity.id); }
-              else { openIdentityEditor(identity); }
-            }}
-            onpointerdown={() => { if (!selectionMode) startHold(identity.id); }}
-            onpointerup={() => cancelHold(identity.id)}
-            onpointerleave={() => cancelHold(identity.id)}
-            onkeydown={(e) => {
-              if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault();
-                if (selectionMode) toggleSelect(identity.id);
-                else openIdentityEditor(identity);
-              }
-            }}
-            role="button"
-            tabindex="0"
-            aria-label={`Edit identity: ${identity.name}`}
+            class="relative bg-md-tertiary-container rounded-xl px-4 py-3 flex items-center justify-between transition-all {selectedIdentityId === identity.id && !selectionMode ? 'ring-2 ring-md-primary' : ''} {selectionMode && isChecked ? 'ring-2 ring-md-secondary' : ''} {!selectionMode ? 'cursor-move' : ''} {isDragging ? 'opacity-50' : ''} {isDropTarget ? 'ring-2 ring-md-primary' : ''}"
+            draggable={!selectionMode}
+            role="listitem"
+            ondragstart={(e) => handleIdentityDragStart(e, identity.id)}
+            ondragover={(e) => handleIdentityDragOver(e, identity.id)}
+            ondragleave={() => handleIdentityDragLeave(identity.id)}
+            ondrop={(e) => handleIdentityDrop(e, identity.id)}
+            ondragend={handleIdentityDragEnd}
+            aria-label={$t('identities.dragToReorder', { values: { name: identity.name } })}
           >
+            {#if identity === identities[0] && !selectionMode && !dragHintDismissed}
+              <DragHint
+                hintKey="dragHintSeen_identities"
+                text={$t('identities.dragHint')}
+                visible={true}
+                onDismiss={handleIdentityDragHintDismiss}
+              />
+            {/if}
+            <div
+              class="flex items-center gap-3 flex-1 min-w-0"
+              onclick={() => {
+                if (selectionMode) { toggleSelect(identity.id); }
+                else { openIdentityEditor(identity); }
+              }}
+              onpointerdown={() => { if (!selectionMode) startHold(identity.id); }}
+              onpointerup={() => cancelHold(identity.id)}
+              onpointerleave={() => cancelHold(identity.id)}
+              onkeydown={(e: KeyboardEvent) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  if (selectionMode) toggleSelect(identity.id);
+                  else openIdentityEditor(identity);
+                }
+              }}
+              role="button"
+              tabindex="0"
+            >
             <div class="flex items-center gap-3">
               {#if selectionMode}
                 <div class="w-5 h-5 rounded-full border-2 flex items-center justify-center shrink-0 {isChecked ? 'bg-md-secondary border-md-secondary' : 'border-md-outline-variant'}">
@@ -483,7 +623,7 @@ loadIdentitiesData();
                 </div>
               {:else}
                 <div class="w-10 h-10 rounded-full bg-md-primary/10 flex items-center justify-center">
-                  <IconUser class="w-5 h-5 text-md-primary" />
+                  <Icon name="user" class="w-5 h-5 text-md-primary" />
                 </div>
               {/if}
               <div>
@@ -513,7 +653,19 @@ loadIdentitiesData();
                     {/if}
                   </div>
                 {/if}
+                {#if identity.domainHints && identity.domainHints.length > 0}
+                  <div class="flex items-center gap-1 mt-1 flex-wrap">
+                    <Icon name="globe" class="w-3 h-3 text-md-tertiary shrink-0" />
+                    {#each identity.domainHints.slice(0, 3) as hint}
+                      <span class="text-[10px] px-1.5 py-0.5 rounded-full bg-md-primary/10 text-md-primary">{hint}</span>
+                    {/each}
+                    {#if identity.domainHints.length > 3}
+                      <span class="text-[9px] text-md-on-surface/40">+{identity.domainHints.length - 3}</span>
+                    {/if}
+                  </div>
+                {/if}
               </div>
+            </div>
             </div>
             <div class="flex items-center gap-2">
               {#if !selectionMode}
@@ -528,7 +680,7 @@ loadIdentitiesData();
                   }}
                   aria-label="Delete identity"
                 >
-                  <IconTrash class="w-4 h-4" />
+                  <Icon name="trash" class="w-4 h-4" />
                 </button>
               {/if}
             </div>
@@ -540,7 +692,7 @@ loadIdentitiesData();
 
   <!-- Default for Autofill - Fixed at bottom (same styling as InboxView autofill strip) -->
   <div class="absolute bottom-0 left-0 right-0 z-10 flex justify-center transition-all duration-200">
-    <div class="px-3 bg-md-primary-container rounded-xl" style="height: 40px; width: 350px; display: flex; align-items: center; box-sizing: border-box;">
+    <div class="h-[40px] w-[350px] flex items-center box-border px-3 bg-md-primary-container rounded-xl">
       <div class="flex items-center gap-2 w-full">
         <!-- Identity Selector -->
         <div class="relative flex-1 min-w-0">
@@ -556,15 +708,15 @@ loadIdentitiesData();
               }
             }}
           >
-            <IconUser class="w-3 h-3 text-md-secondary flex-shrink-0" />
+            <Icon name="user" class="w-3 h-3 text-md-secondary flex-shrink-0" />
             <div class="flex-1 min-w-0 text-[11px] font-medium text-md-on-surface pr-2 truncate">
               {identities.find(i => i.id === selectedIdentityId)?.name || $t('identities.select')}
             </div>
-            <IconChevronDown class="w-2.5 h-2.5 text-md-on-surface/40 flex-shrink-0 transition-transform {showIdentityDropdown ? 'rotate-180' : ''}" />
+            <Icon name="chevronDown" class="w-2.5 h-2.5 text-md-on-surface/40 flex-shrink-0 transition-transform {showIdentityDropdown ? 'rotate-180' : ''}" />
 
             <!-- Dropup Menu -->
             {#if showIdentityDropdown}
-              <div class="absolute bottom-full left-0 right-0 mb-1 bg-md-primary-container border border-md-secondary-container rounded-xl shadow-lg z-50 max-h-48 overflow-y-auto" style="scrollbar-width: thin; scrollbar-color: var(--md-primary) transparent;">
+              <div class="absolute bottom-full left-0 right-0 mb-1 bg-md-primary-container border border-md-secondary-container rounded-xl shadow-lg z-50 max-h-48 overflow-y-auto">
                 {#each identities as identity}
                   <button
                     class="w-full text-left px-3 py-2 text-[11px] font-medium text-md-on-surface hover:bg-md-secondary-container transition-colors first:rounded-t-xl last:rounded-b-xl"
@@ -593,7 +745,7 @@ loadIdentitiesData();
         <div class="flex items-center justify-between mb-4">
           <h3 class="font-semibold text-base">{$t('identities.create')}</h3>
           <button class="w-8 h-8 flex items-center justify-center rounded-lg bg-transparent hover:bg-md-secondary-container transition-colors" onclick={closeCreateDialog} aria-label="Close">
-            <IconX class="w-5 h-5" />
+            <Icon name="x" class="w-5 h-5" />
           </button>
         </div>
 

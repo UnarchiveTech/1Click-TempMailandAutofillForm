@@ -7,17 +7,74 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      version_override:
+        description: 'Build with this version instead of package.json (e.g. "3.0.0" or "v3.0.0"). Leave empty to use package.json.'
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: write
 
 jobs:
+  # ─── Validate version before doing any work ────────────────────────────
+  # Single source of truth: package.json's "version" field. Tags and manual
+  # overrides must agree with it (or explicitly override it for re-builds).
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      from_tag: ${{ steps.resolve.outputs.from_tag }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Resolve build version
+        id: resolve
+        run: |
+          set -euo pipefail
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            echo "PR build — using package.json version: $PKG_VERSION"
+            echo "version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
+            echo "from_tag=false"       >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+            TAG_VERSION="${TAG#v}"
+            if [[ "$TAG_VERSION" != "$PKG_VERSION" ]]; then
+              echo "::error::Tag $TAG does not match package.json version $PKG_VERSION."
+              echo "::error::Run: bun run bump-version $TAG_VERSION  (or fix the tag)"
+              exit 1
+            fi
+            echo "Tag $TAG matches package.json — using $PKG_VERSION"
+            echo "version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
+            echo "from_tag=true"        >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            OVERRIDE='${{ inputs.version_override }}'
+            if [[ -n "$OVERRIDE" ]]; then
+              OVERRIDE="${OVERRIDE#v}"
+              echo "Manual override: $OVERRIDE (package.json: $PKG_VERSION)"
+              echo "version=$OVERRIDE" >> "$GITHUB_OUTPUT"
+              echo "from_tag=false"     >> "$GITHUB_OUTPUT"
+            else
+              echo "Dispatch with no override — using package.json: $PKG_VERSION"
+              echo "version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
+              echo "from_tag=false"       >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "Branch push — using package.json: $PKG_VERSION"
+            echo "version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
+            echo "from_tag=false"       >> "$GITHUB_OUTPUT"
+          fi
+
   build:
+    needs: version
     runs-on: ubuntu-latest
     strategy:
       matrix:
         browser: [chrome, firefox]
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -33,7 +90,7 @@ jobs:
           path: |
             ~/.bun/install/cache
             node_modules
-          key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lockb', '**/package.json') }}
+          key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock', '**/package.json') }}
           restore-keys: |
             ${{ runner.os }}-bun-
 
@@ -41,23 +98,38 @@ jobs:
         run: bun install
 
       - name: Build extension for ${{ matrix.browser }}
+        env:
+          # Forward the resolved version to wxt.config.ts via VERSION_OVERRIDE.
+          # If from_tag=true this equals the (already-validated) tag; otherwise
+          # it's identical to package.json, so passing it is a no-op.
+          VERSION_OVERRIDE: ${{ needs.version.outputs.version }}
         run: bun wxt build --browser ${{ matrix.browser }}
+
+      - name: Verify built manifest version
+        run: |
+          BUILT_VERSION=$(node -p "require('./.output/${{ matrix.browser }}-mv3/manifest.json').version")
+          EXPECTED='${{ needs.version.outputs.version }}'
+          if [[ "$BUILT_VERSION" != "$EXPECTED" ]]; then
+            echo "::error::Built manifest version $BUILT_VERSION does not match expected $EXPECTED"
+            exit 1
+          fi
+          echo "✓ ${{ matrix.browser }} manifest version: $BUILT_VERSION"
 
       - name: Zip extension
         run: |
           cd .output/${{ matrix.browser }}-mv3
-          zip -r ../../${{ matrix.browser }}-extension.zip .
+          zip -r ../../${{ matrix.browser }}-extension-${{ needs.version.outputs.version }}.zip .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.browser }}-extension
-          path: ${{ matrix.browser }}-extension.zip
+          path: ${{ matrix.browser }}-extension-${{ needs.version.outputs.version }}.zip
 
   release:
-    needs: build
+    needs: [version, build]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    if: needs.version.outputs.from_tag == 'true'
 
     steps:
       - name: Download Chrome artifact
@@ -75,9 +147,11 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
           files: |
-            chrome-extension.zip
-            firefox-extension.zip
+            chrome-extension-${{ needs.version.outputs.version }}.zip
+            firefox-extension-${{ needs.version.outputs.version }}.zip
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

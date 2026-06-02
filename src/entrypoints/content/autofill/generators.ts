@@ -14,11 +14,16 @@ import {
   USERNAME_MAX_LENGTH,
   USERNAME_MIN_LENGTH,
 } from '@/utils/constants.js';
+import {
+  randomChance,
+  randomInt,
+  randomIntBetween,
+  randomItem,
+  randomToken,
+} from '@/utils/secure-random.js';
 
 export function generatePassword(): string {
-  const length =
-    Math.floor(Math.random() * (PASSWORD_MAX_LENGTH - PASSWORD_MIN_LENGTH + 1)) +
-    PASSWORD_MIN_LENGTH;
+  const length = randomIntBetween(PASSWORD_MIN_LENGTH, PASSWORD_MAX_LENGTH);
   const lowercase = 'abcdefghijklmnopqrstuvwxyz';
   const uppercase = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
   const numbers = '0123456789';
@@ -52,45 +57,37 @@ export function generateUsername(): string {
   const letters = 'abcdefghijklmnopqrstuvwxyz';
   const numbers = '0123456789';
   const allChars = letters + numbers;
-  const length =
-    Math.floor(Math.random() * (USERNAME_MAX_LENGTH - USERNAME_MIN_LENGTH + 1)) +
-    USERNAME_MIN_LENGTH;
+  const length = randomIntBetween(USERNAME_MIN_LENGTH, USERNAME_MAX_LENGTH);
   let username = '';
 
-  username += letters[Math.floor(Math.random() * letters.length)];
+  username += letters[randomInt(letters.length)];
 
   for (let i = 1; i < length - 1; i++) {
-    if (i > 1 && username[i - 1] !== '-' && Math.random() < 0.1) {
+    if (i > 1 && username[i - 1] !== '-' && randomChance(0.1)) {
       username += '-';
     } else {
-      const useNumber = Math.random() < 0.3;
+      const useNumber = randomChance(0.3);
       username += useNumber
-        ? numbers[Math.floor(Math.random() * numbers.length)]
-        : letters[Math.floor(Math.random() * letters.length)];
+        ? numbers[randomInt(numbers.length)]
+        : letters[randomInt(letters.length)];
     }
   }
 
-  username += allChars[Math.floor(Math.random() * allChars.length)];
+  username += allChars[randomInt(allChars.length)];
   return username;
 }
 
 export function generatePhoneNumber(): string {
-  const areaCode = Math.floor(
-    Math.random() * (PHONE_AREA_CODE_MAX - PHONE_AREA_CODE_MIN + 1) + PHONE_AREA_CODE_MIN
-  );
-  const firstPart = Math.floor(
-    Math.random() * (PHONE_PART_MAX - PHONE_PART_MIN + 1) + PHONE_PART_MIN
-  );
-  const secondPart = Math.floor(
-    Math.random() * (PHONE_LAST_PART_MAX - PHONE_LAST_PART_MIN + 1) + PHONE_LAST_PART_MIN
-  );
+  const areaCode = randomIntBetween(PHONE_AREA_CODE_MIN, PHONE_AREA_CODE_MAX);
+  const firstPart = randomIntBetween(PHONE_PART_MIN, PHONE_PART_MAX);
+  const secondPart = randomIntBetween(PHONE_LAST_PART_MIN, PHONE_LAST_PART_MAX);
   return `${areaCode}-${firstPart}-${secondPart}`;
 }
 
 export function generateWebsiteUrl(): string {
   const domains = ['com', 'net', 'org', 'io', 'co', 'ai', 'dev'];
-  const name = Math.random().toString(36).substring(2, 12);
-  const domain = domains[Math.floor(Math.random() * domains.length)];
+  const name = randomToken(10);
+  const domain = randomItem(domains) ?? 'com';
   return `https://www.${name}.${domain}`;
 }
 
@@ -140,7 +137,7 @@ export function generateRandomName(): string {
     'Harris',
   ];
 
-  const firstName = firstNames[Math.floor(Math.random() * firstNames.length)];
-  const lastName = lastNames[Math.floor(Math.random() * lastNames.length)];
+  const firstName = randomItem(firstNames) ?? 'James';
+  const lastName = randomItem(lastNames) ?? 'Smith';
   return `${firstName} ${lastName}`;
 }

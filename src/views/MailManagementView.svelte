@@ -1,14 +1,36 @@
 <script lang="ts">
-import IconArchive from '@/components/icons/IconArchive.svelte';
-import IconDownload from '@/components/icons/IconDownload.svelte';
-import IconEditSquare from '@/components/icons/IconEditSquare.svelte';
-import IconInbox from '@/components/icons/IconInbox.svelte';
-import IconRefresh from '@/components/icons/IconRefresh.svelte';
-import IconSearch from '@/components/icons/IconSearch.svelte';
-import IconTrash from '@/components/icons/IconTrash.svelte';
-import IconX from '@/components/icons/IconX.svelte';
+import { t } from 'svelte-i18n';
+import Icon from '@/components/icons/Icon.svelte';
+import DragHint from '@/components/ui/DragHint.svelte';
+import FaviconImage from '@/components/ui/FaviconImage.svelte';
 import { canUnarchive } from '@/features/inbox/inbox-management.js';
-import type { Account } from '@/utils/types.js';
+import type { Account, Email } from '@/utils/types.js';
+
+const MAX_AVATARS = 4;
+
+/**
+ * Extract up to MAX_AVATARS unique senders for an account's emails,
+ * preserving first-occurrence order. Returns the slice plus a remainder count.
+ */
+function getSenderAvatars(emails: Email[]): {
+  senders: { email: string; letter: string }[];
+  remainder: number;
+} {
+  const seen = new Set<string>();
+  const senders: { email: string; letter: string }[] = [];
+  for (const msg of emails) {
+    if (!msg.from) continue;
+    const lower = msg.from.toLowerCase();
+    if (!seen.has(lower)) {
+      seen.add(lower);
+      const letter = (msg.from_name || msg.from || '?')[0].toUpperCase();
+      senders.push({ email: msg.from, letter });
+    }
+    if (senders.length >= MAX_AVATARS + 1) break;
+  }
+  const overflow = Math.max(0, senders.length - MAX_AVATARS);
+  return { senders: senders.slice(0, MAX_AVATARS), remainder: overflow };
+}
 
 let {
   context = 'popup',
@@ -19,6 +41,7 @@ let {
   mgmtAccounts = [],
   allSelected = false,
   loadingInboxes = false,
+  storedEmails = {} as Record<string, Email[]>,
   onTabChange = () => {},
   onSearchChange = () => {},
   onToggleSelectAll = () => {},
@@ -34,6 +57,7 @@ let {
   onGenerateNewAddress = () => {},
   onEditAccount = () => {},
   onExtendAccount = () => {},
+  onReorderAccounts = (_fromIndex: number, _toIndex: number) => {},
 } = $props<{
   context?: 'popup' | 'sidepanel' | 'app';
   onBack?: () => void;
@@ -43,6 +67,7 @@ let {
   mgmtAccounts?: Account[];
   allSelected?: boolean;
   loadingInboxes?: boolean;
+  storedEmails?: Record<string, Email[]>;
   onTabChange?: (tab: string) => void;
   onSearchChange?: (value: string) => void;
   onToggleSelectAll?: () => void;
@@ -58,7 +83,57 @@ let {
   onGenerateNewAddress?: () => void;
   onEditAccount?: (account: Account) => void;
   onExtendAccount?: (account: Account) => void;
+  onReorderAccounts?: (fromIndex: number, toIndex: number) => void;
 }>();
+
+let draggedAccountId = $state<string | null>(null);
+let dropTargetAccountId = $state<string | null>(null);
+let dragHintDismissed = $state(false);
+
+function handleAccountDragHintDismiss(): void {
+  dragHintDismissed = true;
+}
+
+function handleAccountDragStart(e: DragEvent, accountId: string) {
+  draggedAccountId = accountId;
+  dragHintDismissed = true;
+  if (e.dataTransfer) {
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', accountId);
+  }
+}
+
+function handleAccountDragOver(e: DragEvent, accountId: string) {
+  if (!draggedAccountId || draggedAccountId === accountId) return;
+  e.preventDefault();
+  dropTargetAccountId = accountId;
+  if (e.dataTransfer) {
+    e.dataTransfer.dropEffect = 'move';
+  }
+}
+
+function handleAccountDragLeave(accountId: string) {
+  if (dropTargetAccountId === accountId) {
+    dropTargetAccountId = null;
+  }
+}
+
+function handleAccountDrop(e: DragEvent, targetId: string) {
+  e.preventDefault();
+  const sourceId = draggedAccountId;
+  draggedAccountId = null;
+  dropTargetAccountId = null;
+  if (!sourceId || sourceId === targetId) return;
+  const fromIndex = mgmtAccounts.findIndex((a: Account) => a.id === sourceId);
+  const toIndex = mgmtAccounts.findIndex((a: Account) => a.id === targetId);
+  if (fromIndex === -1 || toIndex === -1) return;
+  onReorderAccounts(fromIndex, toIndex);
+}
+
+function handleAccountDragEnd() {
+  draggedAccountId = null;
+  dropTargetAccountId = null;
+}
 </script>
 
 
@@ -69,13 +144,13 @@ let {
       class="flex-1 flex items-center justify-center gap-2 px-3 py-1 rounded-full transition-all duration-200 {mgmtTab === 'active' ? 'bg-md-surface shadow-sm' : ''}"
       onclick={() => onTabChange('active')}
     >
-      <span class="text-xs font-bold {mgmtTab === 'active' ? 'text-md-on-surface' : 'text-md-on-surface/40'}">Live</span>
+      <span class="text-xs font-bold {mgmtTab === 'active' ? 'text-md-on-surface' : 'text-md-on-surface/40'}">{$t('mailManagement.live')}</span>
     </button>
     <button
       class="flex-1 flex items-center justify-center gap-2 px-3 py-1 rounded-full transition-all duration-200 {mgmtTab === 'expired' || mgmtTab === 'archived' ? 'bg-md-surface shadow-sm' : ''}"
       onclick={() => onTabChange('expired')}
     >
-      <span class="text-xs font-bold {mgmtTab === 'expired' || mgmtTab === 'archived' ? 'text-md-on-surface' : 'text-md-on-surface/40'}">Inactive</span>
+      <span class="text-xs font-bold {mgmtTab === 'expired' || mgmtTab === 'archived' ? 'text-md-on-surface' : 'text-md-on-surface/40'}">{$t('mailManagement.inactive')}</span>
     </button>
   </div>
 </div>
@@ -85,11 +160,11 @@ let {
   <div class="relative">
     <input
       type="text"
-      placeholder="Search addresses or tags..."
+      placeholder={$t('mailManagement.searchAddressesOrTags')}
       class="w-full bg-md-surface-container-low rounded-lg px-3 py-1.5 text-sm outline-none placeholder:text-md-on-surface/40"
       value={mgmtSearch}
       oninput={(e) => onSearchChange((e.target as HTMLInputElement).value)}
-      aria-label="Search addresses"
+      aria-label={$t('mailManagement.searchAddresses')}
     />
     {#if mgmtSearch}
       <button
@@ -97,7 +172,7 @@ let {
         aria-label="Clear search"
         onclick={() => onSearchChange('')}
       >
-        <IconX class="w-4 h-4" />
+        <Icon name="x" class="w-4 h-4" />
       </button>
     {/if}
   </div>
@@ -112,51 +187,51 @@ let {
       checked={allSelected}
       onchange={onToggleSelectAll}
     />
-    <span class="text-sm font-medium">Select All</span>
-    <span class="text-xs text-md-on-surface/50">{selectedAddresses.size} selected</span>
+    <span class="text-sm font-medium">{$t('mailManagement.selectAll')}</span>
+    <span class="text-xs text-md-on-surface/50">{$t('mailManagement.selectedCount', { default: 'mailManagement.selectedCountPlural', values: { n: selectedAddresses.size } })}</span>
   </label>
   <!-- Bulk: Archive -->
   {#if mgmtTab === 'archived'}
     <button
       class="w-8 h-8 flex items-center justify-center rounded-lg border-0 bg-md-success/15 hover:bg-md-success/30 disabled:opacity-30 transition-colors"
-      aria-label="Unarchive selected"
+      aria-label={$t('mailManagement.unarchiveSelected')}
       disabled={selectedAddresses.size === 0}
       onclick={onUnarchiveSelected}
     >
-      <IconArchive class="w-4 h-4 text-md-success" />
+      <Icon name="archive" class="w-4 h-4 text-md-success" />
     </button>
   {:else}
     <button
       class="w-8 h-8 flex items-center justify-center rounded-lg border-0 bg-md-warning/15 hover:bg-md-warning/30 disabled:opacity-30 transition-colors"
-      aria-label="Archive selected"
+      aria-label={$t('mailManagement.archiveSelected')}
       disabled={selectedAddresses.size === 0}
       onclick={onArchiveSelected}
     >
-      <IconArchive class="w-4 h-4 text-md-warning" />
+      <Icon name="archive" class="w-4 h-4 text-md-warning" />
     </button>
   {/if}
   <!-- Bulk: Delete -->
   <button
     class="w-8 h-8 flex items-center justify-center rounded-lg border-0 bg-md-error/15 hover:bg-md-error/30 disabled:opacity-30 transition-colors"
-    aria-label="Delete selected"
+    aria-label={$t('mailManagement.deleteSelected')}
     disabled={selectedAddresses.size === 0}
     onclick={onDeleteSelected}
   >
-    <IconTrash class="w-4 h-4 text-md-error" />
+    <Icon name="trash" class="w-4 h-4 text-md-error" />
   </button>
   <!-- Bulk: Export/Download -->
   <button
     class="w-8 h-8 flex items-center justify-center rounded-lg border-0 bg-md-primary/15 hover:bg-md-primary/30 disabled:opacity-30 transition-colors"
-    aria-label="Export selected"
+    aria-label={$t('mailManagement.exportSelected')}
     disabled={selectedAddresses.size === 0}
     onclick={onExportSelected}
   >
-    <IconDownload class="w-4 h-4 text-md-secondary" />
+    <Icon name="download" class="w-4 h-4 text-md-secondary" />
   </button>
 </div>
 
 <!-- Account cards list -->
-<div class="flex-1 overflow-y-auto divide-y divide-md-secondary-container" style="scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--md-outline, #75777f) 0.2, transparent) transparent;">
+<div class="flex-1 overflow-y-auto divide-y divide-md-secondary-container">
   {#if loadingInboxes}
     <!-- Skeleton loader -->
     {#each Array(3) as _}
@@ -175,75 +250,130 @@ let {
     {/each}
   {:else}
     {#each mgmtAccounts as account}
-      <div class="flex items-start gap-3 px-4 py-3 hover:bg-md-secondary-container/50">
+      {@const isDragging = draggedAccountId === account.id}
+      {@const isDropTarget = dropTargetAccountId === account.id}
+      {@const accountEmails = storedEmails[account.address] || []}
+      {@const { senders, remainder } = getSenderAvatars(accountEmails)}
+      <div
+        class="relative flex items-start gap-3 px-4 py-3 hover:bg-md-secondary-container/50 transition-all {isDragging ? 'opacity-50' : ''} {isDropTarget ? 'ring-2 ring-md-primary rounded-xl' : ''}"
+        draggable={true}
+        role="listitem"
+        ondragstart={(e) => handleAccountDragStart(e, account.id)}
+        ondragover={(e) => handleAccountDragOver(e, account.id)}
+        ondragleave={() => handleAccountDragLeave(account.id)}
+        ondrop={(e) => handleAccountDrop(e, account.id)}
+        ondragend={handleAccountDragEnd}
+        aria-label={$t('mailManagement.dragToReorder', { values: { address: account.address } })}
+      >
+        {#if account === mgmtAccounts[0] && !dragHintDismissed}
+          <DragHint
+            hintKey="dragHintSeen_mailManagement"
+            text={$t('mailManagement.dragHint')}
+            visible={true}
+            onDismiss={handleAccountDragHintDismiss}
+          />
+        {/if}
+
         <!-- Checkbox -->
         <input
           type="checkbox"
-          class="w-4 h-4 mt-1 shrink-0 rounded"
+          class="w-4 h-4 mt-2 shrink-0 rounded"
           checked={selectedAddresses.has(account.id)}
           onchange={() => onToggleSelect(account.id)}
         />
-        <!-- Info -->
+
+        <!-- Info + sender avatar stack -->
         <button
           class="flex-1 min-w-0 text-left bg-transparent border-0 p-0"
           onclick={() => onOpenEmailDetail(account)}
         >
           <div class="font-bold text-sm truncate">{account.address}</div>
-          <div class="text-xs text-md-secondary mt-0.5">Created: {account.created}, Last Used: {account.lastUsed}</div>
-          <div class="text-xs text-md-secondary">Provider: {account.provider}</div>
-          <div class="text-xs text-md-primary">Received Mails: {account.received}</div>
+
+          {#if senders.length === 0}
+            <!-- No emails received yet -->
+            <p class="text-[10px] text-md-on-surface/35 italic mt-1 leading-tight">Not received any mail yet</p>
+          {:else}
+            <!-- Overlapping avatar stack (same favicon logic as EmailList) -->
+            <div class="flex items-center mt-1.5">
+              {#each senders as sender, i}
+                <div
+                  class="relative w-[22px] h-[22px] rounded-full ring-2 ring-md-surface overflow-hidden flex items-center justify-center bg-md-surface-container-low flex-shrink-0"
+                  style="z-index: {MAX_AVATARS - i}; margin-left: {i === 0 ? '0' : '-6px'};"
+                  title={sender.email}
+                >
+                  <FaviconImage
+                    email={sender.email}
+                    size={22}
+                    class="absolute inset-0 w-full h-full object-cover"
+                    fallbackLetter={sender.letter}
+                    fallbackColor="bg-md-secondary"
+                  />
+                </div>
+              {/each}
+              {#if remainder > 0}
+                <div
+                  class="relative flex-shrink-0 w-[22px] h-[22px] rounded-full ring-2 ring-md-surface bg-md-surface-variant flex items-center justify-center"
+                  style="z-index: 0; margin-left: -6px;"
+                  title="+{remainder} more senders"
+                >
+                  <span class="text-[8px] font-bold text-md-on-surface/60 leading-none">+{remainder}</span>
+                </div>
+              {/if}
+            </div>
+          {/if}
         </button>
+
         <!-- Row actions -->
         <div class="flex items-center gap-1 shrink-0 mt-1">
           {#if account.providerConfig?.expiry?.renewable}
             <button
               class="w-8 h-8 flex items-center justify-center rounded-lg border-0 bg-md-primary/15 hover:bg-md-primary/30 transition-colors"
-              aria-label="Edit email address"
+              aria-label={$t('mailManagement.editEmailAddress')}
               onclick={() => onEditAccount(account)}
             >
-              <IconEditSquare class="w-4 h-4 text-md-primary" />
+              <Icon name="editSquare" class="w-4 h-4 text-md-primary" />
             </button>
             <button
               class="w-8 h-8 flex items-center justify-center rounded-lg border-0 bg-md-success/15 hover:bg-md-success/30 transition-colors"
-              aria-label="Extend email expiry"
+              aria-label={$t('mailManagement.extendEmailExpiry')}
               onclick={() => onExtendAccount(account)}
             >
-              <IconRefresh class="w-4 h-4 text-md-success" />
+              <Icon name="refresh" class="w-4 h-4 text-md-success" />
             </button>
           {/if}
           {#if mgmtTab === 'archived' && canUnarchive(account)}
             <button
               class="w-8 h-8 flex items-center justify-center rounded-lg border-0 bg-md-success/15 hover:bg-md-success/30 transition-colors"
-              aria-label="Unarchive {account.address}"
+              aria-label={$t('mailManagement.unarchiveAddress', { values: { address: account.address } })}
               onclick={() => onUnarchiveAccount(account)}
             >
-              <IconArchive class="w-4 h-4 text-md-success" />
+              <Icon name="archive" class="w-4 h-4 text-md-success" />
             </button>
           {:else if mgmtTab !== 'archived'}
             <button
               class="w-8 h-8 flex items-center justify-center rounded-lg border-0 bg-md-warning/15 hover:bg-md-warning/30 transition-colors"
-              aria-label="Archive {account.address}"
+              aria-label={$t('mailManagement.archiveAddress', { values: { address: account.address } })}
               onclick={() => onArchiveAccount(account)}
             >
-              <IconArchive class="w-4 h-4 text-md-warning" />
+              <Icon name="archive" class="w-4 h-4 text-md-warning" />
             </button>
           {/if}
           <button
             class="w-8 h-8 flex items-center justify-center rounded-lg border-0 bg-md-primary/15 hover:bg-md-primary/30 transition-colors"
-            aria-label="Export {account.address}"
+            aria-label={$t('mailManagement.exportAddress', { values: { address: account.address } })}
             onclick={() => onExportAccountEmails(account)}
           >
-            <IconDownload class="w-4 h-4 text-md-secondary" />
+            <Icon name="download" class="w-4 h-4 text-md-secondary" />
           </button>
         </div>
       </div>
     {:else}
       <div class="px-4 py-8 text-center">
-        <IconInbox class="w-12 h-12 text-md-on-surface/30 mx-auto mb-3" />
-        <p class="text-sm text-md-on-surface/50 mb-3">No {mgmtTab} addresses found</p>
+        <Icon name="inbox" class="w-12 h-12 text-md-on-surface/30 mx-auto mb-3" />
+        <p class="text-sm text-md-on-surface/50 mb-3">{$t('mailManagement.noAddressesFound', { values: { tab: mgmtTab } })}</p>
         {#if mgmtTab === 'active'}
           <button class="px-3 py-1.5 text-sm rounded-lg bg-md-primary text-md-on-primary hover:bg-md-primary/90 transition-colors" onclick={onGenerateNewAddress}>
-            Generate New Address
+            {$t('mailManagement.generateNewAddress')}
           </button>
         {/if}
       </div>

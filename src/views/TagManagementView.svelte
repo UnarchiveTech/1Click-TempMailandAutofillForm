@@ -1,7 +1,8 @@
 <script lang="ts">
+import { get } from 'svelte/store';
+import { t } from 'svelte-i18n';
 import { browser } from 'wxt/browser';
-import IconChevronLeft from '@/components/icons/IconChevronLeft.svelte';
-import IconTrash from '@/components/icons/IconTrash.svelte';
+import Icon from '@/components/icons/Icon.svelte';
 import type { Account } from '@/utils/types.js';
 
 let {
@@ -47,7 +48,7 @@ async function saveEdit() {
   const { oldTag, newTag, color } = editingTag;
   const trimmed = newTag.trim();
   if (!trimmed) {
-    errorMsg = 'Tag name cannot be empty';
+    errorMsg = get(t)('tagManagement.tagNameEmpty');
     return;
   }
   saving = true;
@@ -67,7 +68,7 @@ async function saveEdit() {
 }
 
 async function deleteTag(tag: string) {
-  if (!confirm(`Remove tag "${tag}" from all inboxes?`)) return;
+  if (!confirm(get(t)('tagManagement.removeTagConfirm', { values: { name: tag } }))) return;
   saving = true;
   try {
     const { inboxes = [] } = (await browser.storage.local.get(['inboxes'])) as {
@@ -90,22 +91,22 @@ async function deleteTag(tag: string) {
     <button
       class="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-md-secondary-container transition-colors"
       onclick={onBack}
-      aria-label="Back"
+      aria-label={$t('common.back')}
     >
-      <IconChevronLeft class="w-5 h-5" />
+      <Icon name="chevronLeft" class="w-5 h-5" />
     </button>
     <div>
-      <h1 class="text-base font-bold text-md-on-surface">Tag Management</h1>
-      <p class="text-xs text-md-on-surface/50">Manage mailbox tags</p>
+      <h1 class="text-base font-bold text-md-on-surface">{$t('tagManagement.title')}</h1>
+      <p class="text-xs text-md-on-surface/50">{$t('tagManagement.subtitle')}</p>
     </div>
   </div>
 
-  <div class="flex-1 overflow-y-auto px-4 py-4 space-y-3" style="scrollbar-width: thin;">
+  <div class="flex-1 overflow-y-auto px-4 py-4 space-y-3">
     {#if tagGroups.length === 0}
       <div class="text-center py-12 text-md-on-surface/40">
         <div class="text-4xl mb-3">🏷️</div>
-        <p class="text-sm">No tags created yet.</p>
-        <p class="text-xs mt-1">Add tags to your inboxes from the inbox list.</p>
+        <p class="text-sm">{$t('tagManagement.noTags')}</p>
+        <p class="text-xs mt-1">{$t('tagManagement.noTagsHint')}</p>
       </div>
     {:else}
       {#each tagGroups as group}
@@ -117,14 +118,14 @@ async function deleteTag(tag: string) {
                   type="color"
                   class="w-8 h-8 rounded-lg cursor-pointer border-0 p-0.5 bg-transparent"
                   bind:value={editingTag.color}
-                  aria-label="Tag color"
+                  aria-label={$t('tagManagement.tagColor')}
                 />
                 <input
                   type="text"
                   class="flex-1 bg-md-secondary-container text-sm text-md-on-surface rounded-lg px-3 py-1.5 outline-none focus:ring-2 focus:ring-md-primary"
                   bind:value={editingTag.newTag}
-                  placeholder="Tag name"
-                  aria-label="Tag name"
+                  placeholder={$t('tagManagement.tagName')}
+                  aria-label={$t('tagManagement.tagName')}
                 />
               </div>
               {#if errorMsg}
@@ -135,11 +136,11 @@ async function deleteTag(tag: string) {
                   class="flex-1 px-3 py-1.5 text-xs rounded-lg bg-md-primary text-md-on-primary hover:bg-md-primary/90 transition-colors disabled:opacity-50"
                   onclick={saveEdit}
                   disabled={saving}
-                >Save</button>
+                >{$t('tagManagement.save')}</button>
                 <button
                   class="flex-1 px-3 py-1.5 text-xs rounded-lg bg-md-secondary-container text-md-on-surface hover:bg-md-secondary-container/80 transition-colors"
                   onclick={cancelEdit}
-                >Cancel</button>
+                >{$t('tagManagement.cancel')}</button>
               </div>
             </div>
           {:else}
@@ -147,19 +148,19 @@ async function deleteTag(tag: string) {
               <button
                 class="flex items-center gap-2 flex-1 text-left"
                 onclick={() => startEdit(group.tag, group.color)}
-                aria-label="Edit tag {group.tag}"
+                aria-label={$t('tagManagement.editTag', { values: { name: group.tag } })}
               >
-                <span class="w-3 h-3 rounded-full shrink-0" style="background:{group.color}"></span>
+                <span class="w-3 h-3 rounded-full shrink-0 bg-[{group.color}]"></span>
                 <span class="font-medium text-sm text-md-on-surface">{group.tag}</span>
-                <span class="text-xs text-md-on-surface/50 ml-1">· {group.accounts.length} inbox{group.accounts.length === 1 ? '' : 'es'}</span>
+                <span class="text-xs text-md-on-surface/50 ml-1">· {$t('tagManagement.inboxCount', { default: 'tagManagement.inboxCountPlural', values: { n: group.accounts.length } })}</span>
               </button>
               <button
                 class="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-md-error/10 text-md-error transition-colors ml-2"
                 onclick={() => deleteTag(group.tag)}
-                aria-label="Delete tag {group.tag}"
+                aria-label={$t('tagManagement.deleteTag', { values: { name: group.tag } })}
                 disabled={saving}
               >
-                <IconTrash class="w-4 h-4" />
+                <Icon name="trash" class="w-4 h-4" />
               </button>
             </div>
             <!-- Inbox list under tag -->

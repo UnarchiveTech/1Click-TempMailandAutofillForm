@@ -1,5 +1,5 @@
-import QRCode from 'qrcode';
 import { rgbToHex } from '@/utils/color-utils.js';
+import { t } from '@/utils/i18n-utils.js';
 import { logError } from '@/utils/logger.js';
 
 export interface QRState {
@@ -66,6 +66,7 @@ export async function generateQRCode(canvas: HTMLCanvasElement, text: string, cu
         'var(--md-surface)'
     );
 
+    const QRCode = await import('qrcode');
     await QRCode.toCanvas(canvas, text, {
       width: 160,
       margin: 2,
@@ -83,7 +84,7 @@ export async function generateQRCode(canvas: HTMLCanvasElement, text: string, cu
   }
 }
 
-export function downloadQrCode(
+export async function downloadQrCode(
   qrCanvas: HTMLCanvasElement | null,
   selectedEmail: string,
   showToast: (message: string) => void
@@ -93,7 +94,7 @@ export function downloadQrCode(
   link.download = `qr-${selectedEmail}.png`;
   link.href = qrCanvas.toDataURL();
   link.click();
-  showToast('QR code downloaded');
+  showToast(await t('toasts.qrCodeDownloaded'));
 }
 
 export async function copyQrImage(
@@ -106,11 +107,11 @@ export async function copyQrImage(
       if (blob) {
         const item = new ClipboardItem({ 'image/png': blob });
         await navigator.clipboard.write([item]);
-        showToast('QR code copied to clipboard');
+        showToast(await t('toasts.qrCodeCopiedToClipboard'));
       }
     });
   } catch (e) {
     logError('Failed to copy QR code:', e);
-    showToast('Failed to copy QR code', 'error');
+    showToast(await t('toasts.qrCodeCopyFailed'), 'error');
   }
 }

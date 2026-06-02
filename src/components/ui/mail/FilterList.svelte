@@ -1,18 +1,6 @@
 <script lang="ts">
 import { t } from 'svelte-i18n';
-import IconBookmark from '@/components/icons/IconBarChart.svelte';
-import IconBell from '@/components/icons/IconBell.svelte';
-import IconChevronDown from '@/components/icons/IconChevronDown.svelte';
-import IconClock from '@/components/icons/IconClock.svelte';
-import IconEdit from '@/components/icons/IconEdit.svelte';
-import IconEnvelope from '@/components/icons/IconEnvelope.svelte';
-import IconFilter from '@/components/icons/IconFilter.svelte';
-import IconMail from '@/components/icons/IconMail.svelte';
-import IconRefresh from '@/components/icons/IconRefresh.svelte';
-import IconSearch from '@/components/icons/IconSearch.svelte';
-import IconTrash from '@/components/icons/IconTrash.svelte';
-import IconUser from '@/components/icons/IconUser.svelte';
-import IconX from '@/components/icons/IconX.svelte';
+import Icon from '@/components/icons/Icon.svelte';
 
 let {
   searchQuery = '',
@@ -216,7 +204,7 @@ function formatDateChip(from: string, to: string): string {
 <div class="flex items-center gap-1.5 px-1 pb-1 relative">
   <!-- Search input with search icon left + filter button inside right -->
   <div class="relative flex-1">
-    <IconSearch class="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-md-on-surface/40 pointer-events-none" />
+    <Icon name="search" class="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-md-on-surface/40 pointer-events-none" />
     <input
       type="text"
       placeholder="Search emails..."
@@ -241,33 +229,33 @@ function formatDateChip(from: string, to: string): string {
         aria-label="Filters"
         onclick={() => { searchFocused = true; onFilterClick(); }}
       >
-        <IconFilter class="w-4 h-4 {sortBy !== 'newest' || otpOnly || dateFrom || dateTo || selectedSenders.length > 0 || searchQuery ? 'text-md-primary' : 'text-md-on-surface/40'}" />
+        <Icon name="filter" class="w-4 h-4 {sortBy !== 'newest' || otpOnly || dateFrom || dateTo || selectedSenders.length > 0 || searchQuery ? 'text-md-primary' : 'text-md-on-surface/40'}" />
       </button>
     </div>
   </div>
 
-  <!-- Refresh button -->
-  <button
-    id="button-refresh"
-    class="w-8 h-8 flex items-center justify-center rounded-xl bg-md-surface hover:bg-md-surface-variant transition-colors shrink-0"
-    style="margin-top: 0px;"
-    data-tip="Refresh"
-    aria-label="Refresh inbox"
-    onclick={() => onRefreshInbox()}
-  >
-    <IconRefresh class="w-4 h-4 text-md-on-surface/70" />
-  </button>
-  <!-- Notifications button -->
-  <button
-    id="button-notifications"
-    class="w-8 h-8 flex items-center justify-center rounded-xl transition-colors shrink-0 {notificationsEnabled ? 'bg-md-warning/20 hover:bg-md-warning/30' : 'bg-md-surface hover:bg-md-surface-variant'}"
-    style="margin-top: 0px;"
-    data-tip="{notificationsEnabled ? 'Disable Notifications' : 'Enable Notifications'}"
-    aria-label="Notifications"
-    onclick={() => onToggleNotifications()}
-  >
-    <IconBell class="w-4 h-4 {notificationsEnabled ? 'text-md-warning' : 'text-md-on-surface/40'}" />
-  </button>
+  <!-- Refresh button (hidden when search is focused so the search bar can expand) -->
+  {#if !searchFocused}
+    <button
+      id="button-refresh"
+      class="w-8 h-8 flex items-center justify-center rounded-xl bg-md-surface hover:bg-md-surface-variant transition-colors shrink-0 mt-0"
+      data-tip="Refresh"
+      aria-label="Refresh inbox"
+      onclick={() => onRefreshInbox()}
+    >
+      <Icon name="refresh" class="w-4 h-4 text-md-on-surface/70" />
+    </button>
+    <!-- Notifications button (hidden when search is focused so the search bar can expand) -->
+    <button
+      id="button-notifications"
+      class="w-8 h-8 flex items-center justify-center rounded-xl transition-colors shrink-0 mt-0 {notificationsEnabled ? 'bg-md-warning/20 hover:bg-md-warning/30' : 'bg-md-surface hover:bg-md-surface-variant'}"
+      data-tip="{notificationsEnabled ? 'Disable Notifications' : 'Enable Notifications'}"
+      aria-label="Notifications"
+      onclick={() => onToggleNotifications()}
+    >
+      <Icon name="bell" class="w-4 h-4 {notificationsEnabled ? 'text-md-warning' : 'text-md-on-surface/40'}" />
+    </button>
+  {/if}
 </div>
 
 
@@ -297,7 +285,7 @@ function formatDateChip(from: string, to: string): string {
         {:else if senderEmail}
           From {senderEmail.split('@')[0]}@…
         {/if}
-        <IconChevronDown class="w-3 h-3" />
+        <Icon name="chevronDown" class="w-3 h-3" />
       </button>
       {#if fromDropdownOpen}
         <div class="absolute top-full left-0 mt-1 bg-md-surface-container border border-md-outline-variant rounded-2xl shadow-xl z-[200] overflow-hidden min-w-[260px]">
@@ -305,7 +293,7 @@ function formatDateChip(from: string, to: string): string {
           <div class="flex items-center justify-between px-4 py-3 border-b border-md-outline-variant/30">
             <span class="text-sm font-semibold text-md-on-surface">From</span>
             <button id="button-close-from-filter" class="w-5 h-5 flex items-center justify-center text-md-on-surface/60 hover:text-md-on-surface transition-colors" aria-label="Close from filter" onclick={() => fromDropdownOpen = false}>
-              <IconX class="w-3.5 h-3.5" />
+              <Icon name="x" class="w-3.5 h-3.5" />
             </button>
           </div>
           <!-- Selected chips -->
@@ -318,7 +306,7 @@ function formatDateChip(from: string, to: string): string {
                   </span>
                   <span class="max-w-[120px] truncate">{sender}</span>
                   <button id="button-remove-sender-{sender}" onclick={() => toggleSender(sender)} aria-label="Remove sender" class="ml-0.5 text-md-on-surface/50 hover:text-md-on-surface">
-                    <IconX class="w-2.5 h-2.5" />
+                    <Icon name="x" class="w-2.5 h-2.5" />
                   </button>
                 </div>
               {/each}
@@ -342,7 +330,7 @@ function formatDateChip(from: string, to: string): string {
               <span class="text-xs font-medium text-md-on-surface/50">Suggestions</span>
             </div>
           {/if}
-          <div class="max-h-48 overflow-y-auto pb-2" style="scrollbar-width: thin; scrollbar-color: var(--md-primary) transparent;">
+          <div class="max-h-48 overflow-y-auto pb-2">
             {#each senderSuggestions as suggestion}
               {@const isSelected = selectedSenders.some((s) => s.toLowerCase() === suggestion.email.toLowerCase())}
               <button
@@ -379,7 +367,7 @@ function formatDateChip(from: string, to: string): string {
         onclick={() => { sortDropdownOpen = !sortDropdownOpen; dateDropdownOpen = false; savedFiltersDropdownOpen = false; fromDropdownOpen = false; }}
       >
         Sort: {sortLabel}
-        <IconChevronDown class="w-3 h-3" />
+        <Icon name="chevronDown" class="w-3 h-3" />
       </button>
       {#if sortDropdownOpen}
         <div class="absolute top-full left-0 mt-1 bg-md-surface border border-md-outline-variant rounded-xl shadow-lg z-[200] overflow-hidden min-w-[200px]">
@@ -390,7 +378,7 @@ function formatDateChip(from: string, to: string): string {
               class="w-full px-3 py-2 text-left text-xs hover:bg-md-surface-variant transition-colors {sortBy === val ? 'text-md-primary font-medium' : 'text-md-on-surface'} flex items-center gap-2"
               onclick={() => { onSortChange(val); sortDropdownOpen = false; }}
             >
-              <IconClock class="w-3.5 h-3.5 shrink-0" />
+              <Icon name="clock" class="w-3.5 h-3.5 shrink-0" />
               {label}
             </button>
           {/each}
@@ -401,7 +389,7 @@ function formatDateChip(from: string, to: string): string {
               class="w-full px-3 py-2 text-left text-xs hover:bg-md-surface-variant transition-colors {sortBy === val ? 'text-md-primary font-medium' : 'text-md-on-surface'} flex items-center gap-2"
               onclick={() => { onSortChange(val); sortDropdownOpen = false; }}
             >
-              <IconUser class="w-3.5 h-3.5 shrink-0" />
+              <Icon name="user" class="w-3.5 h-3.5 shrink-0" />
               {label}
             </button>
           {/each}
@@ -412,7 +400,7 @@ function formatDateChip(from: string, to: string): string {
               class="w-full px-3 py-2 text-left text-xs hover:bg-md-surface-variant transition-colors {sortBy === val ? 'text-md-primary font-medium' : 'text-md-on-surface'} flex items-center gap-2"
               onclick={() => { onSortChange(val); sortDropdownOpen = false; }}
             >
-              <IconEnvelope class="w-3.5 h-3.5 shrink-0" />
+              <Icon name="envelope" class="w-3.5 h-3.5 shrink-0" />
               {label}
             </button>
           {/each}
@@ -423,7 +411,7 @@ function formatDateChip(from: string, to: string): string {
               class="w-full px-3 py-2 text-left text-xs hover:bg-md-surface-variant transition-colors {sortBy === val ? 'text-md-primary font-medium' : 'text-md-on-surface'} flex items-center gap-2"
               onclick={() => { onSortChange(val); sortDropdownOpen = false; }}
             >
-              <IconMail class="w-3.5 h-3.5 shrink-0" />
+              <Icon name="mail" class="w-3.5 h-3.5 shrink-0" />
               {label}
             </button>
           {/each}
@@ -450,7 +438,7 @@ function formatDateChip(from: string, to: string): string {
         onclick={() => { dateDropdownOpen = !dateDropdownOpen; sortDropdownOpen = false; showCustomRange = false; savedFiltersDropdownOpen = false; fromDropdownOpen = false; }}
       >
         {formatDateChip(dateFrom, dateTo)}
-        <IconChevronDown class="w-3 h-3" />
+        <Icon name="chevronDown" class="w-3 h-3" />
       </button>
       {#if dateDropdownOpen}
         <div class="absolute top-full left-0 mt-1 bg-md-surface-container border border-md-outline-variant rounded-2xl shadow-xl z-[200] overflow-hidden min-w-[220px]">
@@ -458,7 +446,7 @@ function formatDateChip(from: string, to: string): string {
           <div class="flex items-center justify-between px-4 py-3 border-b border-md-outline-variant/30">
             <span class="text-sm font-semibold text-md-on-surface">Date</span>
             <button id="button-close-date-filter" class="w-5 h-5 flex items-center justify-center text-md-on-surface/60 hover:text-md-on-surface transition-colors" aria-label="Close date filter" onclick={() => { dateDropdownOpen = false; showCustomRange = false; }}>
-              <IconX class="w-3.5 h-3.5" />
+              <Icon name="x" class="w-3.5 h-3.5" />
             </button>
           </div>
           {#if !showCustomRange}
@@ -531,7 +519,7 @@ function formatDateChip(from: string, to: string): string {
           onclick={() => { savedFiltersDropdownOpen = !savedFiltersDropdownOpen; sortDropdownOpen = false; dateDropdownOpen = false; fromDropdownOpen = false; manageFiltersOpen = false; }}
         >
           Saved Filters
-          <IconChevronDown class="w-3 h-3" />
+          <Icon name="chevronDown" class="w-3 h-3" />
         </button>
         {#if savedFiltersDropdownOpen}
           <div class="absolute top-full left-0 mt-1 bg-md-surface border border-md-outline-variant rounded-xl shadow-lg z-[200] overflow-hidden min-w-[150px]">
@@ -580,7 +568,7 @@ function formatDateChip(from: string, to: string): string {
         aria-label="Clear all filters"
         onclick={() => { onClearFilters(); onSearchChange(''); onSortChange('newest'); onOtpOnlyChange(false); onSenderDomainChange(''); onDateFromChange(''); onDateToChange(''); onSelectedSendersChange([]); }}
       >
-        <IconX class="w-3 h-3" />
+        <Icon name="x" class="w-3 h-3" />
         Clear
       </button>
     {/if}
@@ -593,7 +581,7 @@ function formatDateChip(from: string, to: string): string {
         aria-label="Save as filter"
         onclick={() => { showSaveFilter = true; }}
       >
-        <IconEdit class="w-3 h-3" />
+        <Icon name="edit" class="w-3 h-3" />
         Save as filter
       </button>
     {/if}
@@ -610,7 +598,7 @@ function formatDateChip(from: string, to: string): string {
       <div class="flex items-center justify-between px-6 py-4 border-b border-md-outline-variant">
         <h3 class="text-lg font-semibold text-md-on-surface">Save Filter</h3>
         <button class="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-md-surface-variant transition-colors" aria-label="Close" onclick={() => showSaveFilter = false}>
-          <IconX class="w-5 h-5 text-md-on-surface/60" />
+          <Icon name="x" class="w-5 h-5 text-md-on-surface/60" />
         </button>
       </div>
       
@@ -672,12 +660,12 @@ function formatDateChip(from: string, to: string): string {
       <div class="flex items-center justify-between px-6 py-4 border-b border-md-outline-variant">
         <h3 class="text-lg font-semibold text-md-on-surface">Manage Filters</h3>
         <button id="button-close-manage-filters-header" class="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-md-surface-variant transition-colors" aria-label="Close" onclick={() => manageFiltersOpen = false}>
-          <IconX class="w-5 h-5 text-md-on-surface/60" />
+          <Icon name="x" class="w-5 h-5 text-md-on-surface/60" />
         </button>
       </div>
       
       <!-- Filter List -->
-      <div class="flex-1 overflow-y-auto p-4 space-y-2" style="scrollbar-width: thin; scrollbar-color: var(--md-primary) transparent;">
+      <div class="flex-1 overflow-y-auto p-4 space-y-2">
         {#each savedSearchFilters as filter}
           <div class="flex items-center gap-2 p-3 rounded-xl bg-md-surface-container-low border border-md-outline-variant/30">
             {#if renamingFilterId === filter.id}
@@ -730,7 +718,7 @@ function formatDateChip(from: string, to: string): string {
                 aria-label="Rename filter"
                 onclick={() => { renamingFilterId = filter.id; renameFilterName = filter.name; }}
               >
-                <IconEdit class="w-4 h-4 text-md-on-surface/60" />
+                <Icon name="edit" class="w-4 h-4 text-md-on-surface/60" />
               </button>
               <button
                 id="button-delete-filter-{filter.id}"
@@ -738,7 +726,7 @@ function formatDateChip(from: string, to: string): string {
                 aria-label="Delete filter"
                 onclick={() => onDeleteFilter(filter.id)}
               >
-                <IconTrash class="w-4 h-4 text-md-error" />
+                <Icon name="trash" class="w-4 h-4 text-md-error" />
               </button>
             {/if}
           </div>

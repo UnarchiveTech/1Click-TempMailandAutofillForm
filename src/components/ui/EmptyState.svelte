@@ -32,7 +32,7 @@ let {
   {/if}
   
   {#if actionLabel && onAction}
-    <button class="px-3 py-1.5 text-sm rounded-xl bg-md-primary text-md-on-primary hover:bg-md-primary/90 transition-colors" onclick={onAction}>
+    <button class="px-3 py-1.5 text-sm rounded-xl bg-md-primary text-md-on-primary hover:bg-md-primary/90 transition-colors" onclick={(e) => { e.stopPropagation(); onAction(); }}>
       {actionLabel}
     </button>
   {/if}

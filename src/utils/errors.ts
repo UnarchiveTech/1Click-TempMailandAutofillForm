@@ -1,3 +1,5 @@
+import { t, tSync } from './i18n-utils.js';
+
 /**
  * Centralized error types for the 1Click extension
  * Provides structured error handling across the application
@@ -467,8 +469,6 @@ export function getErrorMessage(error: unknown): string {
  * In non-Svelte contexts, use getTranslatedErrorMessage()
  */
 export async function getTranslatedErrorMessage(error: unknown): Promise<string> {
-  const { t } = await import('./i18n-utils.js');
-
   if (error instanceof BaseExtensionError) {
     // If message is a translation key (starts with 'errors.'), translate it
     if (error.message.startsWith('errors.')) {
@@ -489,8 +489,6 @@ export async function getTranslatedErrorMessage(error: unknown): Promise<string>
  * Falls back to the key if translation is not loaded
  */
 export function getTranslatedErrorMessageSync(error: unknown): string {
-  const { tSync } = require('./i18n-utils.js');
-
   if (error instanceof BaseExtensionError) {
     // If message is a translation key (starts with 'errors.'), translate it
     if (error.message.startsWith('errors.')) {

@@ -1,25 +1,7 @@
 <script lang="ts">
 import { t } from 'svelte-i18n';
 import { browser } from 'wxt/browser';
-import IconArchive from '@/components/icons/IconArchive.svelte';
-import IconBack from '@/components/icons/IconBack.svelte';
-import IconChevronDown from '@/components/icons/IconChevronDown.svelte';
-import IconChevronUp from '@/components/icons/IconChevronUp.svelte';
-import IconCopy from '@/components/icons/IconCopy.svelte';
-import IconEnvelope from '@/components/icons/IconEnvelope.svelte';
-import IconFlame from '@/components/icons/IconFlame.svelte';
-import IconGlobe from '@/components/icons/IconGlobe.svelte';
-import IconGlobeNetwork from '@/components/icons/IconGlobeNetwork.svelte';
-import IconInbox from '@/components/icons/IconInbox.svelte';
-import IconMail from '@/components/icons/IconMail.svelte';
-import IconPlus from '@/components/icons/IconPlus.svelte';
-import IconQr from '@/components/icons/IconQr.svelte';
-import IconSearch from '@/components/icons/IconSearch.svelte';
-import IconSettings from '@/components/icons/IconSettings.svelte';
-import IconShield from '@/components/icons/IconShield.svelte';
-import IconThreads from '@/components/icons/IconThreads.svelte';
-import IconTrash from '@/components/icons/IconTrash.svelte';
-import IconX from '@/components/icons/IconX.svelte';
+import Icon from '@/components/icons/Icon.svelte';
 import TagDialog from '@/components/overlays/TagDialog.svelte';
 import AutoRenewToggle from '@/components/ui/AutoRenewToggle.svelte';
 import AccountCard from '@/components/ui/account/AccountCard.svelte';
@@ -48,6 +30,10 @@ import type { Account, Email, Identity, SavedSearchFilter } from '@/utils/types.
 
 let otpCollapsed = $state(false);
 let otpDropupOpen = $state(false);
+
+// Renewal strip state — session-only dismissal. Re-appears on reload.
+let renewalStripDismissed = $state(false);
+let renewalStripCollapsed = $state(false);
 
 type OtpHistoryItem = {
   otp: string;
@@ -129,8 +115,8 @@ async function loadOtpHistory() {
     }
     current.sort((a, b) => b.received_at - a.received_at);
     other.sort((a, b) => b.received_at - a.received_at);
-    otpHistoryCurrent = current;
-    otpHistoryOther = other;
+    otpHistoryCurrent = current.slice(0, 50);
+    otpHistoryOther = other.slice(0, 50);
   } catch (error: unknown) {
     logError(
       'Failed to load OTP history:',
@@ -143,6 +129,29 @@ async function loadOtpHistory() {
 function toggleOtpDropup() {
   otpDropupOpen = !otpDropupOpen;
   if (otpDropupOpen) loadOtpHistory();
+}
+
+async function clearAllOtps() {
+  try {
+    const { storedEmails = {} } = (await browser.storage.local.get(['storedEmails'])) as {
+      storedEmails?: Record<string, Email[]>;
+    };
+    for (const msgs of Object.values(storedEmails)) {
+      for (const m of msgs) {
+        m.otp = undefined;
+      }
+    }
+    await browser.storage.local.set({ storedEmails });
+    otpHistoryCurrent = [];
+    otpHistoryOther = [];
+    showToast($t('inbox.otpsCleared'));
+  } catch (error: unknown) {
+    logError(
+      'Failed to clear OTPs:',
+      undefined,
+      error instanceof Error ? error : new Error(String(error))
+    );
+  }
 }
 
 function getRootDomain(domain: string): string {
@@ -200,6 +209,22 @@ async function getCurrentTabDomain() {
 
 getCurrentTabDomain();
 
+// Auto-suggest identity based on domain hints
+let domainHintApplied = false;
+
+$effect(() => {
+  if (domainHintApplied || !currentDomain || identities.length === 0) return;
+  const rootDomain = getRootDomain(currentDomain);
+  const match = identities.find((i) =>
+    i.domainHints?.some((h) => h === rootDomain || h === currentDomain)
+  );
+  if (match && match.id !== selectedIdentityId) {
+    selectedIdentityId = match.id;
+    handleIdentityChange();
+  }
+  domainHintApplied = true;
+});
+
 function formatOtp(otp: string): string {
   const clean = otp.replace(/\s/g, '');
   if (clean.length === 6) return `${clean.slice(0, 3)} ${clean.slice(3)}`;
@@ -245,6 +270,7 @@ let {
   onReloadAccounts = async () => {},
   onEditAccount = () => {},
   onToggleAutoExtend = () => {},
+  onExtendAccount = () => {},
   onOpenMessageDetail = () => {},
   onClearFilters = () => {},
   onCopyOtp = () => {},
@@ -273,9 +299,12 @@ let {
   onDeleteFilter = (_id: string) => {},
   onNavigateToSettings = () => {},
   onNavigateToManage = () => {},
+  onArchiveEmails = (_emails: Email[]) => {},
+  onDeleteEmails = (_emails: Email[]) => {},
+  onRestoreEmails = (_emails: Email[]) => {},
   autoRenew = false,
   onToggleAutoRenew = () => {},
-  guerrillaDefaultDomain = '',
+  defaultDomain = '',
   dropdownOpen = undefined,
   openSection = undefined,
   onDropdownOpenChange = (_open: boolean) => {},
@@ -322,6 +351,7 @@ let {
   onReloadAccounts?: () => Promise<void>;
   onEditAccount?: (account: Account) => void;
   onToggleAutoExtend?: (account: Account) => void;
+  onExtendAccount?: (account: Account) => void;
   onOpenMessageDetail?: (message: Email) => void;
   onClearFilters?: () => void | Promise<void>;
   onCopyOtp?: () => void;
@@ -351,9 +381,12 @@ let {
   onDeleteFilter?: (id: string) => void;
   onNavigateToSettings?: () => void | Promise<void>;
   onNavigateToManage?: () => void | Promise<void>;
+  onArchiveEmails?: (emails: Email[]) => void | Promise<void>;
+  onDeleteEmails?: (emails: Email[]) => void | Promise<void>;
+  onRestoreEmails?: (emails: Email[]) => void | Promise<void>;
   autoRenew?: boolean;
   onToggleAutoRenew?: () => void;
-  guerrillaDefaultDomain?: string;
+  defaultDomain?: string;
   openSection?: 'active' | 'archived' | 'expired' | null;
   onDropdownOpenChange?: (open: boolean) => void;
   onCreateInboxWithProvider?: (providerId: string, instanceId?: string) => void;
@@ -376,6 +409,7 @@ let latestOtpEmail = $derived(
 // Tag editing state
 let tagDialogOpen = $state(false);
 let actionRowCollapsed = $state(false);
+let actionRowCollapsedInitialized = $state(false);
 let accountSelectorHovered = $state(false);
 let actionRowHovered = $state(false);
 let searchBarFocused = $state(false);
@@ -396,6 +430,8 @@ async function loadActionRowCollapsedState() {
       undefined,
       error instanceof Error ? error : new Error(String(error))
     );
+  } finally {
+    actionRowCollapsedInitialized = true;
   }
 }
 
@@ -417,7 +453,9 @@ loadActionRowCollapsedState();
 
 // Watch for changes and save to storage
 $effect(() => {
-  saveActionRowCollapsedState();
+  if (actionRowCollapsedInitialized) {
+    saveActionRowCollapsedState();
+  }
 });
 
 // Lazy loading state
@@ -428,9 +466,35 @@ const BATCH_SIZE = 20;
 let threadGrouping = $state(false);
 let expandedThreadIds = $state<Set<string>>(new Set());
 
+// Email list filter tab (Inbox / Archived / Deleted / All mails)
+type EmailListTab = 'inbox' | 'archived' | 'deleted' | 'all';
+let emailListTab = $state<EmailListTab>('inbox');
+
+let tabCounts = $derived.by(
+  (): Record<EmailListTab, number> => ({
+    inbox: filteredEmails.filter((e: Email) => !e.local_archived && !e.local_deleted).length,
+    archived: filteredEmails.filter((e: Email) => e.local_archived && !e.local_deleted).length,
+    deleted: filteredEmails.filter((e: Email) => !!e.local_deleted).length,
+    all: filteredEmails.length,
+  })
+);
+
+let tabFilteredEmails = $derived.by((): Email[] => {
+  switch (emailListTab) {
+    case 'archived':
+      return filteredEmails.filter((e: Email) => e.local_archived && !e.local_deleted);
+    case 'deleted':
+      return filteredEmails.filter((e: Email) => !!e.local_deleted);
+    case 'all':
+      return filteredEmails;
+    default:
+      return filteredEmails.filter((e: Email) => !e.local_archived && !e.local_deleted);
+  }
+});
+
 let emailThreads = $derived.by((): EmailThread[] => {
   if (!threadGrouping) return [];
-  return groupEmailsByThread(filteredEmails);
+  return groupEmailsByThread(tabFilteredEmails);
 });
 
 function toggleThread(threadId: string) {
@@ -454,13 +518,13 @@ let displayedEmails = $derived.by(() => {
       )
       .slice(0, displayedEmailCount);
   }
-  return filteredEmails.slice(0, displayedEmailCount);
+  return tabFilteredEmails.slice(0, displayedEmailCount);
 });
 
 // Load more emails when scrolling near bottom
 function loadMoreEmails() {
-  if (displayedEmailCount < filteredEmails.length) {
-    displayedEmailCount = Math.min(displayedEmailCount + BATCH_SIZE, filteredEmails.length);
+  if (displayedEmailCount < tabFilteredEmails.length) {
+    displayedEmailCount = Math.min(displayedEmailCount + BATCH_SIZE, tabFilteredEmails.length);
   }
 }
 
@@ -518,6 +582,39 @@ const supportsAutoRenew = $derived.by(() => {
     return config.expiry?.renewable || false;
   } catch {
     return false;
+  }
+});
+
+// Check if current account is expired
+const isCurrentAccountExpired = $derived.by(() => {
+  if (!currentAccount?.expiresAt) return false;
+  return Date.now() > currentAccount.expiresAt;
+});
+
+// Renewal strip is eligible when: provider supports auto-renew AND
+// account is currently expired AND auto-renew is NOT enabled.
+// (If auto-renew were enabled, the address would not have expired.)
+const renewalStripEligible = $derived(
+  supportsAutoRenew && isCurrentAccountExpired && !(currentAccount?.autoExtend ?? false)
+);
+
+// Reset dismissal when the account changes (so a different expired inbox shows the strip again)
+let _lastRenewalAddress = $state<string | null>(null);
+$effect(() => {
+  const addr = currentAccount?.address ?? null;
+  if (addr !== _lastRenewalAddress) {
+    _lastRenewalAddress = addr;
+    renewalStripDismissed = false;
+  }
+});
+
+// Final show flag = eligible AND not dismissed
+const showRenewalStrip = $derived(renewalStripEligible && !renewalStripDismissed);
+
+// Auto-renew is now enabled → strip should disappear (the address will renew itself)
+$effect(() => {
+  if (currentAccount?.autoExtend && renewalStripEligible === false) {
+    renewalStripDismissed = true;
   }
 });
 
@@ -583,7 +680,7 @@ let tagColors = $derived.by(() => {
   {selectedEmail}
   bind:displayedEmail
   {accounts}
-  {guerrillaDefaultDomain}
+  {defaultDomain}
   {allAccounts}
   {dropdownOpen}
   {onDropdownOpenChange}
@@ -621,7 +718,7 @@ let tagColors = $derived.by(() => {
     onclick={onCopyEmail}
   >
     <span class="btn-icon flex items-center justify-center w-5 h-5 rounded-full shrink-0">
-      <IconCopy class="w-3.5 h-3.5" />
+      <Icon name="copy" class="w-3.5 h-3.5" />
     </span>
     <span class="leading-tight self-center">{$t('common.copy')}</span>
   </button>
@@ -634,7 +731,7 @@ let tagColors = $derived.by(() => {
     onclick={onOpenQrDialog}
   >
     <span class="btn-icon flex items-center justify-center w-5 h-5 rounded-full shrink-0">
-      <IconQr class="w-3.5 h-3.5" />
+      <Icon name="qr" class="w-3.5 h-3.5" />
     </span>
     <span class="leading-tight self-center">QR</span>
   </button>
@@ -649,7 +746,7 @@ let tagColors = $derived.by(() => {
         onclick={() => onUnarchiveAccount(currentAccount)}
       >
         <span class="btn-icon flex items-center justify-center w-5 h-5 rounded-full shrink-0">
-          <IconArchive class="w-3.5 h-3.5" />
+          <Icon name="archive" class="w-3.5 h-3.5" />
         </span>
         <span class="leading-tight self-center">{$t('common.unarchive')}</span>
       </button>
@@ -661,7 +758,7 @@ let tagColors = $derived.by(() => {
         onclick={() => onArchiveAccount(currentAccount)}
       >
         <span class="btn-icon flex items-center justify-center w-5 h-5 rounded-full shrink-0">
-          <IconArchive class="w-3.5 h-3.5" />
+          <Icon name="archive" class="w-3.5 h-3.5" />
         </span>
         <span class="leading-tight self-center">{$t('common.archive')}</span>
       </button>
@@ -676,7 +773,7 @@ let tagColors = $derived.by(() => {
         onclick={() => onRestoreAccount(currentAccount.address)}
       >
         <span class="btn-icon flex items-center justify-center w-5 h-5 rounded-full shrink-0">
-          <IconBack class="w-3.5 h-3.5" />
+          <Icon name="back" class="w-3.5 h-3.5" />
         </span>
         <span class="leading-tight self-center">{$t('common.restore')}</span>
       </button>
@@ -688,7 +785,7 @@ let tagColors = $derived.by(() => {
         onclick={() => onRemoveAccount(currentAccount.address)}
       >
         <span class="btn-icon flex items-center justify-center w-5 h-5 rounded-full shrink-0">
-          <IconTrash class="w-3.5 h-3.5" />
+          <Icon name="trash" class="w-3.5 h-3.5" />
         </span>
         <span class="leading-tight self-center">{$t('common.delete')}</span>
       </button>
@@ -730,15 +827,14 @@ let tagColors = $derived.by(() => {
     <!-- Hide/Show toggle button at bottom-right corner -->
     <button
       id="button-collapse-toggle"
-      class="absolute bottom-0 right-0 z-10 flex items-center gap-1 px-1 py-0.5 rounded-full shadow-sm hover:shadow-md hover:scale-105 active:scale-95 transition-all duration-200 cursor-pointer"
-      style="background-color: var(--md-primary); border: 1px solid var(--md-primary);"
+      class="absolute bottom-0 right-0 z-10 flex items-center gap-1 px-1 py-0.5 rounded-full shadow-sm hover:shadow-md hover:scale-105 active:scale-95 transition-all duration-200 cursor-pointer bg-md-primary border border-md-primary"
       onclick={() => { actionRowCollapsed = !actionRowCollapsed; }}
       onmouseenter={() => { accountSelectorHovered = false; actionRowHovered = false; }}
       onmouseleave={() => {}}
       aria-label={actionRowCollapsed ? 'Expand action row' : 'Collapse action row'}
     >
-      <IconChevronUp class="w-3 h-3 transition-transform duration-200 text-md-on-primary {actionRowCollapsed || searchBarFocused ? 'rotate-180' : ''}" />
-      <span class="text-[9px] font-bold tracking-wide leading-tight" style="color: var(--md-on-primary);">
+      <Icon name="chevronUp" class="w-3 h-3 transition-transform duration-200 text-md-on-primary {actionRowCollapsed || searchBarFocused ? 'rotate-180' : ''}" />
+      <span class="text-[9px] font-bold tracking-wide leading-tight text-md-on-primary">
         {#if buttonText === 'Temporary Expanded'}
           Quick View
         {:else if buttonText === 'Temporary Hidden'}
@@ -751,14 +847,13 @@ let tagColors = $derived.by(() => {
 
     <!-- Zigzag divider inside container (only zigzag pattern) -->
     <div
-      class="relative w-full flex items-center justify-end pr-[20px]"
-      style="margin-bottom: 2.5px; margin-top: {actionRowCollapsed || searchBarFocused ? '12.5px' : '0px'}"
+      class="relative w-full flex items-center justify-end pr-[20px] mb-[2.5px] {actionRowCollapsed || searchBarFocused ? 'mt-[12.5px]' : 'mt-0'}"
       onmouseenter={() => { accountSelectorHovered = false; actionRowHovered = false; }}
       onmouseleave={() => {}}
       role="none"
     >
       <div class="absolute px-2 inset-0 flex items-center pointer-events-none">
-        <svg width="100%" height="8" viewBox="0 0 100 8" preserveAspectRatio="none" class="fill-none" style="stroke: var(--md-primary);">
+        <svg width="100%" height="8" viewBox="0 0 100 8" preserveAspectRatio="none" class="fill-none stroke-md-primary">
           <!-- Zigzag pattern only -->
           <path
             d="M0 4 L2 1 L4 7 L6 1 L8 7 L10 1 L12 7 L14 1 L16 7 L18 1 L20 7 L22 1 L24 7 L26 1 L28 7 L30 1 L32 7 L34 1 L36 7 L38 1 L40 7 L42 1 L44 7 L46 1 L48 7 L50 1 L52 7 L54 1 L56 7 L58 1 L60 7 L62 1 L64 7 L66 1 L68 7 L70 1 L72 7 L74 1 L76 7 L78 1 L80 7 L82 1 L84 7 L86 1 L88 7 L90 1 L92 7 L94 1 L96 7 L98 1 L100 4"
@@ -814,15 +909,63 @@ let tagColors = $derived.by(() => {
     aria-label="Toggle thread grouping"
     title="Group emails by conversation"
   >
-    <IconThreads class="w-3 h-3" />
+    <Icon name="threads" class="w-3 h-3" />
     Threads
+  </button>
+</div>
+
+<!-- Email list filter tabs (Inbox / Archived / Deleted / All mails) — AccountSelector pill style -->
+<div class="flex gap-1 px-2 py-1" role="tablist" aria-label={$t('inbox.listTabs.tabAria')}>
+  <button
+    id="button-tab-inbox"
+    role="tab"
+    aria-selected={emailListTab === 'inbox'}
+    title={$t('inbox.listTabs.inbox', { values: { count: tabCounts.inbox } })}
+    aria-label={$t('inbox.listTabs.inbox', { values: { count: tabCounts.inbox } })}
+    class="text-[10px] px-2.5 py-1 rounded-full {emailListTab === 'inbox' ? 'bg-md-primary text-md-on-primary' : 'bg-md-surface-variant text-md-on-surface/60'} hover:bg-md-primary hover:text-md-on-primary transition-colors"
+    onclick={() => { emailListTab = 'inbox'; }}
+  >
+    {$t('inbox.listTabs.inbox', { values: { count: tabCounts.inbox } })}
+  </button>
+  <button
+    id="button-tab-archived"
+    role="tab"
+    aria-selected={emailListTab === 'archived'}
+    title={$t('inbox.listTabs.archived', { values: { count: tabCounts.archived } })}
+    aria-label={$t('inbox.listTabs.archived', { values: { count: tabCounts.archived } })}
+    class="text-[10px] px-2.5 py-1 rounded-full {emailListTab === 'archived' ? 'bg-md-primary text-md-on-primary' : 'bg-md-surface-variant text-md-on-surface/60'} hover:bg-md-primary hover:text-md-on-primary transition-colors"
+    onclick={() => { emailListTab = 'archived'; }}
+  >
+    {$t('inbox.listTabs.archived', { values: { count: tabCounts.archived } })}
+  </button>
+  <button
+    id="button-tab-deleted"
+    role="tab"
+    aria-selected={emailListTab === 'deleted'}
+    title={$t('inbox.listTabs.deleted', { values: { count: tabCounts.deleted } })}
+    aria-label={$t('inbox.listTabs.deleted', { values: { count: tabCounts.deleted } })}
+    class="text-[10px] px-2.5 py-1 rounded-full {emailListTab === 'deleted' ? 'bg-md-primary text-md-on-primary' : 'bg-md-surface-variant text-md-on-surface/60'} hover:bg-md-primary hover:text-md-on-primary transition-colors"
+    onclick={() => { emailListTab = 'deleted'; }}
+  >
+    {$t('inbox.listTabs.deleted', { values: { count: tabCounts.deleted } })}
+  </button>
+  <button
+    id="button-tab-all"
+    role="tab"
+    aria-selected={emailListTab === 'all'}
+    title={$t('inbox.listTabs.allMails', { values: { count: tabCounts.all } })}
+    aria-label={$t('inbox.listTabs.allMails', { values: { count: tabCounts.all } })}
+    class="text-[10px] px-2.5 py-1 rounded-full {emailListTab === 'all' ? 'bg-md-primary text-md-on-primary' : 'bg-md-surface-variant text-md-on-surface/60'} hover:bg-md-primary hover:text-md-on-primary transition-colors"
+    onclick={() => { emailListTab = 'all'; }}
+  >
+    {$t('inbox.listTabs.allMails', { values: { count: tabCounts.all } })}
   </button>
 </div>
 
 <!-- Email list -->
 <EmailList
   displayedEmails={displayedEmails}
-  filteredEmails={filteredEmails}
+  filteredEmails={tabFilteredEmails}
   displayedEmailCount={displayedEmailCount}
   {loading}
   {searchQuery}
@@ -837,15 +980,20 @@ let tagColors = $derived.by(() => {
   expandedThreadIds={expandedThreadIds}
   onToggleThread={toggleThread}
   {emailPreviewEnabled}
+  emailListTab={emailListTab}
+  onArchiveEmails={onArchiveEmails}
+  onDeleteEmails={onDeleteEmails}
+  onRestoreEmails={onRestoreEmails}
 />
 
 <!-- Bottom strips stacked wrapper -->
-<!-- autofill is always first in DOM, OTP always second. -->
+<!-- autofill is always first in DOM, OTP always second, renewal always third. -->
 <!-- CSS `order` swaps them visually: front strip gets order:2 (goes to bottom = screen bottom), -->
 <!-- back strip gets order:1 (goes to top = peeks above). Matches example's stacking exactly. -->
-<div class="bottom-strips-wrapper z-20 front-{frontStrip}" role="none">
+<!-- When `has-renewal` is set, the renewal strip is locked to order:3 (always front). -->
+<div class="bottom-strips-wrapper z-20 front-{frontStrip}{showRenewalStrip ? ' has-renewal' : ''}" role="none">
 {#if formDetected && showAutofillStrip}
-<div class="px-3 bg-md-primary-container bottom-strip-item bottom-strip-autofill rounded-xl" style="--i: 1; height: 40px; display: flex; align-items: center; box-sizing: border-box;">  
+<div class="h-[40px] flex items-center box-border px-3 bg-md-primary-container bottom-strip-item bottom-strip-autofill rounded-xl" style="--i: 1;">  
   <div class="flex items-center gap-2 w-full">
     <!-- Favicon + Domain -->
     <div class="flex items-center gap-2 min-w-0">
@@ -853,7 +1001,7 @@ let tagColors = $derived.by(() => {
         {#if currentDomain}
           <FaviconImage domain={currentDomain} size={24} class="w-4 h-4" fallbackLetter={currentDomain[0].toUpperCase()} fallbackColor="bg-md-secondary" />
         {:else}
-          <IconGlobe class="w-4 h-4 opacity-40" />
+          <Icon name="globe" class="w-4 h-4 opacity-40" />
         {/if}
       </div>
       <div class="min-w-0">
@@ -880,15 +1028,15 @@ let tagColors = $derived.by(() => {
           }
         }}
       >
-        <IconShield class="w-3 h-3 text-md-secondary flex-shrink-0" />
+        <Icon name="shield" class="w-3 h-3 text-md-secondary flex-shrink-0" />
         <div class="flex-1 min-w-0 text-[11px] font-medium text-md-on-surface pr-2 truncate">
           {identities.find(i => i.id === selectedIdentityId)?.name || $t('identities.select')}
         </div>
-        <IconChevronDown class="w-2.5 h-2.5 text-md-on-surface/40 flex-shrink-0 transition-transform {showIdentityDropdown ? 'rotate-180' : ''}" />
+        <Icon name="chevronDown" class="w-2.5 h-2.5 text-md-on-surface/40 flex-shrink-0 transition-transform {showIdentityDropdown ? 'rotate-180' : ''}" />
         
         <!-- Dropup Menu -->
         {#if showIdentityDropdown}
-          <div class="absolute bottom-full left-0 right-0 mb-1 bg-md-primary-container border border-md-secondary-container rounded-xl shadow-lg z-50 max-h-48 overflow-y-auto" style="scrollbar-width: thin; scrollbar-color: var(--md-primary) transparent;">
+          <div class="absolute bottom-full left-0 right-0 mb-1 bg-md-primary-container border border-md-secondary-container rounded-xl shadow-lg z-50 max-h-48 overflow-y-auto">
             {#each identities as identity}
               <button
                 id="button-identity-{identity.id}"
@@ -910,7 +1058,7 @@ let tagColors = $derived.by(() => {
 
     <!-- Close Button -->
     <button id="button-close-autofill" class="w-5 h-5 flex items-center justify-center rounded-lg bg-transparent hover:bg-md-secondary-container flex-shrink-0 ml-0.5 transition-colors" onclick={() => showAutofillStrip = false} aria-label="Close">
-      <IconX class="w-3 h-3" />
+      <Icon name="x" class="w-3 h-3" />
     </button>
   </div>
 </div>
@@ -919,7 +1067,7 @@ let tagColors = $derived.by(() => {
 <div
   id="button-otp-strip"
   class="bottom-strip-item bottom-strip-otp rounded-xl cursor-pointer"
-  style="--i: 2; box-sizing: border-box; overflow: hidden;"
+  style="--i: 2; overflow: hidden;"
   role="button"
   tabindex="0"
   aria-label="Open OTP message"
@@ -930,12 +1078,24 @@ let tagColors = $derived.by(() => {
   {#if otpDropupOpen}
   <div class="border-b border-md-primary bg-md-secondary-container">
 
+    <!-- Clear all OTPs button -->
+    <div class="px-5 pt-2 pb-1 flex items-center justify-end">
+      <button
+        class="text-[10px] font-semibold text-md-error/70 hover:text-md-error transition-colors flex items-center gap-1"
+        onclick={(e) => { e.stopPropagation(); clearAllOtps(); }}
+        aria-label={$t('inbox.clearAllOtps')}
+      >
+        <Icon name="trashBox" class="w-3 h-3" />
+        {$t('inbox.clearAllOtps')}
+      </button>
+    </div>
+
     <!-- Section: Current email address -->
     <div class="px-5 pt-2.5 pb-1 flex items-center justify-between">
       <span class="text-xs font-bold tracking-widest uppercase text-md-primary">{$t('inbox.currentEmail')}</span>
-      <IconChevronDown class="w-3.5 h-3.5 text-md-on-surface/40" />
+      <Icon name="chevronDown" class="w-3.5 h-3.5 text-md-on-surface/40" />
     </div>
-    <div class="overflow-y-auto" style="max-height: 180px; scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--md-outline, #75777f) 0.2, transparent) transparent;">
+    <div class="overflow-y-auto max-h-[180px]">
       {#if otpHistoryCurrent.length === 0}
         <p class="text-xs text-md-on-surface/40 px-5 pb-2">{$t('inbox.noOtps')}</p>
       {:else}
@@ -962,15 +1122,21 @@ let tagColors = $derived.by(() => {
                 <span class="text-xs text-md-on-surface/40">·</span>
                 <span class="text-xs text-md-on-surface/40 flex-shrink-0">{timeAgo(item.received_at)}</span>
               </div>
-              <span class="font-bold text-md-primary" style="font-size: 15px; letter-spacing: 0.08em;">{item.otp}</span>
+              <span class="font-bold text-md-primary text-[15px] tracking-[0.08em]">{item.otp}</span>
             </div>
             <button
               id="button-copy-otp-current-{item.otp}"
               class="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 bg-md-secondary-container"
               aria-label="Copy"
-              onclick={() => navigator.clipboard.writeText(item.otp)}
+              onclick={async () => {
+                try {
+                  await navigator.clipboard.writeText(item.otp);
+                } catch (e) {
+                  logError('Failed to copy OTP from current list', undefined, e instanceof Error ? e : new Error(String(e)));
+                }
+              }}
             >
-              <IconCopy class="w-3.5 h-3.5 text-md-primary" />
+              <Icon name="copy" class="w-3.5 h-3.5 text-md-primary" />
             </button>
           </div>
         {/each}
@@ -981,9 +1147,9 @@ let tagColors = $derived.by(() => {
     {#if otpHistoryOther.length > 0}
     <div class="px-5 pt-1 pb-1 flex items-center justify-between border-t border-md-secondary-container">
       <span class="text-xs font-bold tracking-widest uppercase text-md-primary">{$t('inbox.otherEmails')}</span>
-      <IconChevronDown class="w-3.5 h-3.5 text-md-on-surface/40" />
+      <Icon name="chevronDown" class="w-3.5 h-3.5 text-md-on-surface/40" />
     </div>
-    <div class="overflow-y-auto" style="max-height: 180px; scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--md-outline, #75777f) 0.2, transparent) transparent;">
+    <div class="overflow-y-auto max-h-[180px]">
       {#each otpHistoryOther as item}
         <div class="flex items-center gap-3 px-5 py-2 bg-md-surface-container rounded-xl mx-2 mb-2 shadow-sm">
           <div class="w-9 h-9 rounded-xl overflow-hidden flex items-center justify-center flex-shrink-0 bg-md-secondary-container">
@@ -1007,15 +1173,21 @@ let tagColors = $derived.by(() => {
               <span class="text-xs text-md-on-surface/40">·</span>
               <span class="text-xs text-md-on-surface/40 flex-shrink-0">{timeAgo(item.received_at)}</span>
             </div>
-            <span class="font-bold text-md-primary" style="font-size: 15px; letter-spacing: 0.08em;">{item.otp}</span>
+            <span class="font-bold text-md-primary text-[15px] tracking-[0.08em]">{item.otp}</span>
           </div>
           <button
             id="button-copy-otp-other-{item.otp}"
             class="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 bg-md-secondary-container"
             aria-label="Copy"
-            onclick={() => navigator.clipboard.writeText(item.otp)}
+            onclick={async () => {
+              try {
+                await navigator.clipboard.writeText(item.otp);
+              } catch (e) {
+                logError('Failed to copy OTP from other list', undefined, e instanceof Error ? e : new Error(String(e)));
+              }
+            }}
           >
-            <IconCopy class="w-3.5 h-3.5 text-md-primary" />
+            <Icon name="copy" class="w-3.5 h-3.5 text-md-primary" />
           </button>
         </div>
       {/each}
@@ -1025,7 +1197,7 @@ let tagColors = $derived.by(() => {
   </div>
   {/if}
 
-  <div class="flex items-center gap-2 px-3 bg-md-secondary-container rounded-xl" style="height: 40px;">
+  <div class="flex items-center gap-2 px-3 bg-md-secondary-container rounded-xl h-[40px]">
 
     <!-- Favicon + Domain + Detected OTP -->
     <div class="flex items-center gap-2 min-w-0">
@@ -1051,8 +1223,8 @@ let tagColors = $derived.by(() => {
         aria-label="Copy OTP"
         onclick={(e) => { e.stopPropagation(); onCopyOtp(); }}
       >
-        <span class="font-bold" style="font-size: 13px; letter-spacing: 0.05em;">{latestOtp.replace(/\s/g, '')}</span>
-        <IconCopy class="w-3 h-3 text-white/80 flex-shrink-0" />
+        <span class="font-bold text-[13px] tracking-[0.05em]">{latestOtp.replace(/\s/g, '')}</span>
+        <Icon name="copy" class="w-3 h-3 text-white/80 flex-shrink-0" />
       </button>
     </div>
 
@@ -1064,9 +1236,9 @@ let tagColors = $derived.by(() => {
         onclick={(e) => { e.stopPropagation(); toggleOtpDropup(); }}
       >
         {#if otpDropupOpen}
-          <IconChevronUp class="w-3 h-3" />
+          <Icon name="chevronUp" class="w-3 h-3" />
         {:else}
-          <IconChevronDown class="w-3 h-3" />
+          <Icon name="chevronDown" class="w-3 h-3" />
         {/if}
       </button>
       <button
@@ -1074,7 +1246,7 @@ let tagColors = $derived.by(() => {
         aria-label="Collapse OTP"
         onclick={(e) => { e.stopPropagation(); otpCollapsed = true; }}
       >
-        <IconChevronUp class="w-3 h-3" />
+        <Icon name="chevronUp" class="w-3 h-3" />
       </button>
     </div>
 
@@ -1086,7 +1258,79 @@ let tagColors = $derived.by(() => {
     aria-label="Show OTP bar"
   >
     <span>OTP ready · {latestOtp}</span>
-    <IconChevronDown class="w-3.5 h-3.5" />
+    <Icon name="chevronDown" class="w-3.5 h-3.5" />
+  </button>
+  {/if}
+</div>
+{/if}
+{#if showRenewalStrip}
+<div
+  id="button-renewal-strip"
+  class="bottom-strip-item bottom-strip-renewal rounded-xl"
+  style="--i: 3; overflow: hidden;"
+>
+  {#if !renewalStripCollapsed}
+  <div class="flex flex-col gap-2 px-3 py-2.5 bg-md-primary-container border border-md-warning/40 rounded-xl">
+    <!-- Header: icon + title + dismiss -->
+    <div class="flex items-center gap-2">
+      <div class="flex-shrink-0 w-7 h-7 rounded-lg bg-md-warning/20 flex items-center justify-center">
+        <Icon name="refresh" class="w-4 h-4 text-md-warning" />
+      </div>
+      <div class="flex-1 min-w-0">
+        <div class="text-xs font-bold text-md-on-surface leading-tight">{$t('inbox.renewalStrip.title')}</div>
+        <div class="text-[10px] text-md-on-surface/60 leading-tight truncate">{$t('inbox.renewalStrip.prompt')}</div>
+      </div>
+      <button
+        id="button-renewal-dismiss"
+        class="w-5 h-5 flex items-center justify-center rounded-lg bg-transparent hover:bg-md-secondary-container flex-shrink-0 transition-colors"
+        aria-label={$t('inbox.renewalStrip.dismissAria')}
+        onclick={(e) => { e.stopPropagation(); renewalStripDismissed = true; }}
+      >
+        <Icon name="x" class="w-3 h-3" />
+      </button>
+    </div>
+    <!-- Action row: 3 buttons -->
+    <div class="flex items-center gap-1.5">
+      <button
+        id="button-renewal-always"
+        class="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-semibold bg-md-primary text-md-on-primary hover:bg-md-primary/90 transition-colors"
+        title={$t('inbox.renewalStrip.alwaysDescription')}
+        onclick={(e) => {
+          e.stopPropagation();
+          if (currentAccount) onToggleAutoExtend(currentAccount);
+        }}
+      >
+        <Icon name="refresh" class="w-3 h-3" />
+        {$t('inbox.renewalStrip.always')}
+      </button>
+      <button
+        id="button-renewal-once"
+        class="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-semibold bg-md-secondary-container text-md-on-surface hover:bg-md-secondary-container/80 transition-colors"
+        title={$t('inbox.renewalStrip.onceDescription')}
+        onclick={(e) => {
+          e.stopPropagation();
+          if (currentAccount) onExtendAccount(currentAccount);
+        }}
+      >
+        {$t('inbox.renewalStrip.once')}
+      </button>
+      <button
+        id="button-renewal-no"
+        class="px-2.5 py-1.5 rounded-lg text-[11px] font-semibold bg-transparent text-md-on-surface/60 hover:bg-md-secondary-container hover:text-md-on-surface transition-colors"
+        onclick={(e) => { e.stopPropagation(); renewalStripDismissed = true; }}
+      >
+        {$t('inbox.renewalStrip.dismiss')}
+      </button>
+    </div>
+  </div>
+  {:else}
+  <button
+    class="w-full flex items-center justify-between px-5 py-1.5 text-xs font-medium text-md-warning/70 hover:text-md-warning transition-colors bg-md-primary-container"
+    onclick={(e) => { e.stopPropagation(); renewalStripCollapsed = false; }}
+    aria-label="Show renewal bar"
+  >
+    <span>{$t('inbox.renewalStrip.title')} · {$t('inbox.renewalStrip.prompt')}</span>
+    <Icon name="chevronDown" class="w-3.5 h-3.5" />
   </button>
   {/if}
 </div>
@@ -1109,14 +1353,12 @@ let tagColors = $derived.by(() => {
 <style>
   /*
    * Matches example exactly (ul/li pattern).
-   * DOM: autofill=1st child (top), otp=2nd child (bottom).
-   * CSS `order` swaps visually: front strip → order:2 (bottom=screen bottom, in front).
-   *                              back strip  → order:1 (top=peeks above front).
+   * DOM: autofill=1st child (top), otp=2nd child (middle), renewal=3rd child (bottom).
+   * CSS `order` swaps visually: front strip → highest order (bottom=screen bottom, in front).
+   *                              back strip  → lower order (peeks above front).
    *
-   * Depth: front = translateZ(+65px), back = translateZ(-40px).
-   * Peek:  back strip translateY(-14px) to peek above front (like example nth-child(1)).
-   * Front: translateY(0) stays flush at bottom.
-   * Hover: gap:20px fans both out flat (example ul:hover li).
+   * When `has-renewal` is set on the wrapper, the renewal strip is LOCKED to order:3
+   * (always front) regardless of frontStrip. autofill and otp shift down one slot.
    */
 
   :global(.bottom-strips-wrapper) {
@@ -1143,14 +1385,15 @@ let tagColors = $derived.by(() => {
     transition-delay: calc(var(--i, 1) * 50ms);
   }
 
-  /* ── when autofill is front: autofill→order:2 (bottom/front), otp→order:1 (top/back) ── */
-  :global(.bottom-strips-wrapper.front-autofill .bottom-strip-autofill) {
+  /* ── No renewal: existing 2-strip swap rules ── */
+  /* autofill front: autofill→order:2, otp→order:1 */
+  :global(.bottom-strips-wrapper.front-autofill:not(.has-renewal) .bottom-strip-autofill) {
     order: 2;
     transform: translateZ(0) translateY(0);
     opacity: 1;
     width: 350px;
   }
-  :global(.bottom-strips-wrapper.front-autofill .bottom-strip-otp) {
+  :global(.bottom-strips-wrapper.front-autofill:not(.has-renewal) .bottom-strip-otp) {
     order: 1;
     transform: translateZ(0) translateY(5px);
     opacity: 0.95;
@@ -1158,14 +1401,14 @@ let tagColors = $derived.by(() => {
     margin: 0 auto;
   }
 
-  /* ── when otp is front: otp→order:2 (bottom/front), autofill→order:1 (top/back) ── */
-  :global(.bottom-strips-wrapper.front-otp .bottom-strip-otp) {
+  /* otp front: otp→order:2, autofill→order:1 */
+  :global(.bottom-strips-wrapper.front-otp:not(.has-renewal) .bottom-strip-otp) {
     order: 2;
     transform: translateZ(0) translateY(0);
     opacity: 1;
     width: 350px;
   }
-  :global(.bottom-strips-wrapper.front-otp .bottom-strip-autofill) {
+  :global(.bottom-strips-wrapper.front-otp:not(.has-renewal) .bottom-strip-autofill) {
     order: 1;
     transform: translateZ(0) translateY(5px);
     opacity: 0.95;
@@ -1173,7 +1416,29 @@ let tagColors = $derived.by(() => {
     margin: 0 auto;
   }
 
-  /* ── hover: fan out both strips flat, full opacity, natural positions ── */
+  /* ── Renewal present: renewal LOCKED to order:3 (always front) ── */
+  :global(.bottom-strips-wrapper.has-renewal .bottom-strip-renewal) {
+    order: 3;
+    transform: translateZ(0) translateY(0);
+    opacity: 1;
+    width: 350px;
+  }
+  :global(.bottom-strips-wrapper.has-renewal .bottom-strip-autofill) {
+    order: 2;
+    transform: translateZ(0) translateY(5px);
+    opacity: 0.95;
+    width: 340px;
+    margin: 0 auto;
+  }
+  :global(.bottom-strips-wrapper.has-renewal .bottom-strip-otp) {
+    order: 1;
+    transform: translateZ(0) translateY(5px);
+    opacity: 0.95;
+    width: 340px;
+    margin: 0 auto;
+  }
+
+  /* ── hover: fan out all strips flat, full opacity, natural positions ── */
   :global(.bottom-strips-wrapper:hover .bottom-strip-item) {
     opacity: 1;
     transform: translateZ(0) translateY(0);

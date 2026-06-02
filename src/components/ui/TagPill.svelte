@@ -1,5 +1,5 @@
 <script lang="ts">
-import IconTag from '@/components/icons/IconTag.svelte';
+import Icon from '@/components/icons/Icon.svelte';
 
 let {
   tag = null,
@@ -50,7 +50,7 @@ function handleKeyDown(e: KeyboardEvent) {
   title={tag ? `Tag: ${tag}` : 'Add a tag'}
 >
   {#if showIcon}
-    <IconTag class={iconClass} />
+    <Icon name="tag" class={iconClass} />
   {/if}
   {tag || 'Add a tag'}
 </button>

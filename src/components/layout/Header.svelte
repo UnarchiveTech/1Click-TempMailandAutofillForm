@@ -1,7 +1,7 @@
 <script lang="ts">
 import { browser } from 'wxt/browser';
 import AppLogo from '@/components/icons/AppLogo.svelte';
-import IconExpand from '@/components/icons/IconExpand.svelte';
+import Icon from '@/components/icons/Icon.svelte';
 import ThemeToggle from '@/components/ui/ThemeToggle.svelte';
 import type { View } from '@/features/types/view-types.js';
 import type { Account, Email } from '@/utils/types.js';
@@ -47,9 +47,9 @@ async function expandCurrentView() {
         class="w-7 h-7 flex items-center justify-center rounded-lg text-md-on-surface/50 hover:text-md-on-surface hover:bg-md-outline-variant transition-all duration-200 active:scale-95"
         title="Full Page"
         aria-label="Expand view"
-        onclick={expandCurrentView}
+        onclick={(e) => { e.stopPropagation(); void expandCurrentView(); }}
       >
-        <IconExpand class="w-4 h-4" />
+        <Icon name="expand" class="w-4 h-4" />
       </button>
     </div>
   </div>

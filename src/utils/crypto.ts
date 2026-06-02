@@ -90,11 +90,16 @@ async function getOrCreateMasterKey(): Promise<CryptoKey> {
 
     if (storedKeyData[MASTER_KEY_ID] && typeof storedKeyData[MASTER_KEY_ID] === 'string') {
       // Import existing key
-      const keyData = JSON.parse(storedKeyData[MASTER_KEY_ID]);
-      return await crypto.subtle.importKey('jwk', keyData, { name: 'AES-GCM' }, true, [
-        'encrypt',
-        'decrypt',
-      ]);
+      try {
+        const keyData = JSON.parse(storedKeyData[MASTER_KEY_ID]);
+        return await crypto.subtle.importKey('jwk', keyData, { name: 'AES-GCM' }, true, [
+          'encrypt',
+          'decrypt',
+        ]);
+      } catch (parseError) {
+        logError('Failed to parse master key JSON', parseError);
+        // Fall through to generate new key
+      }
     }
 
     // Generate new key with initial metadata
@@ -132,7 +137,12 @@ async function getKeyMetadata(): Promise<KeyMetadata | null> {
   try {
     const storedMetadata = await browser.storage.session.get(KEY_METADATA_ID);
     if (storedMetadata[KEY_METADATA_ID] && typeof storedMetadata[KEY_METADATA_ID] === 'string') {
-      return JSON.parse(storedMetadata[KEY_METADATA_ID]);
+      try {
+        return JSON.parse(storedMetadata[KEY_METADATA_ID]);
+      } catch (parseError) {
+        logError('Failed to parse key metadata JSON', parseError);
+        return null;
+      }
     }
     return null;
   } catch (e: unknown) {
@@ -323,17 +333,4 @@ export async function hashPassword(password: string): Promise<string> {
   const hash = await crypto.subtle.digest('SHA-256', data);
   const hashArray = Array.from(new Uint8Array(hash));
   return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
-}
-
-/**
- * Securely clear sensitive data from memory
- *
- * NOTE: In JavaScript, strings are immutable and cannot be truly cleared from memory.
- * This function is kept for API compatibility but does not provide real security.
- * For sensitive data, consider using WebAssembly or avoid keeping it in memory longer than necessary.
- */
-export function clearSensitiveData(_data: string): void {
-  // This is a no-op since strings are immutable in JavaScript
-  // The function is kept for API compatibility but does not provide real security
-  // In a real implementation, you would use WebAssembly or avoid keeping sensitive data in memory
 }

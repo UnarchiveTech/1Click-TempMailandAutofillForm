@@ -1,5 +1,5 @@
 <script lang="ts">
-import IconX from '@/components/icons/IconX.svelte';
+import Icon from '@/components/icons/Icon.svelte';
 import { getErrorMessage } from '@/utils/errors.js';
 import { setupFocusTrap } from '@/utils/focusTrap.js';
 import { validateTextInput } from '@/utils/validation.js';
@@ -95,7 +95,7 @@ function clearSelection() {
       class="absolute inset-0 bg-md-surface/30 backdrop-blur-sm"
       role="button"
       tabindex="-1"
-      onclick={onClose}
+      onclick={(e) => { e.stopPropagation(); onClose(); }}
       onkeydown={(e) => e.key === 'Escape' && onClose()}
     ></div>
 
@@ -103,9 +103,9 @@ function clearSelection() {
       id="button-close-dialog"
       class="absolute top-4 right-4 z-10 w-9 h-9 rounded-full bg-md-surface hover:bg-md-surface-variant flex items-center justify-center shadow-md transition-colors"
       aria-label="Close dialog"
-      onclick={onClose}
+      onclick={(e) => { e.stopPropagation(); onClose(); }}
     >
-      <IconX class="w-4 h-4 text-md-on-surface/70" />
+      <Icon name="x" class="w-4 h-4 text-md-on-surface/70" />
     </button>
 
     <div
@@ -148,9 +148,9 @@ function clearSelection() {
             id="button-clear-tag"
             class="w-8 h-8 flex items-center justify-center rounded-lg bg-transparent hover:bg-md-surface-variant transition-colors"
             aria-label="Clear"
-            onclick={clearSelection}
+            onclick={(e) => { e.stopPropagation(); clearSelection(); }}
           >
-            <IconX class="w-4 h-4 text-md-on-surface/60" />
+            <Icon name="x" class="w-4 h-4 text-md-on-surface/60" />
           </button>
         {/if}
       </div>
@@ -163,8 +163,8 @@ function clearSelection() {
             <button
               id="button-color-{color.replace('#', '')}"
               class="w-6 h-6 rounded-full border-2 {selectedColor === color ? 'border-md-secondary-container scale-110' : 'border-transparent'} transition-all"
-              style="background-color: {color};"
-              onclick={() => selectedColor = color}
+              style:background-color={color}
+              onclick={(e) => { e.stopPropagation(); selectedColor = color; }}
               aria-label={`Select color ${color}`}
             ></button>
           {/each}
@@ -175,16 +175,16 @@ function clearSelection() {
       {#if existingTags.length > 0}
         <div>
           <p class="text-xs font-semibold text-md-on-surface/50 uppercase tracking-wider mb-2">Existing Tags</p>
-          <div class="flex flex-wrap gap-2 max-h-40 overflow-y-auto" style="scrollbar-width: thin; scrollbar-color: var(--md-primary) transparent;">
+          <div class="flex flex-wrap gap-2 max-h-40 overflow-y-auto">
             {#each existingTags as tag}
               <button
                 id="button-select-tag-{tag}"
                 class="px-2 py-1 text-xs rounded-full flex items-center gap-1 {selectedExistingTag === tag ? 'bg-md-primary text-md-on-primary' : 'bg-transparent hover:bg-md-surface-variant'} transition-colors"
-                onclick={() => selectExistingTag(tag)}
+                onclick={(e) => { e.stopPropagation(); selectExistingTag(tag); }}
                 aria-label="Select tag {tag}"
               >
                 {#if tagColors[tag]}
-                  <span class="w-3 h-3 rounded-full" style="background-color: {tagColors[tag]};"></span>
+                  <span class="w-3 h-3 rounded-full" style:background-color={tagColors[tag]}></span>
                 {/if}
                 {tag}
               </button>
@@ -199,7 +199,7 @@ function clearSelection() {
           id="button-cancel-tag"
           class="flex-1 px-3 py-1.5 text-sm rounded-xl bg-md-secondary text-md-on-secondary hover:bg-md-secondary/90 transition-colors"
           aria-label="Cancel"
-          onclick={onClose}
+          onclick={(e) => { e.stopPropagation(); onClose(); }}
         >
           Cancel
         </button>
@@ -207,7 +207,7 @@ function clearSelection() {
           id="button-save-tag"
           class="flex-1 px-3 py-1.5 text-sm rounded-xl bg-md-primary text-md-on-primary hover:bg-md-primary/90 transition-colors"
           aria-label="Save tag"
-          onclick={handleSave}
+          onclick={(e) => { e.stopPropagation(); handleSave(); }}
         >
           Save
         </button>

@@ -5,7 +5,11 @@
 import { browser } from 'wxt/browser';
 import { BUTTON_OPACITY_DEFAULT, BUTTON_OPACITY_HOVER, BUTTON_SIZE_PX } from '@/utils/constants.js';
 import { NoActiveInboxError } from '@/utils/errors.js';
-import { positionButtonAtEndOfField } from '../dom/positioning.js';
+import {
+  positionAboveForm,
+  positionAtEndOfField,
+  trackElementPosition,
+} from '../dom/positioning.js';
 import { showTooltip } from '../dom/tooltip.js';
 import {
   fillSelectElement,
@@ -19,16 +23,17 @@ import { generatePhoneNumber, generateUsername, generateWebsiteUrl } from './gen
 const DEFAULT_PRIMARY_COLOR = '#4c662b';
 const DEFAULT_PRIMARY_HOVER = '#3a4e20';
 
-// Cached colors to avoid repeated storage reads
-let cachedPrimaryColor: string | null = null;
+function appendSvgIcon(target: HTMLElement, svgMarkup: string): void {
+  const svg = new DOMParser().parseFromString(svgMarkup, 'image/svg+xml').documentElement;
+  if (svg.nodeName.toLowerCase() === 'svg') {
+    target.appendChild(document.importNode(svg, true));
+  }
+}
 
 async function getPrimaryColor(): Promise<string> {
-  if (cachedPrimaryColor) return cachedPrimaryColor;
-
   try {
     const result = (await browser.storage.local.get('customColor')) as { customColor?: string };
-    cachedPrimaryColor = result.customColor || DEFAULT_PRIMARY_COLOR;
-    return cachedPrimaryColor;
+    return result.customColor || DEFAULT_PRIMARY_COLOR;
   } catch {
     return DEFAULT_PRIMARY_COLOR;
   }
@@ -220,7 +225,7 @@ export async function injectAutoFillButtons(
     autoFillButton.onmouseup = () => {
       autoFillButton.style.transform = 'scale(1)';
     };
-    autoFillButton.innerHTML = iconSvg;
+    appendSvgIcon(autoFillButton, iconSvg);
 
     autoFillButton.addEventListener('click', async (event: MouseEvent) => {
       event.preventDefault();
@@ -308,18 +313,24 @@ export async function injectAutoFillButtons(
     });
 
     buttonContainer.appendChild(autoFillButton);
-    positionButtonAtEndOfField(buttonContainer, inputField as HTMLElement, updatePositionListeners);
+    trackElementPosition(
+      buttonContainer,
+      inputField as HTMLElement,
+      positionAtEndOfField,
+      updatePositionListeners
+    );
     document.body.appendChild(buttonContainer);
     injectedButtons.push(buttonContainer);
   });
 
-  await addFillAllButton(form, injectedButtons, updateAndCopyCredentials);
+  await addFillAllButton(form, injectedButtons, updatePositionListeners, updateAndCopyCredentials);
   autoFillButtonsInjected.value = true;
 }
 
 async function addFillAllButton(
   form: HTMLFormElement,
   injectedButtons: HTMLElement[],
+  updatePositionListeners: Array<() => void>,
   updateAndCopyCredentials: (creds: Record<string, string>) => Promise<void>
 ): Promise<void> {
   const buttonContainer = document.createElement('div');
@@ -373,12 +384,15 @@ async function addFillAllButton(
   fillAllButton.onmouseup = () => {
     fillAllButton.style.transform = 'scale(1)';
   };
-  fillAllButton.innerHTML = `
+  appendSvgIcon(
+    fillAllButton,
+    `
     <svg style="pointer-events: none; margin-right: 4px;" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
       <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-2 8h-3v3c0 .55-.45 1-1 1s-1-.45-1-1v-3H9c-.55 0-1-.45-1-1s.45-1 1-1h3V7c0-.55.45-1 1-1s1 .45 1 1v3h3c.55 0 1 .45 1 1s-.45 1-1 1z"/>
     </svg>
-    Fill All
-  `;
+  `
+  );
+  fillAllButton.append('Fill All');
 
   fillAllButton.addEventListener('click', async () => {
     try {
@@ -402,13 +416,7 @@ async function addFillAllButton(
 
   buttonContainer.appendChild(fillAllButton);
 
-  const formRect = form.getBoundingClientRect();
-  const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
-  const scrollLeft = window.pageXOffset || document.documentElement.scrollLeft;
-
-  buttonContainer.style.position = 'absolute';
-  buttonContainer.style.top = `${formRect.top + scrollTop - 40}px`;
-  buttonContainer.style.left = `${formRect.left + scrollLeft + 10}px`;
+  trackElementPosition(buttonContainer, form, positionAboveForm, updatePositionListeners);
 
   document.body.appendChild(buttonContainer);
   injectedButtons.push(buttonContainer);

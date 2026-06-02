@@ -1,9 +1,8 @@
 <script lang="ts">
-import { onMount } from 'svelte';
+import { onDestroy, onMount } from 'svelte';
+import { t } from 'svelte-i18n';
 import { browser } from 'wxt/browser';
-import IconChevronLeft from '@/components/icons/IconChevronLeft.svelte';
-import IconTag from '@/components/icons/IconTag.svelte';
-import IconTrash from '@/components/icons/IconTrash.svelte';
+import Icon from '@/components/icons/Icon.svelte';
 
 let { onBack = () => {} } = $props<{
   onBack?: () => void;
@@ -27,6 +26,7 @@ async function loadLabels() {
     };
     const countMap: Record<string, number> = {};
     for (const tags of Object.values(emailTags)) {
+      if (!Array.isArray(tags)) continue;
       for (const tag of tags) {
         countMap[tag] = (countMap[tag] ?? 0) + 1;
       }
@@ -45,6 +45,7 @@ async function deleteLabel(labelName: string) {
   };
   const updated: Record<string, string[]> = {};
   for (const [id, tags] of Object.entries(emailTags)) {
+    if (!Array.isArray(tags)) continue;
     const filtered = tags.filter((t) => t !== labelName);
     if (filtered.length > 0) updated[id] = filtered;
   }
@@ -63,6 +64,7 @@ async function renameLabel(oldName: string, newName: string) {
   };
   const updated: Record<string, string[]> = {};
   for (const [id, tags] of Object.entries(emailTags)) {
+    if (!Array.isArray(tags)) continue;
     updated[id] = tags.map((t) => (t === oldName ? trimmed : t));
   }
   await browser.storage.local.set({ emailTags: updated });
@@ -76,7 +78,20 @@ function startRename(name: string) {
   renameValue = name;
 }
 
-onMount(loadLabels);
+onMount(() => {
+  loadLabels();
+
+  const handleStorageChange = (
+    changes: Record<string, { oldValue?: unknown; newValue?: unknown }>,
+    areaName: string
+  ) => {
+    if (areaName !== 'local') return;
+    if (changes.emailTags) loadLabels();
+  };
+
+  browser.storage.onChanged.addListener(handleStorageChange);
+  onDestroy(() => browser.storage.onChanged.removeListener(handleStorageChange));
+});
 </script>
 
 <div class="flex flex-col h-full">
@@ -85,13 +100,13 @@ onMount(loadLabels);
     <button
       class="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-md-secondary-container transition-colors"
       onclick={onBack}
-      aria-label="Back"
+      aria-label={$t('common.back')}
     >
-      <IconChevronLeft class="w-5 h-5" />
+      <Icon name="chevronLeft" class="w-5 h-5" />
     </button>
     <div>
-      <h1 class="text-base font-bold text-md-on-surface leading-tight">Email Label Management</h1>
-      <p class="text-[11px] text-md-on-surface/50">Rename or delete email labels globally</p>
+      <h1 class="text-base font-bold text-md-on-surface leading-tight">{$t('labelManagement.title')}</h1>
+      <p class="text-[11px] text-md-on-surface/50">{$t('labelManagement.subtitle')}</p>
     </div>
   </div>
 
@@ -103,14 +118,14 @@ onMount(loadLabels);
       {/each}
     {:else if labels.length === 0}
       <div class="flex flex-col items-center justify-center py-16 gap-3 text-center">
-        <IconTag class="w-10 h-10 text-md-on-surface/20" />
-        <div class="text-sm font-medium text-md-on-surface/40">No labels yet</div>
-        <div class="text-xs text-md-on-surface/30">Labels appear when you tag emails in your inbox</div>
+        <Icon name="tag" class="w-10 h-10 text-md-on-surface/20" />
+        <div class="text-sm font-medium text-md-on-surface/40">{$t('labelManagement.noLabels')}</div>
+        <div class="text-xs text-md-on-surface/30">{$t('labelManagement.noLabelsHint')}</div>
       </div>
     {:else}
       {#each labels as label}
         <div class="bg-md-primary-container rounded-xl px-4 py-3 flex items-center gap-3">
-          <IconTag class="w-4 h-4 text-md-primary shrink-0" />
+          <Icon name="tag" class="w-4 h-4 text-md-primary shrink-0" />
 
           {#if renamingLabel === label.name}
             <input
@@ -124,26 +139,26 @@ onMount(loadLabels);
             <button
               class="px-3 py-1.5 text-xs rounded-lg bg-md-primary text-md-on-primary font-semibold transition-colors hover:bg-md-primary/90"
               onclick={() => renameLabel(label.name, renameValue)}
-            >Save</button>
+            >{$t('labelManagement.save')}</button>
             <button
               class="px-3 py-1.5 text-xs rounded-lg bg-md-secondary-container text-md-on-surface transition-colors hover:bg-md-outline-variant"
               onclick={() => { renamingLabel = null; renameValue = ''; }}
-            >Cancel</button>
+            >{$t('labelManagement.cancel')}</button>
           {:else}
             <div class="flex-1 min-w-0">
               <div class="text-sm font-medium text-md-on-surface truncate">{label.name}</div>
-              <div class="text-[10px] text-md-on-surface/40">{label.count} email{label.count === 1 ? '' : 's'}</div>
+              <div class="text-[10px] text-md-on-surface/40">{$t('labelManagement.emailCount', { default: 'labelManagement.emailCountPlural', values: { n: label.count } })}</div>
             </div>
             <button
               class="text-xs px-2.5 py-1 rounded-lg bg-md-secondary-container text-md-on-surface hover:bg-md-outline-variant transition-colors"
               onclick={() => startRename(label.name)}
-            >Rename</button>
+            >{$t('labelManagement.rename')}</button>
             <button
               class="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-md-error/10 text-md-error transition-colors shrink-0"
-              aria-label="Delete label"
+              aria-label={$t('labelManagement.deleteLabel')}
               onclick={() => deleteLabel(label.name)}
             >
-              <IconTrash class="w-4 h-4" />
+              <Icon name="trash" class="w-4 h-4" />
             </button>
           {/if}
         </div>

@@ -1,4 +1,3 @@
-import { onDestroy } from 'svelte';
 import { browser } from 'wxt/browser';
 
 type StorageChange = {
@@ -27,9 +26,9 @@ export function useExtensionStorageSync(handlers: StorageSyncHandler[]) {
 
   browser.storage.onChanged.addListener(listener);
 
-  onDestroy(() => {
+  return () => {
     browser.storage.onChanged.removeListener(listener);
-  });
+  };
 }
 
 export const SETTINGS_SYNC_KEYS = [

@@ -17,8 +17,8 @@
     </g>
   </svg>
   <div class="flex items-center gap-2">
-    <span class="text-lg font-extrabold text-md-on-surface" style="font-family: system-ui, sans-serif; letter-spacing: -0.5px; line-height: 1;">1Click</span>
-    <div class="w-px self-stretch" style="background-color: var(--md-primary, #445e91);"></div>
-    <span class="text-md-on-surface/80" style="font-family: system-ui, sans-serif; font-size: 10px; line-height: 1.1; font-weight: 600;">Temp Mail &<br/>Autofill Form</span>
+    <span class="text-lg font-extrabold text-md-on-surface font-[system-ui,sans-serif] tracking-[-0.5px] leading-none">1Click</span>
+    <div class="w-px self-stretch bg-md-primary"></div>
+    <span class="text-md-on-surface/80 font-[system-ui,sans-serif] text-[10px] leading-[1.1] font-semibold">Temp Mail &<br/>Autofill Form</span>
   </div>
 </div>

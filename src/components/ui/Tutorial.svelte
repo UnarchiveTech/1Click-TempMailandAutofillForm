@@ -1,7 +1,7 @@
 <script lang="ts">
 import { t } from 'svelte-i18n';
 import { browser } from 'wxt/browser';
-import IconX from '@/components/icons/IconX.svelte';
+import Icon from '@/components/icons/Icon.svelte';
 
 let {
   steps,
@@ -43,10 +43,10 @@ async function skipTutorial() {
       </div>
       <button 
         class="text-md-on-surface/50 hover:text-md-on-surface transition-colors"
-        onclick={skipTutorial}
+        onclick={(e) => { e.stopPropagation(); void skipTutorial(); }}
         aria-label="Skip tutorial"
       >
-        <IconX class="w-5 h-5" />
+        <Icon name="x" class="w-5 h-5" />
       </button>
     </div>
 
@@ -59,7 +59,7 @@ async function skipTutorial() {
       {#if currentStep > 0}
         <button
           class="flex-1 px-3 py-1.5 text-sm rounded-lg bg-transparent hover:bg-md-surface-variant transition-colors"
-          onclick={onPrevious}
+          onclick={(e) => { e.stopPropagation(); onPrevious(); }}
         >
           {$t('common.back')}
         </button>
@@ -68,14 +68,14 @@ async function skipTutorial() {
       {#if currentStep < steps.length - 1}
         <button
           class="flex-1 px-3 py-1.5 text-sm rounded-lg bg-md-primary text-md-on-primary hover:bg-md-primary/90 transition-colors"
-          onclick={onNext}
+          onclick={(e) => { e.stopPropagation(); onNext(); }}
         >
           {$t('common.continue')}
         </button>
       {:else}
         <button
           class="flex-1 px-3 py-1.5 text-sm rounded-lg bg-md-primary text-md-on-primary hover:bg-md-primary/90 transition-colors"
-          onclick={markTutorialComplete}
+          onclick={(e) => { e.stopPropagation(); void markTutorialComplete(); }}
         >
           {$t('common.complete')}
         </button>

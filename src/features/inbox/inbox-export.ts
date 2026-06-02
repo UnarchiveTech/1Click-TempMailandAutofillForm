@@ -44,38 +44,48 @@ export function showExportFormatDialog(): Promise<string | null> {
   return new Promise((resolve) => {
     const dialog = document.createElement('div');
     dialog.className = 'fixed inset-0 flex items-center justify-center bg-black/50 z-50';
-    dialog.innerHTML = `
-        <div class="bg-md-primary-container rounded-2xl shadow-2xl p-5 flex flex-col gap-4 w-96">
-          <div>
-            <h3 class="font-bold text-base mb-1 text-md-on-surface">Select Export Format</h3>
-            <div class="flex flex-col gap-2 mt-4">
-              <button class="px-3 py-2 text-sm rounded-xl border border-md-outline-variant bg-transparent text-md-on-surface hover:bg-md-secondary-container transition-colors format-btn" data-format="json" aria-label="Export as JSON">JSON Format</button>
-              <button class="px-3 py-2 text-sm rounded-xl border border-md-outline-variant bg-transparent text-md-on-surface hover:bg-md-secondary-container transition-colors format-btn" data-format="eml" aria-label="Export as EML">EML Format</button>
-              <button class="px-3 py-2 text-sm rounded-xl border border-md-outline-variant bg-transparent text-md-on-surface hover:bg-md-secondary-container transition-colors format-btn" data-format="mbox" aria-label="Export as MBOX">MBOX Format</button>
-            </div>
-            <div class="flex gap-2 pt-4 justify-end mt-2">
-              <button class="px-4 py-2 text-sm rounded-xl bg-transparent text-md-on-surface/80 hover:bg-md-surface-variant transition-colors cancel-btn" aria-label="Cancel export">Cancel</button>
-            </div>
-          </div>
-        </div>
-      `;
+    const panel = document.createElement('div');
+    panel.className = 'bg-md-primary-container rounded-2xl shadow-2xl p-5 flex flex-col gap-4 w-96';
+    const content = document.createElement('div');
+    const heading = document.createElement('h3');
+    heading.className = 'font-bold text-base mb-1 text-md-on-surface';
+    heading.textContent = 'Select Export Format';
+    const formatList = document.createElement('div');
+    formatList.className = 'flex flex-col gap-2 mt-4';
+    const actions = document.createElement('div');
+    actions.className = 'flex gap-2 pt-4 justify-end mt-2';
 
-    document.body.appendChild(dialog);
+    for (const [format, label] of [
+      ['json', 'JSON Format'],
+      ['eml', 'EML Format'],
+      ['mbox', 'MBOX Format'],
+    ] as const) {
+      const button = document.createElement('button');
+      button.className =
+        'px-3 py-2 text-sm rounded-xl border border-md-outline-variant bg-transparent text-md-on-surface hover:bg-md-secondary-container transition-colors';
+      button.textContent = label;
+      button.setAttribute('aria-label', `Export as ${format.toUpperCase()}`);
+      button.addEventListener('click', () => {
+        dialog.remove();
+        resolve(format);
+      });
+      formatList.appendChild(button);
+    }
 
-    dialog.querySelectorAll('.format-btn').forEach((button) => {
-      if (button instanceof HTMLElement) {
-        button.addEventListener('click', () => {
-          const format = button.getAttribute('data-format');
-          document.body.removeChild(dialog);
-          resolve(format);
-        });
-      }
-    });
-
-    dialog.querySelector('.cancel-btn')?.addEventListener('click', () => {
-      document.body.removeChild(dialog);
+    const cancelButton = document.createElement('button');
+    cancelButton.className =
+      'px-4 py-2 text-sm rounded-xl bg-transparent text-md-on-surface/80 hover:bg-md-surface-variant transition-colors';
+    cancelButton.textContent = 'Cancel';
+    cancelButton.setAttribute('aria-label', 'Cancel export');
+    cancelButton.addEventListener('click', () => {
+      dialog.remove();
       resolve(null);
     });
+    actions.appendChild(cancelButton);
+    content.append(heading, formatList, actions);
+    panel.appendChild(content);
+    dialog.appendChild(panel);
+    document.body.appendChild(dialog);
   });
 }
 
@@ -176,7 +186,7 @@ export function generateSingleEMLContent(account: Account, message: Email): stri
 export function generateMBOXContent(account: Account, messages: Email[]): string {
   let mboxContent = '';
   messages.forEach((message, index) => {
-    const fromEmail = message.from_name || 'unknown@example.com';
+    const fromEmail = (message.from_name || 'unknown@example.com').replace(/[\r\n]/g, ' ');
     const subject = message.subject || 'No Subject';
     const date = new Date((message.received_at || Date.now() / 1000) * 1000).toUTCString();
     const body = message.body_html || message.body_plain || 'No content';

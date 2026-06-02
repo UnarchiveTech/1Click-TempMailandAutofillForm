@@ -19,9 +19,17 @@ import { ValidationError } from './errors.js';
  * Sanitize HTML content to prevent XSS attacks
  */
 export function sanitizeHTML(input: string): string {
-  const div = document.createElement('div');
-  div.textContent = input;
-  return div.innerHTML;
+  return input.replace(
+    /[&<>"']/g,
+    (character) =>
+      ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;',
+      })[character] ?? character
+  );
 }
 
 /**
@@ -70,6 +78,19 @@ export function validateCustomInstanceUrl(url: string): void {
     const parsedUrl = new URL(url);
     if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
       throw new ValidationError('Instance URL must use HTTP or HTTPS protocol', {
+        field: 'instanceUrl',
+      });
+    }
+    const hostname = parsedUrl.hostname.toLowerCase();
+    if (
+      hostname === 'localhost' ||
+      hostname.startsWith('127.') ||
+      hostname.startsWith('192.168.') ||
+      hostname.startsWith('10.') ||
+      /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(hostname) ||
+      hostname === '[::1]'
+    ) {
+      throw new ValidationError('Instance URL cannot point to internal/private networks', {
         field: 'instanceUrl',
       });
     }

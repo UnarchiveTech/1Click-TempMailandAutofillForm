@@ -1,23 +1,37 @@
-import {
-  argbFromHex,
-  Hct,
-  hexFromArgb,
-  MaterialDynamicColors,
-  SchemeTonalSpot,
-  TonalPalette,
-} from '@material/material-color-utilities';
+// Lazy-load Material Color Utilities — only used when setting custom colors (~2% of sessions).
+// Keeps ~50 KB off the shared entrypoint chunk.
 
-const mdc = new MaterialDynamicColors();
+let _material: typeof import('@material/material-color-utilities') | null = null;
+let _mdc: InstanceType<
+  typeof import('@material/material-color-utilities').MaterialDynamicColors
+> | null = null;
 
-function resolve(color: ReturnType<typeof mdc.primary>, scheme: SchemeTonalSpot): string {
-  return hexFromArgb(color.getArgb(scheme));
+async function _loadMaterial() {
+  if (!_material) {
+    _material = await import('@material/material-color-utilities');
+    const { MaterialDynamicColors } = _material!;
+    _mdc = new MaterialDynamicColors();
+  }
 }
 
-// Map Material DynamicColors → CSS variables
-function mapMaterialToColors(scheme: SchemeTonalSpot, sourceHct: Hct, isDark: boolean) {
+function resolve(
+  color: ReturnType<
+    typeof import('@material/material-color-utilities').MaterialDynamicColors['prototype']['primary']
+  >,
+  scheme: import('@material/material-color-utilities').SchemeTonalSpot
+): string {
+  return _material!.hexFromArgb(color.getArgb(scheme));
+}
+
+async function _mapMaterialToColors(
+  scheme: import('@material/material-color-utilities').SchemeTonalSpot,
+  sourceHct: import('@material/material-color-utilities').Hct,
+  isDark: boolean
+) {
+  const { hexFromArgb, TonalPalette } = _material!;
+  const mdc = _mdc!;
   const colors: Record<string, string> = {};
 
-  // Material Design colors
   colors['--md-primary'] = resolve(mdc.primary(), scheme);
   colors['--md-on-primary'] = resolve(mdc.onPrimary(), scheme);
   colors['--md-primary-container'] = resolve(mdc.primaryContainer(), scheme);
@@ -66,18 +80,18 @@ function mapMaterialToColors(scheme: SchemeTonalSpot, sourceHct: Hct, isDark: bo
 
 /**
  * Generate and apply a theme from a seed color at runtime
- * @param seedColor - Hex color string (e.g., "#3b82f6")
- * @param isDark - Whether to generate dark theme
- * @param contrastLevel - Contrast level: 0 = standard, 0.5 = medium, 1.0 = high
+ * Only loads Material Color Utilities on first call.
  */
-export function applyThemeFromSeed(
+export async function applyThemeFromSeed(
   seedColor: string,
   isDark: boolean = false,
   contrastLevel: number = 0
 ) {
+  await _loadMaterial();
+  const { Hct, SchemeTonalSpot, argbFromHex } = _material!;
   const sourceHct = Hct.fromInt(argbFromHex(seedColor));
   const scheme = new SchemeTonalSpot(sourceHct, isDark, contrastLevel);
-  const colors = mapMaterialToColors(scheme, sourceHct, isDark);
+  const colors = await _mapMaterialToColors(scheme, sourceHct, isDark);
 
   const root = document.documentElement;
   for (const [key, value] of Object.entries(colors)) {
@@ -87,16 +101,18 @@ export function applyThemeFromSeed(
 
 /**
  * Generate theme CSS strings from a seed color
- * @param seedColor - Hex color string (e.g., "#3b82f6")
- * @returns CSS variable blocks for light and dark themes
  */
-export function generateThemeCSS(seedColor: string): { light: string; dark: string } {
+export async function generateThemeCSS(
+  seedColor: string
+): Promise<{ light: string; dark: string }> {
+  await _loadMaterial();
+  const { Hct, SchemeTonalSpot, argbFromHex } = _material!;
   const sourceHct = Hct.fromInt(argbFromHex(seedColor));
   const lightScheme = new SchemeTonalSpot(sourceHct, false, 0);
   const darkScheme = new SchemeTonalSpot(sourceHct, true, 0);
 
-  const lightColors = mapMaterialToColors(lightScheme, sourceHct, false);
-  const darkColors = mapMaterialToColors(darkScheme, sourceHct, true);
+  const lightColors = await _mapMaterialToColors(lightScheme, sourceHct, false);
+  const darkColors = await _mapMaterialToColors(darkScheme, sourceHct, true);
 
   let lightCSS = '[data-theme="custom"] {\n';
   for (const [key, value] of Object.entries(lightColors)) {

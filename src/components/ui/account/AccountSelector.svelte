@@ -1,14 +1,8 @@
 <script lang="ts">
+import { onDestroy } from 'svelte';
+import { t } from 'svelte-i18n';
 import { browser } from 'wxt/browser';
-import IconChevronDown from '@/components/icons/IconChevronDown.svelte';
-import IconChevronLeft from '@/components/icons/IconChevronLeft.svelte';
-import IconChevronRight from '@/components/icons/IconChevronRight.svelte';
-import IconEnvelope from '@/components/icons/IconEnvelope.svelte';
-import IconFlame from '@/components/icons/IconFlame.svelte';
-import IconGlobe from '@/components/icons/IconGlobe.svelte';
-import IconInstances from '@/components/icons/IconInstances.svelte';
-import IconPlus from '@/components/icons/IconPlus.svelte';
-import IconX from '@/components/icons/IconX.svelte';
+import Icon from '@/components/icons/Icon.svelte';
 import TagDialog from '@/components/overlays/TagDialog.svelte';
 import FaviconImage from '@/components/ui/FaviconImage.svelte';
 import { updateInboxTag } from '@/features/account/tag-actions.js';
@@ -19,6 +13,7 @@ import {
   type ProviderConfig,
 } from '@/utils/email-service.js';
 import { logError } from '@/utils/logger.js';
+import { getInboxes } from '@/utils/storage-keys.js';
 import { useCurrentTime } from '@/utils/time-store.js';
 import type { Account } from '@/utils/types.js';
 import AccountCard from './AccountCard.svelte';
@@ -45,7 +40,7 @@ let {
   onDropdownOpenChange = () => {},
   showToast = () => {},
   selectedProviderInstance = null,
-  guerrillaDefaultDomain = '',
+  defaultDomain = '',
 } = $props<{
   selectedEmail?: string;
   accounts?: Account[];
@@ -68,7 +63,7 @@ let {
   onDropdownOpenChange?: (open: boolean) => void;
   showToast?: (message: string) => void;
   selectedProviderInstance?: string | null;
-  guerrillaDefaultDomain?: string;
+  defaultDomain?: string;
 }>();
 
 let openSection = $state<'live' | 'inactive'>('live');
@@ -102,6 +97,7 @@ let localAccountOrder = $state<Account[] | null>(null);
 let domainMenuOpen = $state(false);
 let domainMenuPosition = $state({ x: 0, y: 0 });
 let currentDomainIndex = $state(0);
+let searchInputRef = $state<HTMLInputElement | null>(null);
 
 // Derived values for email display
 let emailParts = $derived.by(() => displayedEmail.split('@'));
@@ -109,32 +105,38 @@ let username = $derived.by(() => emailParts[0] || '');
 let domain = $derived.by(() => emailParts[1] || '');
 let isMultiDomain = $derived.by(() => {
   const account = allAccounts.find((a: Account) => a.address === selectedEmail);
-  return account?.provider === 'guerrilla' && loadProviderConfig('guerrilla').multiDomain?.enabled;
+  if (!account) return false;
+  return loadProviderConfig(account.provider).multiDomain?.enabled ?? false;
 });
 
 // Storage key for domain index per inbox
-function getDomainStorageKey(email: string): string {
-  return `guerrillaDomainIndex_${email.split('@')[0]}`;
+function getDomainStorageKey(email: string, providerId: string): string {
+  return `domainIndex_${providerId}_${email.split('@')[0]}`;
 }
 
 // Load persisted domain index when selected email changes
 $effect(() => {
   if (!selectedEmail) return;
   const account = allAccounts.find((a: Account) => a.address === selectedEmail);
-  if (account?.provider !== 'guerrilla') {
+  if (!account) {
     currentDomainIndex = 0;
     displayedEmail = selectedEmail;
     return;
   }
-  const key = getDomainStorageKey(selectedEmail);
+  const providerConfig = loadProviderConfig(account.provider);
+  if (!providerConfig.multiDomain?.enabled) {
+    currentDomainIndex = 0;
+    displayedEmail = selectedEmail;
+    return;
+  }
+  const key = getDomainStorageKey(selectedEmail, account.provider);
   browser.storage.local.get([key]).then((result: Record<string, unknown>) => {
     const storedIndex = result[key] as number | undefined;
     if (storedIndex !== undefined) {
       currentDomainIndex = storedIndex;
-    } else if (guerrillaDefaultDomain) {
-      const providerConfig = loadProviderConfig('guerrilla');
+    } else if (defaultDomain) {
       const domains = providerConfig.multiDomain?.domains || [];
-      const defaultIndex = domains.indexOf(guerrillaDefaultDomain);
+      const defaultIndex = domains.indexOf(defaultDomain);
       currentDomainIndex = defaultIndex >= 0 ? defaultIndex : 0;
     } else {
       currentDomainIndex = 0;
@@ -205,18 +207,35 @@ const progressPercentage = $derived.by(() => {
 });
 
 // Build conic gradient for progress bar
+let labelEl = $state<HTMLElement | null>(null);
+let containerEl = $state<HTMLElement | null>(null);
+let labelWidth = $state(0);
+let containerWidth = $state(0);
+let containerHeight = $state(0);
+
 const borderGradient = $derived.by(() => {
   if (currentAccount?.status === 'expired' || currentAccount?.status === 'deleted') {
     return 'none';
   }
-  // Label is at top-left area (approximately 0-50 degrees)
-  // Use fixed 15% gap to avoid label area regardless of container width
-  const gapPercentage = 15;
+
+  // Compute gap angle dynamically based on where the label ends.
+  // Label is at left:30px, so its right edge is at (30 + labelWidth) px from the left.
+  // We compute the angle from the container center to that point.
+  const labelRightPx = 30 + labelWidth + 4; // 4px breathing room
+  const cx = containerWidth / 2;
+  const cy = containerHeight / 2;
+  const dx = labelRightPx - cx;
+  const dy = 0 - cy; // top edge of container
+  // Angle from 12 o'clock clockwise in degrees
+  const gapAngleDeg = Math.atan2(dx, -dy) * (180 / Math.PI);
+  // Clamp between 5° and 90° to avoid degenerate cases
+  const clampedGap = Math.max(5, Math.min(90, gapAngleDeg));
+  const gapPercentage = (clampedGap / 360) * 100;
   const availablePercentage = 100 - gapPercentage;
   const scaledProgress = (progressPercentage / 100) * availablePercentage;
 
   return `conic-gradient(
-    from ${gapPercentage * 3.6}deg,
+    from ${clampedGap}deg,
     var(--md-primary) 0% ${scaledProgress}%,
     var(--md-secondary-container) ${scaledProgress}% ${availablePercentage}%,
     var(--md-secondary-container) ${availablePercentage}% 100%
@@ -274,8 +293,7 @@ $effect(() => {
   if (dropdownOpen) {
     // Small delay to ensure DOM is updated
     setTimeout(() => {
-      const searchInput = document.getElementById('account-selector-search') as HTMLInputElement;
-      searchInput?.focus();
+      searchInputRef?.focus();
     }, 50);
   }
 });
@@ -327,6 +345,9 @@ async function copyEmailToClipboard() {
 }
 
 let clickTimeout: ReturnType<typeof setTimeout> | null = null;
+onDestroy(() => {
+  if (clickTimeout) clearTimeout(clickTimeout);
+});
 let triggerElement: HTMLElement | null = null;
 
 function handleSingleClick() {
@@ -348,7 +369,7 @@ function handleDoubleClick() {
     clickTimeout = null;
   }
   copyEmailToClipboard();
-  showToast('Email address copied');
+  showToast($t('toasts.emailAddressCopied'));
 }
 
 function openAccountMenu(e: MouseEvent) {
@@ -487,25 +508,25 @@ function handleDragStart(e: DragEvent, account: Account) {
   }
 }
 
-// Cycle through Guerrilla Mail domains and persist selection
+// Cycle through provider domains and persist selection
 async function cycleDomain() {
-  if (currentAccount?.provider !== 'guerrilla') return;
-  const providerConfig = loadProviderConfig('guerrilla');
+  if (!currentAccount) return;
+  const providerConfig = loadProviderConfig(currentAccount.provider);
   if (!providerConfig.multiDomain?.enabled) return;
   const domains = providerConfig.multiDomain.domains;
   const nextIndex = (currentDomainIndex + 1) % domains.length;
   currentDomainIndex = nextIndex;
-  const key = getDomainStorageKey(selectedEmail);
+  const key = getDomainStorageKey(selectedEmail, currentAccount.provider);
   await browser.storage.local.set({ [key]: nextIndex });
 }
 
 // Keep displayedEmail in sync with currentDomainIndex
 $effect(() => {
-  if (currentAccount?.provider !== 'guerrilla') {
+  if (!currentAccount) {
     displayedEmail = selectedEmail;
     return;
   }
-  const providerConfig = loadProviderConfig('guerrilla');
+  const providerConfig = loadProviderConfig(currentAccount.provider);
   if (!providerConfig.multiDomain?.enabled) {
     displayedEmail = selectedEmail;
     return;
@@ -541,9 +562,7 @@ async function handleDrop(e: DragEvent, targetAccount: Account, section: 'live' 
   handleDragEnd();
 
   try {
-    const { inboxes = [] } = (await browser.storage.local.get(['inboxes'])) as {
-      inboxes?: Account[];
-    };
+    const inboxes = await getInboxes();
     const inboxIndex = inboxes.findIndex((i: Account) => i.id === sourceDragged.id);
     const targetIndex = inboxes.findIndex((i: Account) => i.id === targetAccount.id);
 
@@ -587,8 +606,10 @@ async function handleDrop(e: DragEvent, targetAccount: Account, section: 'live' 
   <div class="relative mt-0 flex items-center gap-2">
     <!-- Floating status label above border -->
     {#if currentAccount}
-      <div class="absolute" style="top: -8.5px; left: 30px; z-index: 10;">
+      <div class="absolute -top-[8.5px] left-[30px] z-10">
         <span
+          bind:this={labelEl}
+          bind:clientWidth={labelWidth}
           class="px-0 text-[11px] font-semibold leading-none {currentAccount?.status === 'active' ? 'text-md-success' : (currentAccount?.status === 'expired' || currentAccount?.status === 'deleted') ? 'text-md-error' : 'text-md-on-surface/50'} {(currentAccount?.status === 'expired' || currentAccount?.status === 'deleted') ? 'bg-md-error/10' : 'bg-md-background'}"
         >
           {#if currentAccount.status === 'active'}
@@ -607,7 +628,7 @@ async function handleDrop(e: DragEvent, targetAccount: Account, section: 'live' 
         </span>
       </div>
     {/if}
-    <div class="account-selector-outer flex-1 min-w-0" style="--border-gradient: {borderGradient};">
+    <div class="account-selector-outer flex-1 min-w-0" style="--border-gradient: {borderGradient};" bind:this={containerEl} bind:clientWidth={containerWidth} bind:clientHeight={containerHeight}>
       <div
         class="flex items-center gap-0 px-1 py-1.5 rounded-full border {currentAccount?.status === 'active' ? 'border-md-secondary-container/30' : (currentAccount?.status === 'expired' || currentAccount?.status === 'deleted') ? 'border-md-error/30' : 'border-md-outline-variant'} {(currentAccount?.status === 'expired' || currentAccount?.status === 'deleted') ? 'bg-md-error/10' : 'bg-md-surface-container-low'} flex-1 min-w-0 overflow-hidden"
         onclick={handleSingleClick}
@@ -626,7 +647,7 @@ async function handleDrop(e: DragEvent, targetAccount: Account, section: 'live' 
         aria-label="Previous address"
         title={currentIndexInStatus > 0 ? currentStatusAccounts[currentIndexInStatus - 1].address : undefined}
       >
-        <IconChevronLeft class="w-3.5 h-3.5" />
+        <Icon name="chevronLeft" class="w-3.5 h-3.5" />
       </button>
 
       <!-- Email text area: username (truncates) + domain container (shrinks, never overlaps) -->
@@ -639,12 +660,12 @@ async function handleDrop(e: DragEvent, targetAccount: Account, section: 'live' 
         tabindex="0"
         id="button-select-email"
         aria-label="Select email address"
-        title={currentAccount?.provider === 'guerrilla' && loadProviderConfig('guerrilla').multiDomain?.enabled ? `Same username works across ${loadProviderConfig('guerrilla').multiDomain?.domains?.length || 0} domains: ${loadProviderConfig('guerrilla').multiDomain?.domains?.slice(0, 3).join(', ') || ''}${(loadProviderConfig('guerrilla').multiDomain?.domains?.length || 0) > 3 ? ', ...' : ''}` : selectedEmail}
+        title={isMultiDomain && currentAccount ? `Same username works across ${loadProviderConfig(currentAccount.provider).multiDomain?.domains?.length || 0} domains: ${loadProviderConfig(currentAccount.provider).multiDomain?.domains?.slice(0, 3).join(', ') || ''}${(loadProviderConfig(currentAccount.provider).multiDomain?.domains?.length || 0) > 3 ? ', ...' : ''}` : selectedEmail}
       >
         <span class="font-medium text-sm text-md-on-surface truncate min-w-0">{username}</span>
         {#if isMultiDomain}
           <span
-            class="inline-flex items-center gap-0 px-1.5 py-0.5 text-xs font-medium rounded-md bg-md-secondary-container text-md-on-secondary-container hover:bg-md-secondary-container/80 transition-colors cursor-pointer overflow-hidden" style="min-width: calc(5ch + 1.5rem)"
+            class="inline-flex items-center gap-1 pr-1 py-0.5 text-xs font-medium rounded-md bg-md-secondary-container text-md-on-secondary-container hover:bg-md-secondary-container/80 transition-colors cursor-pointer overflow-hidden min-w-[calc(5ch+1.5rem)]"
             onclick={(e) => { e.stopPropagation(); cycleDomain(); }}
             onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); cycleDomain(); } }}
             role="button"
@@ -652,7 +673,7 @@ async function handleDrop(e: DragEvent, targetAccount: Account, section: 'live' 
             aria-label="Cycle through domains"
           >
             <span class="truncate flex-1 min-w-0">@{domain}</span>
-            <IconGlobe class="w-3 h-3 shrink-0" />
+            <Icon name="globe" class="w-3 h-3 shrink-0" />
           </span>
         {:else}
           <span class="font-medium text-sm text-md-on-surface shrink-0">@{domain}</span>
@@ -673,7 +694,7 @@ async function handleDrop(e: DragEvent, targetAccount: Account, section: 'live' 
         aria-label="Next address"
         title={currentIndexInStatus < currentStatusAccounts.length - 1 ? currentStatusAccounts[currentIndexInStatus + 1].address : undefined}
       >
-        <IconChevronRight class="w-3.5 h-3.5" />
+        <Icon name="chevronRight" class="w-3.5 h-3.5" />
       </button>
 
       <!-- Separator -->
@@ -687,7 +708,7 @@ async function handleDrop(e: DragEvent, targetAccount: Account, section: 'live' 
         oncontextmenu={openAccountMenu}
         aria-label="Open account list"
       >
-        <IconChevronDown class="w-4 h-4" />
+        <Icon name="chevronDown" class="w-4 h-4" />
       </button>
     </div>
     </div>
@@ -708,7 +729,7 @@ async function handleDrop(e: DragEvent, targetAccount: Account, section: 'live' 
         }
       }}
     >
-      <IconPlus class="w-5 h-5 text-md-primary-content" />
+      <Icon name="plus" class="w-5 h-5 text-md-primary-content" />
     </button>
 
     <!-- Domain context menu -->
@@ -716,7 +737,7 @@ async function handleDrop(e: DragEvent, targetAccount: Account, section: 'live' 
       <button id="button-close-domain-menu" class="fixed inset-0 z-40 bg-transparent cursor-default" aria-label="Close menu" onclick={() => domainMenuOpen = false}></button>
       <div
         class="fixed z-50 bg-md-surface rounded-xl shadow-2xl border border-md-outline-variant py-2 w-45 max-h-96 overflow-y-auto"
-        style="left: {domainMenuPosition.x}px; top: {domainMenuPosition.y}px; scrollbar-width: thin; scrollbar-color: var(--md-primary) transparent;"
+        style="left: {domainMenuPosition.x}px; top: {domainMenuPosition.y}px;"
       >
         {#each allProviders as provider}
           {@const providerDomain = provider.websiteUrl ? new URL(provider.websiteUrl).hostname : provider.id + '.com'}
@@ -745,7 +766,7 @@ async function handleDrop(e: DragEvent, targetAccount: Account, section: 'live' 
             onNavigateToSettings();
           }}
         >
-          <IconInstances class="w-4 h-4" />
+          <Icon name="instances" class="w-4 h-4" />
           Manage Instances
         </button>
         <button
@@ -756,7 +777,7 @@ async function handleDrop(e: DragEvent, targetAccount: Account, section: 'live' 
             onNavigateToSettings();
           }}
         >
-          <IconPlus class="w-4 h-4" />
+          <Icon name="plus" class="w-4 h-4" />
           Add Custom Instance...
         </button>
       </div>
@@ -777,7 +798,7 @@ async function handleDrop(e: DragEvent, targetAccount: Account, section: 'live' 
         <div class="absolute inset-0 bg-md-surface/30 backdrop-blur-sm" role="button" tabindex="-1" onclick={closeDropdown} onkeydown={handleKeyDown}></div>
 
         <!-- Dialog wrapper: close button above, card below -->
-        <div class="relative z-10 flex flex-col items-end gap-2" style="width: 325px; height: 550px;">
+        <div class="relative z-10 flex flex-col items-end gap-2 w-[325px] h-[550px]">
           <!-- Close button above dialog (outside card) -->
           <button
             id="button-close-dialog"
@@ -785,7 +806,7 @@ async function handleDrop(e: DragEvent, targetAccount: Account, section: 'live' 
             aria-label="Close dialog"
             onclick={closeDropdown}
           >
-            <IconX class="w-4 h-4 text-md-on-surface/70" />
+            <Icon name="x" class="w-4 h-4 text-md-on-surface/70" />
           </button>
 
           <!-- Dialog card (separate from close button) -->
@@ -807,7 +828,7 @@ async function handleDrop(e: DragEvent, targetAccount: Account, section: 'live' 
                 aria-label="Clear search"
                 onclick={() => dropdownSearch = ''}
               >
-                <IconX class="w-4 h-4" />
+                <Icon name="x" class="w-4 h-4" />
               </button>
             {/if}
           </div>
@@ -843,7 +864,6 @@ async function handleDrop(e: DragEvent, targetAccount: Account, section: 'live' 
             {#if openSection === 'live'}
               <div
                 class="space-y-1 mt-1 max-h-80 overflow-y-auto"
-                style="scrollbar-width: thin; scrollbar-color: var(--md-primary) transparent;"
                 role="list"
               >
                 {#each accountsByCategory.live as account (account.id)}
@@ -919,10 +939,10 @@ async function handleDrop(e: DragEvent, targetAccount: Account, section: 'live' 
                   onclick={() => availableCollapsed = !availableCollapsed}
                 >
                   <span class="text-[11px] font-semibold text-md-on-surface">Available ({accountsByCategory.available.length})</span>
-                  <IconChevronDown class={`w-4 h-4 text-md-on-surface/50 transition-transform ${availableCollapsed ? 'rotate-180' : ''}`} />
+                  <Icon name="chevronDown" class={`w-4 h-4 text-md-on-surface/50 transition-transform ${availableCollapsed ? 'rotate-180' : ''}`} />
                 </button>
                 {#if !availableCollapsed && accountsByCategory.available.length > 0}
-                  <div class="mt-1 space-y-1 max-h-60 overflow-y-auto" style="scrollbar-width: thin; scrollbar-color: var(--md-primary) transparent;">
+                  <div class="mt-1 space-y-1 max-h-60 overflow-y-auto">
                     {#each accountsByCategory.available as account (account.id)}
                       <div
                         ondrop={(e) => handleDrop(e, account, 'inactive')}
@@ -963,10 +983,10 @@ async function handleDrop(e: DragEvent, targetAccount: Account, section: 'live' 
                   onclick={() => unavailableCollapsed = !unavailableCollapsed}
                 >
                   <span class="text-[11px] font-semibold text-md-on-surface">Unavailable ({accountsByCategory.unavailable.length})</span>
-                  <IconChevronDown class={`w-4 h-4 text-md-on-surface/50 transition-transform ${unavailableCollapsed ? 'rotate-180' : ''}`} />
+                  <Icon name="chevronDown" class={`w-4 h-4 text-md-on-surface/50 transition-transform ${unavailableCollapsed ? 'rotate-180' : ''}`} />
                 </button>
                 {#if !unavailableCollapsed && accountsByCategory.unavailable.length > 0}
-                  <div class="mt-1 space-y-1 max-h-60 overflow-y-auto" style="scrollbar-width: thin; scrollbar-color: var(--md-primary) transparent;">
+                  <div class="mt-1 space-y-1 max-h-60 overflow-y-auto">
                     {#each accountsByCategory.unavailable as account (account.id)}
                       <div
                         ondrop={(e) => handleDrop(e, account, 'inactive')}
@@ -1017,7 +1037,7 @@ async function handleDrop(e: DragEvent, targetAccount: Account, section: 'live' 
                 }
               }}
             >
-              <IconPlus class="w-4 h-4" />
+              <Icon name="plus" class="w-4 h-4" />
               Create New Mail Address
             </button>
 
@@ -1026,7 +1046,7 @@ async function handleDrop(e: DragEvent, targetAccount: Account, section: 'live' 
               class="w-full px-3 py-2 text-center bg-md-surface-variant text-sm flex items-center justify-center gap-2 text-md-on-surface hover:bg-transparent hover:text-md-on-surface/60 rounded-lg transition-colors"
               onclick={() => { closeDropdown(); onNavigateToManage(); }}
             >
-              <IconInstances class="w-4 h-4" />
+              <Icon name="instances" class="w-4 h-4" />
               Manage All Addresses
             </button>
           </div>

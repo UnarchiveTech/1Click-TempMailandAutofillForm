@@ -1,6 +1,6 @@
 <script lang="ts">
 import type { Snippet } from 'svelte';
-import IconAlertTriangle from '@/components/icons/IconAlertTriangle.svelte';
+import Icon from '@/components/icons/Icon.svelte';
 import { logError } from '@/utils/logger.js';
 
 interface Props {
@@ -40,7 +40,7 @@ function handleRetry() {
 {#if error}
   <div class="flex flex-col items-center justify-center p-8 min-h-[200px] bg-md-error-container/10 rounded-xl border border-md-error/20">
     <div class="w-12 h-12 rounded-full bg-md-error/10 flex items-center justify-center mb-4">
-      <IconAlertTriangle class="w-6 h-6 text-md-error" />
+      <Icon name="alertTriangle" class="w-6 h-6 text-md-error" />
     </div>
     <h3 class="text-base font-semibold text-md-error mb-2">Error</h3>
     <p class="text-sm text-md-on-surface/70 text-center mb-4">{fallback}</p>

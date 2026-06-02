@@ -2,18 +2,13 @@
 import { t } from 'svelte-i18n';
 import { browser } from 'wxt/browser';
 import AppLogo from '@/components/icons/AppLogo.svelte';
-import IconBack from '@/components/icons/IconBack.svelte';
-import IconCheckCircle from '@/components/icons/IconCheckCircle.svelte';
-import IconEnvelope from '@/components/icons/IconEnvelope.svelte';
-import IconFlame from '@/components/icons/IconFlame.svelte';
-import IconLock from '@/components/icons/IconLock.svelte';
-import IconPlus from '@/components/icons/IconPlus.svelte';
-import IconShield from '@/components/icons/IconShield.svelte';
+import Icon from '@/components/icons/Icon.svelte';
 import FaviconImage from '@/components/ui/FaviconImage.svelte';
 import LanguageSwitcher from '@/components/ui/LanguageSwitcher.svelte';
 import Tutorial from '@/components/ui/Tutorial.svelte';
 import { handleCreateInbox } from '@/features/onboarding/onboarding-actions.js';
 import { loadAllProviderConfigs, type ProviderConfig } from '@/utils/email-service.js';
+import { logError } from '@/utils/logger.js';
 
 let { onCreateInbox }: { onCreateInbox: (provider: string) => void } = $props();
 
@@ -26,7 +21,8 @@ let providers = $derived.by((): ProviderConfig[] => {
   try {
     const allProviderConfigs = loadAllProviderConfigs();
     return Object.values(allProviderConfigs);
-  } catch {
+  } catch (error) {
+    logError('Failed to load onboarding provider configurations', error);
     return [];
   }
 });
@@ -107,7 +103,7 @@ function completeTutorial() {
     <div class="w-full flex flex-col gap-2.5">
       <div class="flex items-center gap-3 bg-md-surface-container-low rounded-xl px-4 py-2.5">
         <div class="w-8 h-8 rounded-lg bg-md-primary/10 flex items-center justify-center shrink-0">
-          <IconCheckCircle class="w-4 h-4 text-md-primary" />
+          <Icon name="checkCircle" class="w-4 h-4 text-md-primary" />
         </div>
         <div class="text-left">
           <p class="text-xs font-semibold text-md-on-surface">{$t('onboarding.feature1Title')}</p>
@@ -117,7 +113,7 @@ function completeTutorial() {
 
       <div class="flex items-center gap-3 bg-md-surface-container-low rounded-xl px-4 py-2.5">
         <div class="w-8 h-8 rounded-lg bg-md-primary/10 flex items-center justify-center shrink-0">
-          <IconShield class="w-4 h-4 text-md-primary" />
+          <Icon name="shield" class="w-4 h-4 text-md-primary" />
         </div>
         <div class="text-left">
           <p class="text-xs font-semibold text-md-on-surface">{$t('onboarding.feature2Title')}</p>
@@ -127,7 +123,7 @@ function completeTutorial() {
 
       <div class="flex items-center gap-3 bg-md-surface-container-low rounded-xl px-4 py-2.5">
         <div class="w-8 h-8 rounded-lg bg-md-primary/10 flex items-center justify-center shrink-0">
-          <IconLock class="w-4 h-4 text-md-primary" />
+          <Icon name="lock" class="w-4 h-4 text-md-primary" />
         </div>
         <div class="text-left">
           <p class="text-xs font-semibold text-md-on-surface">{$t('onboarding.feature3Title')}</p>
@@ -141,7 +137,7 @@ function completeTutorial() {
       onclick={() => step = 2}
     >
       {$t('onboarding.continue')}
-      <IconBack class="w-4 h-4 rotate-180" />
+      <Icon name="back" class="w-4 h-4 rotate-180" />
     </button>
   </div>
 
@@ -149,7 +145,7 @@ function completeTutorial() {
   <!-- Create First Inbox Step -->
   <div class="flex flex-col items-center justify-center h-full px-6 py-8 text-center gap-5">
     <div class="w-14 h-14 rounded-xl bg-md-primary/10 flex items-center justify-center">
-      <IconPlus class="w-8 h-8 text-md-primary" />
+      <Icon name="plus" class="w-8 h-8 text-md-primary" />
     </div>
 
     <div>
@@ -173,7 +169,7 @@ function completeTutorial() {
             <p class="text-xs text-md-on-surface/50">{provider.ui?.description || 'Temporary email provider'}</p>
           </div>
           {#if selectedProvider === provider.id}
-            <IconCheckCircle class="w-5 h-5 text-md-primary shrink-0" />
+            <Icon name="checkCircle" class="w-5 h-5 text-md-primary shrink-0" />
           {/if}
         </button>
       {/each}
@@ -184,7 +180,7 @@ function completeTutorial() {
         class="w-full px-4 py-2 text-sm font-semibold rounded-xl bg-md-primary text-md-on-primary hover:bg-md-primary/90 transition-colors flex items-center justify-center gap-1.5"
         onclick={() => createFirstInbox(selectedProvider)}
       >
-        <IconEnvelope class="w-4 h-4" />
+        <Icon name="envelope" class="w-4 h-4" />
         {$t('onboarding.createFirstAddress')}
       </button>
       <button class="w-full px-3 py-1.5 text-sm rounded-xl bg-transparent text-md-on-surface/50 hover:bg-md-surface-variant transition-colors" onclick={() => step = 1}>
