@@ -8,6 +8,7 @@
  */
 
 import type { Browser } from 'wxt/browser';
+import { ApiError, ProviderNotFoundError, ValidationError } from '@/utils/errors.js';
 import { logDebug } from '@/utils/logger.js';
 import { validateAllProviderConfigs } from '@/utils/provider-validation.js';
 import type { ProviderInstance } from '@/utils/types.js';
@@ -25,7 +26,7 @@ const providerConfigs = new Map<string, ProviderConfig>(
 // Default provider ID (first provider in config)
 const firstProvider = (allProviders as unknown as ProviderConfig[])[0];
 if (!firstProvider) {
-  throw new Error('No mail providers configured in providers.jsonc');
+  throw new ValidationError('No mail providers configured in providers.jsonc');
 }
 export const DEFAULT_PROVIDER = firstProvider.id;
 
@@ -35,7 +36,7 @@ export const DEFAULT_PROVIDER = firstProvider.id;
 export function loadProviderConfig(providerId: string): ProviderConfig {
   const config = providerConfigs.get(providerId);
   if (!config) {
-    throw new Error(`Provider configuration not found for: ${providerId}`);
+    throw new ProviderNotFoundError(providerId);
   }
   return config;
 }
@@ -173,7 +174,10 @@ export class EmailService {
   ): Promise<Record<string, unknown>> {
     const operation = this.config.operations[operationName];
     if (!operation) {
-      throw new Error(`Operation ${operationName} not found in provider configuration`);
+      throw new ValidationError(`Operation ${operationName} not found in provider configuration`, {
+        provider: this.config.id,
+        operation: operationName,
+      });
     }
 
     logDebug(`Executing operation: ${operationName}`);
@@ -190,8 +194,9 @@ export class EmailService {
     const response = await fetch(url, options);
 
     if (!response.ok) {
-      throw new Error(
-        `HTTP ${response.status} when executing ${operationName}: ${response.statusText}`
+      throw new ApiError(
+        `HTTP ${response.status} when executing ${operationName}: ${response.statusText}`,
+        { provider: this.config.id, operation: operationName, status: response.status }
       );
     }
 
@@ -220,8 +225,9 @@ export class EmailService {
         const response = await fetch(url, options);
 
         if (!response.ok) {
-          throw new Error(
-            `HTTP ${response.status} when executing ${operation.function}: ${response.statusText}`
+          throw new ApiError(
+            `HTTP ${response.status} when executing ${operation.function}: ${response.statusText}`,
+            { provider: this.config.id, operation: operation.function, status: response.status }
           );
         }
 
@@ -238,7 +244,10 @@ export class EmailService {
       }
     }
 
-    throw lastError || new Error('Max retry attempts exceeded');
+    if (lastError) {
+      throw lastError;
+    }
+    throw new ApiError('Max retry attempts exceeded', { provider: this.config.id });
   }
 
   /**

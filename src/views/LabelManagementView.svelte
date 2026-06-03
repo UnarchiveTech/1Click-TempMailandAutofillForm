@@ -3,9 +3,11 @@ import { onDestroy, onMount } from 'svelte';
 import { t } from 'svelte-i18n';
 import { browser } from 'wxt/browser';
 import Icon from '@/components/icons/Icon.svelte';
+import SettingsSubNav from '@/components/ui/SettingsSubNav.svelte';
 
-let { onBack = () => {} } = $props<{
+let { onBack = () => {}, onNavigateTo = undefined } = $props<{
   onBack?: () => void;
+  onNavigateTo?: (view: string) => void;
 }>();
 
 interface LabelEntry {
@@ -164,5 +166,10 @@ onMount(() => {
         </div>
       {/each}
     {/if}
+  </div>
+
+  <!-- ── Settings Sub-Navigation Bar ── -->
+  <div class="px-0 pb-1 mt-4">
+    <SettingsSubNav currentSubPage="labelManagement" {onNavigateTo} />
   </div>
 </div>

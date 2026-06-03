@@ -12,6 +12,7 @@ import {
   saveIdentity,
   selectIdentity,
 } from '@/features/identities/identity-actions.js';
+import { decrypt, encrypt } from '@/utils/crypto.js';
 import { getErrorMessage } from '@/utils/errors.js';
 import { logError } from '@/utils/logger.js';
 import type { CredentialsHistoryItem, Identity } from '@/utils/types.js';
@@ -173,13 +174,27 @@ async function loadIdentitiesData() {
   await loadIdentities(browser, identitySetters);
 }
 
-function openIdentityEditor(identity: Identity) {
+async function tryDecryptPassword(value: string | undefined): Promise<string> {
+  if (!value) return '';
+  try {
+    return await decrypt(value);
+  } catch {
+    return value;
+  }
+}
+
+async function encryptOptionalPassword(value: string | undefined): Promise<string | undefined> {
+  if (!value) return undefined;
+  return encrypt(value);
+}
+
+async function openIdentityEditor(identity: Identity) {
   editingIdentity = identity;
   newIdentityName = identity.name;
   newIdentityFirstNames = identity.firstNames;
   newIdentityLastNames = identity.lastNames;
   newIdentityUseRandomPassword = identity.useRandomPassword;
-  newIdentityCustomPassword = identity.customPassword || '';
+  newIdentityCustomPassword = await tryDecryptPassword(identity.customPassword);
   newIdentityPhone = identity.phone || '';
   newIdentityPin = identity.pin || '';
   newIdentityDomainHints = identity.domainHints ? [...identity.domainHints] : [];
@@ -223,7 +238,7 @@ async function saveIdentityChanges() {
       useRandomPassword: newIdentityUseRandomPassword,
       customPassword: newIdentityUseRandomPassword
         ? undefined
-        : validateOptionalPassword(newIdentityCustomPassword),
+        : await encryptOptionalPassword(validateOptionalPassword(newIdentityCustomPassword)),
       phone: validateOptionalPhone(newIdentityPhone),
       pin: validateOptionalPin(newIdentityPin),
       domainHints: newIdentityDomainHints.filter((h) => h.trim()),
@@ -334,7 +349,7 @@ async function createNewIdentity() {
       useRandomPassword: newIdentityUseRandomPassword,
       customPassword: newIdentityUseRandomPassword
         ? undefined
-        : validateOptionalPassword(newIdentityCustomPassword),
+        : await encryptOptionalPassword(validateOptionalPassword(newIdentityCustomPassword)),
       phone: validateOptionalPhone(newIdentityPhone),
       pin: validateOptionalPin(newIdentityPin),
       isDefault: false,
@@ -601,7 +616,7 @@ loadIdentitiesData();
               class="flex items-center gap-3 flex-1 min-w-0"
               onclick={() => {
                 if (selectionMode) { toggleSelect(identity.id); }
-                else { openIdentityEditor(identity); }
+                else { void openIdentityEditor(identity); }
               }}
               onpointerdown={() => { if (!selectionMode) startHold(identity.id); }}
               onpointerup={() => cancelHold(identity.id)}
@@ -610,7 +625,7 @@ loadIdentitiesData();
                 if (e.key === 'Enter' || e.key === ' ') {
                   e.preventDefault();
                   if (selectionMode) toggleSelect(identity.id);
-                  else openIdentityEditor(identity);
+                  else void openIdentityEditor(identity);
                 }
               }}
               role="button"

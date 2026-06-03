@@ -720,9 +720,15 @@ async function updateSequenceNumber(
 
   let newSequence: number;
   if (sequenceTracking!.sequenceOperation === 'max') {
-    const maxMailId = Math.max(
-      ...messages.map((msg: Record<string, unknown>) => Number(msg[listSequenceField]))
-    );
+    // Avoid `Math.max(...arr)` — V8 throws "Maximum call stack size exceeded" once
+    // the spread argument count exceeds the per-platform argument-count limit
+    // (~65,536 on most platforms). For a provider that returns thousands of
+    // messages we would blow past that. Reduce manually instead.
+    let maxMailId = 0;
+    for (const msg of messages) {
+      const id = Number(msg[listSequenceField]);
+      if (id > maxMailId) maxMailId = id;
+    }
     newSequence = maxMailId;
   } else {
     const lastMailId = messages[messages.length - 1][listSequenceField];

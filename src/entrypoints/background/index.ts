@@ -3,7 +3,7 @@ import { defineBackground } from 'wxt/utils/define-background';
 import { DEBUG } from '@/utils/constants.js';
 import { getCurrentLocale, preloadTranslations } from '@/utils/i18n-utils.js';
 import { initializeDefaultProvider } from '@/utils/instance-manager.js';
-import { log, logDebug } from '@/utils/logger.js';
+import { log, logDebug, logError } from '@/utils/logger.js';
 import {
   addToAutofillBlocklist,
   getAutofillBlocklist,
@@ -46,7 +46,7 @@ async function setupUnreadBadge() {
   // Update on every relevant storage change
   browser.storage.onChanged.addListener((changes) => {
     if (changes.storedEmails || changes.readEmails || changes.customColor) {
-      updateBadge();
+      updateBadge().catch((e) => logError('updateBadge error', e));
     }
   });
 

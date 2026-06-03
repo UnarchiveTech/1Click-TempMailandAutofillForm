@@ -14,7 +14,7 @@ export async function updateRefreshAlarm(intervalMs: number): Promise<void> {
   await browser.alarms.clear('checkEmails');
   if (intervalMs > 0) {
     const periodInMinutes = Math.max(intervalMs / 60 / 1000, 0.1); // Chrome minimum is ~0.1 min in dev
-    browser.alarms.create('checkEmails', { periodInMinutes });
+    await browser.alarms.create('checkEmails', { periodInMinutes });
     if (DEBUG) log(`Refresh alarm updated: ${intervalMs / 1000}s`);
   } else {
     if (DEBUG) log('Refresh alarm cleared (manual only mode)');
@@ -27,17 +27,24 @@ export function setupPeriodicEmailCheck(
   if (DEBUG) log('=== SETTING UP PERIODIC EMAIL CHECK ===');
 
   (async () => {
-    const intervalMs = await getAutoRefreshInterval();
-    const effectiveInterval = intervalMs > 0 ? intervalMs : EMAIL_CHECK_INTERVAL_MS;
-    if (DEBUG) log(`Email check interval: ${effectiveInterval / 1000}s`);
-    browser.alarms.create('checkEmails', {
-      periodInMinutes: Math.max(effectiveInterval / 60 / 1000, 0.1),
-    });
+    try {
+      const intervalMs = await getAutoRefreshInterval();
+      const effectiveInterval = intervalMs > 0 ? intervalMs : EMAIL_CHECK_INTERVAL_MS;
+      if (DEBUG) log(`Email check interval: ${effectiveInterval / 1000}s`);
+      await browser.alarms.create('checkEmails', {
+        periodInMinutes: Math.max(effectiveInterval / 60 / 1000, 0.1),
+      });
+      await browser.alarms.create('cleanupStoredEmails', {
+        periodInMinutes: EMAIL_CLEANUP_INTERVAL_MS / 60 / 1000,
+      });
+    } catch (e) {
+      logError(
+        'Failed to create periodic alarms:',
+        undefined,
+        e instanceof Error ? e : new Error(String(e))
+      );
+    }
   })();
-
-  browser.alarms.create('cleanupStoredEmails', {
-    periodInMinutes: EMAIL_CLEANUP_INTERVAL_MS / 60 / 1000,
-  });
 
   if (DEBUG) log('=== ALARMS CREATED ===');
 

@@ -127,19 +127,21 @@ export function useEmailFilter(
 ): () => Email[] {
   let cacheKey = '';
   let cachedResult: Email[] = [];
+  let hasCachedResult = false;
 
   return () => {
     const currentEmails = emails();
     const currentOptions = options();
     const key = JSON.stringify(currentOptions) + currentEmails.length;
 
-    if (key === cacheKey && cachedResult.length > 0) {
+    if (hasCachedResult && key === cacheKey) {
       return cachedResult;
     }
 
     const result = filterEmails(currentEmails, currentOptions);
     cacheKey = key;
     cachedResult = result;
+    hasCachedResult = true;
     return result;
   };
 }

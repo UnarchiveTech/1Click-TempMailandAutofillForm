@@ -2,6 +2,7 @@ import { DEFAULT_PROVIDER, loadProviderConfig } from '@/utils/email-service.js';
 import { ApiError, getErrorMessage, ValidationError } from '@/utils/errors.js';
 import { setProviderInstance as setProviderInstanceStorage } from '@/utils/instance-manager.js';
 import { logError } from '@/utils/logger.js';
+import { defaultDomainKey, selectedInstanceKey } from '@/utils/storage-keys.js';
 import type { Keybindings, ProviderInstance } from '@/utils/types.js';
 import { DEFAULT_KEYBINDINGS } from '@/utils/types.js';
 import { validateCustomInstanceName, validateCustomInstanceUrl } from '@/utils/validation.js';
@@ -64,7 +65,6 @@ export async function loadSettings(
   setters: SettingsSetters
 ) {
   try {
-    setters.setSettingsLoading(true);
     const result = (await ext.storage.local.get([
       'autoCopy',
       'autoRenew',
@@ -140,9 +140,9 @@ export async function loadSettings(
     }
     // Load default domain from per-provider scoped key
     const provider = result.selectedProvider || DEFAULT_PROVIDER;
-    const defaultDomainKey = `defaultDomain_${provider}`;
-    const domainResult = await ext.storage.local.get([defaultDomainKey]);
-    setters.setDefaultDomain(String(domainResult[defaultDomainKey] ?? ''));
+    const defaultKey = defaultDomainKey(provider);
+    const domainResult = await ext.storage.local.get([defaultKey]);
+    setters.setDefaultDomain(String(domainResult[defaultKey] ?? ''));
   } catch (e: unknown) {
     logError('loadSettings error:', undefined, e instanceof Error ? e : new Error(String(e)));
   } finally {
@@ -186,7 +186,7 @@ export async function saveSettings(
     // Save default domain to per-provider scoped key
     if (state.defaultDomain) {
       await ext.storage.local.set({
-        [`defaultDomain_${state.selectedProvider}`]: state.defaultDomain,
+        [defaultDomainKey(state.selectedProvider)]: state.defaultDomain,
       });
     }
     setters.setShowToast('Settings saved', 'success');
@@ -332,7 +332,7 @@ export async function loadProviderInstances(ext: typeof browser, setters: Settin
     const provider = selectedProvider || DEFAULT_PROVIDER;
     const response = await ext.runtime.sendMessage({ action: 'getProviderInstances', provider });
     if (response?.success) setters.setProviderInstances(response.instances || []);
-    const storageKey = `selectedInstance_${provider}`;
+    const storageKey = selectedInstanceKey(provider);
     const storageResult = (await ext.storage.local.get([storageKey])) as {
       [key: string]: string | undefined;
     };
@@ -411,7 +411,9 @@ export async function addCustomInstance(
     '.bat',
     '.sh',
   ];
-  const isBlacklisted = blacklistedPatterns.some((pattern) => domain.includes(pattern));
+  const isBlacklisted = blacklistedPatterns.some(
+    (pattern) => domain === pattern.replace(/^\./, '') || domain.endsWith(pattern)
+  );
 
   if (isBlacklisted) {
     setters.setShowToast('Domain not allowed', 'error');

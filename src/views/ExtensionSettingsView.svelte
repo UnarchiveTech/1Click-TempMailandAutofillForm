@@ -241,20 +241,6 @@ function closeConfirmDialog() {
 
 // Dropdown state (identity only — others moved to sub-pages)
 let identityDropdownOpen = $state(false);
-
-// Settings sub-navigation — which subpage pill is highlighted
-let currentSubPage = $state<string | null>(null);
-
-const settingsSubPages = [
-  { label: 'Provider',  icon: 'mail',         action: () => { currentSubPage = 'Provider';  onNavigateToMailProvider(); } },
-  { label: 'Storage',   icon: 'barChart',      action: () => { currentSubPage = 'Storage';   onNavigateToStoragePerformance(); } },
-  { label: 'Shortcuts', icon: 'settings',      action: () => { currentSubPage = 'Shortcuts'; onNavigateToKeybindings(); } },
-  { label: 'Tags',      icon: 'tag',           action: () => { currentSubPage = 'Tags';      onNavigateToTagManagement(); } },
-  { label: 'Filters',   icon: 'filter',        action: () => { currentSubPage = 'Filters';   onNavigateToFiltersManagement(); } },
-  { label: 'Labels',    icon: 'tag',           action: () => { currentSubPage = 'Labels';    onNavigateToLabelManagement(); } },
-  { label: 'Mailboxes', icon: 'archive',       action: () => { currentSubPage = 'Mailboxes'; onNavigateToMailboxManagement(); } },
-  { label: 'Identities',icon: 'user',          action: () => { currentSubPage = 'Identities';onNavigateToIdentities(); } },
-];
 </script>
 
 {#if loading}
@@ -582,10 +568,16 @@ const settingsSubPages = [
         <div class="text-sm font-medium text-md-on-surface">{$t('preferences.showDeveloperOptions')}</div>
         <div class="text-xs text-md-on-surface/50">{$t('preferences.showDeveloperOptionsDescription')}</div>
       </div>
-      <label class="cursor-pointer">
-        <input type="checkbox" class="sr-only peer" aria-label={$t('preferences.toggleDeveloperSettings')} checked={showDeveloperSettings} onchange={onToggleDeveloperSettings} />
-        <div class="relative w-9 h-5 bg-md-outline-variant peer-checked:bg-md-primary rounded-full peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all"></div>
-      </label>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={showDeveloperSettings}
+        aria-label={$t('preferences.toggleDeveloperSettings')}
+        class="relative w-9 h-5 rounded-full transition-colors cursor-pointer border-0 p-0 flex-shrink-0 {showDeveloperSettings ? 'bg-md-primary' : 'bg-md-outline-variant'}"
+        onclick={onToggleDeveloperSettings}
+      >
+        <span class="absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform duration-200 {showDeveloperSettings ? 'translate-x-4' : 'translate-x-0'}"></span>
+      </button>
     </div>
 
     {#if showDeveloperSettings}
@@ -594,10 +586,16 @@ const settingsSubPages = [
           <div class="text-sm font-medium text-md-on-surface">{$t('preferences.enableLogging')}</div>
           <div class="text-xs text-md-on-surface/50">{$t('preferences.enableLoggingDescription')}</div>
         </div>
-        <label class="cursor-pointer">
-          <input type="checkbox" class="sr-only peer" aria-label={$t('preferences.toggleLogging')} checked={enableLogging} onchange={onToggleEnableLogging} />
-          <div class="relative w-9 h-5 bg-md-outline-variant peer-checked:bg-md-primary rounded-full peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all"></div>
-        </label>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={enableLogging}
+          aria-label={$t('preferences.toggleLogging')}
+          class="relative w-9 h-5 rounded-full transition-colors cursor-pointer border-0 p-0 flex-shrink-0 {enableLogging ? 'bg-md-primary' : 'bg-md-outline-variant'}"
+          onclick={onToggleEnableLogging}
+        >
+          <span class="absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform duration-200 {enableLogging ? 'translate-x-4' : 'translate-x-0'}"></span>
+        </button>
       </div>
     {/if}
   </section>
@@ -615,12 +613,21 @@ const settingsSubPages = [
     <button class="w-full px-3 py-1.5 text-sm rounded-xl border border-md-error text-md-error hover:bg-md-error/10 mt-1 font-semibold transition-colors" aria-label={$t('preferences.performHardReset')} onclick={() => showConfirmDialog($t('preferences.hardResetConfirm'), onHardReset)}>{$t('preferences.hardReset')}</button>
   </section>
 
-    </div>
-
   <!-- ── Settings Sub-Navigation Bar ── -->
-  <div class="px-0 pb-1">
-    <SettingsSubNav subPages={settingsSubPages} {currentSubPage} />
+  <div class="px-0 pb-1 mt-4">
+    <SettingsSubNav currentSubPage={null} onNavigateTo={(view) => {
+      if (view === 'mailProvider') onNavigateToMailProvider();
+      else if (view === 'storagePerformance') onNavigateToStoragePerformance();
+      else if (view === 'keybindings') onNavigateToKeybindings();
+      else if (view === 'tagManagement') onNavigateToTagManagement();
+      else if (view === 'filtersManagement') onNavigateToFiltersManagement();
+      else if (view === 'labelManagement') onNavigateToLabelManagement();
+      else if (view === 'mailboxManagement') onNavigateToMailboxManagement();
+      else if (view === 'identities') onNavigateToIdentities();
+    }} />
   </div>
+
+    </div>
 
   {/snippet}
 </ErrorBoundary>

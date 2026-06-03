@@ -13,7 +13,7 @@ import {
   type ProviderConfig,
 } from '@/utils/email-service.js';
 import { logError } from '@/utils/logger.js';
-import { getInboxes } from '@/utils/storage-keys.js';
+import { domainIndexKey, getInboxes } from '@/utils/storage-keys.js';
 import { useCurrentTime } from '@/utils/time-store.js';
 import type { Account } from '@/utils/types.js';
 import AccountCard from './AccountCard.svelte';
@@ -110,8 +110,8 @@ let isMultiDomain = $derived.by(() => {
 });
 
 // Storage key for domain index per inbox
-function getDomainStorageKey(email: string, providerId: string): string {
-  return `domainIndex_${providerId}_${email.split('@')[0]}`;
+function getDomainStorageKey(email: string, providerId: string): `domainIndex_${string}_${string}` {
+  return domainIndexKey(providerId, email.split('@')[0]);
 }
 
 // Load persisted domain index when selected email changes

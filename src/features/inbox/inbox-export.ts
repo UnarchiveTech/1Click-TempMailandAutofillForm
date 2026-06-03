@@ -43,49 +43,94 @@ export async function exportAccountEmails(ext: Browser, account: Account, setter
 export function showExportFormatDialog(): Promise<string | null> {
   return new Promise((resolve) => {
     const dialog = document.createElement('div');
-    dialog.className = 'fixed inset-0 flex items-center justify-center bg-black/50 z-50';
-    const panel = document.createElement('div');
-    panel.className = 'bg-md-primary-container rounded-2xl shadow-2xl p-5 flex flex-col gap-4 w-96';
-    const content = document.createElement('div');
-    const heading = document.createElement('h3');
-    heading.className = 'font-bold text-base mb-1 text-md-on-surface';
-    heading.textContent = 'Select Export Format';
-    const formatList = document.createElement('div');
-    formatList.className = 'flex flex-col gap-2 mt-4';
-    const actions = document.createElement('div');
-    actions.className = 'flex gap-2 pt-4 justify-end mt-2';
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-modal', 'true');
+    dialog.setAttribute('aria-label', 'Select export format');
+    dialog.style.cssText =
+      'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;';
 
-    for (const [format, label] of [
-      ['json', 'JSON Format'],
-      ['eml', 'EML Format'],
-      ['mbox', 'MBOX Format'],
-    ] as const) {
-      const button = document.createElement('button');
-      button.className =
-        'px-3 py-2 text-sm rounded-xl border border-md-outline-variant bg-transparent text-md-on-surface hover:bg-md-secondary-container transition-colors';
-      button.textContent = label;
-      button.setAttribute('aria-label', `Export as ${format.toUpperCase()}`);
-      button.addEventListener('click', () => {
-        dialog.remove();
-        resolve(format);
-      });
-      formatList.appendChild(button);
-    }
-
-    const cancelButton = document.createElement('button');
-    cancelButton.className =
-      'px-4 py-2 text-sm rounded-xl bg-transparent text-md-on-surface/80 hover:bg-md-surface-variant transition-colors';
-    cancelButton.textContent = 'Cancel';
-    cancelButton.setAttribute('aria-label', 'Cancel export');
-    cancelButton.addEventListener('click', () => {
+    // Backdrop
+    const backdrop = document.createElement('div');
+    backdrop.style.cssText =
+      'position:absolute;inset:0;background:rgba(0,0,0,0.45);backdrop-filter:blur(2px);';
+    backdrop.addEventListener('click', () => {
       dialog.remove();
       resolve(null);
     });
-    actions.appendChild(cancelButton);
-    content.append(heading, formatList, actions);
-    panel.appendChild(content);
-    dialog.appendChild(panel);
+
+    // Panel
+    const panel = document.createElement('div');
+    panel.style.cssText =
+      'position:relative;z-index:1;background:var(--md-surface,#fff);border-radius:20px;padding:24px;width:320px;box-shadow:0 24px 48px rgba(0,0,0,0.18);display:flex;flex-direction:column;gap:20px;';
+
+    // Close button (top-right of panel)
+    const closeBtn = document.createElement('button');
+    closeBtn.setAttribute('aria-label', 'Close');
+    closeBtn.style.cssText =
+      'position:absolute;top:12px;right:12px;width:32px;height:32px;border-radius:50%;border:none;background:var(--md-surface-variant,#e7e0ec);cursor:pointer;display:flex;align-items:center;justify-content:center;color:var(--md-on-surface,#1c1b1f);transition:background 0.15s;';
+    closeBtn.innerHTML =
+      '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+    closeBtn.addEventListener('click', () => {
+      dialog.remove();
+      resolve(null);
+    });
+
+    // Heading
+    const heading = document.createElement('h3');
+    heading.style.cssText =
+      'margin:0;font-size:16px;font-weight:700;color:var(--md-on-surface,#1c1b1f);padding-right:32px;';
+    heading.textContent = 'Select Export Format';
+
+    // Sub-label
+    const sub = document.createElement('p');
+    sub.style.cssText =
+      'margin:0;margin-top:-12px;font-size:12px;color:var(--md-on-surface-variant,#49454f);';
+    sub.textContent = 'Choose a format for your exported emails';
+
+    // Format buttons row
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:8px;';
+
+    const formats: [string, string, string][] = [
+      ['json', 'JSON', 'application/json'],
+      ['eml', 'Email', 'message/rfc822'],
+      ['mbox', 'MBOX', 'application/mbox'],
+    ];
+
+    for (const [format, label] of formats) {
+      const btn = document.createElement('button');
+      btn.style.cssText =
+        'flex:1;padding:10px 4px;font-size:13px;font-weight:600;border-radius:12px;border:1.5px solid var(--md-outline-variant,#cac4d0);background:transparent;color:var(--md-on-surface,#1c1b1f);cursor:pointer;transition:background 0.15s,border-color 0.15s;';
+      btn.textContent = label;
+      btn.setAttribute('aria-label', `Export as ${label}`);
+      btn.addEventListener('mouseenter', () => {
+        btn.style.background = 'var(--md-secondary-container,#e8def8)';
+        btn.style.borderColor = 'var(--md-primary,#6750a4)';
+      });
+      btn.addEventListener('mouseleave', () => {
+        btn.style.background = 'transparent';
+        btn.style.borderColor = 'var(--md-outline-variant,#cac4d0)';
+      });
+      btn.addEventListener('click', () => {
+        dialog.remove();
+        resolve(format);
+      });
+      row.appendChild(btn);
+    }
+
+    panel.append(closeBtn, heading, sub, row);
+    dialog.append(backdrop, panel);
     document.body.appendChild(dialog);
+
+    // Close on Escape
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        dialog.remove();
+        resolve(null);
+        document.removeEventListener('keydown', onKey);
+      }
+    };
+    document.addEventListener('keydown', onKey);
   });
 }
 

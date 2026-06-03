@@ -17,11 +17,11 @@ async function ensureLoaded(): Promise<void> {
 
 /**
  * Sanitize HTML to prevent XSS. Returns sanitized HTML string.
- * If DOMPurify hasn't loaded yet, returns empty string.
+ * If DOMPurify hasn't loaded yet, falls back to stripping all tags (safe).
  * Call `await initSanitize()` on component mount to preload.
  */
 export function sanitizeHtml(html: string): string {
-  if (!_dompurify) throw new Error('DOMPurify not initialized');
+  if (!_dompurify) return html.replace(/<[^>]*>/g, '');
   return _dompurify.sanitize(html);
 }
 

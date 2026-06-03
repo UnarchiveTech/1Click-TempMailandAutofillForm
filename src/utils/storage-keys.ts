@@ -12,7 +12,11 @@ import type { Account, Analytics, Email, ProviderInstance } from '@/utils/types.
 /**
  * Dynamic storage key patterns for provider-specific settings
  */
-export type ProviderStorageKey = `customInstances_${string}` | `selectedInstance_${string}`;
+export type ProviderStorageKey =
+  | `customInstances_${string}`
+  | `selectedInstance_${string}`
+  | `defaultDomain_${string}`
+  | `domainIndex_${string}_${string}`;
 
 /**
  * All possible storage keys in the application
@@ -34,7 +38,58 @@ export type StorageKey =
   | 'enableLogging'
   | 'identities'
   | 'savedSearchFilters'
-  | string; // Fallback for any other string key
+  | 'storedEmails'
+  | 'archivedEmails'
+  | 'readEmails'
+  | 'inboxes'
+  | 'activeInboxId'
+  | 'emailTags'
+  | 'analytics'
+  | 'autoRefreshInterval'
+  | 'autofillBlocklist'
+  | 'emailHistory'
+  | 'loginInfo'
+  | 'selectedIdentityId'
+  | 'passwordSettings'
+  | 'nameSettings'
+  | 'notificationSettings'
+  | 'themeMode'
+  | 'contrastLevel'
+  | 'developerSettings'
+  | 'faviconCaching'
+  | 'emailPreviewEnabled'
+  | 'keybindings';
+
+/**
+ * Build a typed `defaultDomain_<provider>` storage key.
+ */
+export function defaultDomainKey(provider: string): `defaultDomain_${string}` {
+  return `defaultDomain_${provider}` as `defaultDomain_${string}`;
+}
+
+/**
+ * Build a typed `domainIndex_<provider>_<username>` storage key.
+ */
+export function domainIndexKey(
+  providerId: string,
+  username: string
+): `domainIndex_${string}_${string}` {
+  return `domainIndex_${providerId}_${username}` as `domainIndex_${string}_${string}`;
+}
+
+/**
+ * Build a typed `selectedInstance_<provider>` storage key.
+ */
+export function selectedInstanceKey(provider: string): `selectedInstance_${string}` {
+  return `selectedInstance_${provider}` as `selectedInstance_${string}`;
+}
+
+/**
+ * Build a typed `customInstances_<provider>` storage key.
+ */
+export function customInstancesKey(provider: string): `customInstances_${string}` {
+  return `customInstances_${provider}` as `customInstances_${string}`;
+}
 
 /**
  * Type-safe storage get operation (single key, generic value)

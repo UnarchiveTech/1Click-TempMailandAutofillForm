@@ -1,6 +1,10 @@
 import { logDebug } from '@/utils/logger.js';
+import { initSanitize, sanitizeHtml } from '@/utils/sanitize-html.js';
 import { timeAgo } from '@/utils/time.js';
 import type { Email } from '@/utils/types.js';
+
+// Preload DOMPurify so sanitizeHtml() is ready when emails arrive.
+initSanitize();
 
 export function mapEmailForDisplay(
   m: Email,
@@ -17,7 +21,7 @@ export function mapEmailForDisplay(
     isOtp: !!m.otp,
     otp: m.otp || null,
     body: m.body_plain || (m.body_html || '').replace(/<[^>]*>/g, ''),
-    body_html: m.body_html,
+    body_html: m.body_html ? sanitizeHtml(m.body_html) : m.body_html,
     unread: !readEmails[`${m.original_inbox || addr}_${m.id}`] && !readEmails[m.id],
     received_at: m.received_at,
     local_only: m.local_only,

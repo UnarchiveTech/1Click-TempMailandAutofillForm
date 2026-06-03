@@ -5,12 +5,14 @@ import { t } from 'svelte-i18n';
 import { browser } from 'wxt/browser';
 import ToastContainer from '@/components/feedback/ToastContainer.svelte';
 import Icon from '@/components/icons/Icon.svelte';
+import SettingsSubNav from '@/components/ui/SettingsSubNav.svelte';
 import {
   getAllProviderConfigs,
   loadProviderConfig,
   type ProviderConfig,
 } from '@/utils/email-service.js';
 import * as PingService from '@/utils/ping-service.js';
+import { domainIndexKey } from '@/utils/storage-keys.js';
 import { toastStore } from '@/utils/toastStore.js';
 import type { Account, ProviderInstance } from '@/utils/types.js';
 
@@ -39,6 +41,7 @@ let {
   onLoadProviderInstances = async () => {},
   onSetDefaultDomain = undefined as ((v: string) => void) | undefined,
   onSaveSettings = () => {},
+  onNavigateTo = undefined,
 } = $props<{
   onBack?: () => void;
   selectedProvider?: string;
@@ -64,6 +67,7 @@ let {
   onLoadProviderInstances?: () => Promise<void>;
   onSetDefaultDomain?: (v: string) => void;
   onSaveSettings?: () => void;
+  onNavigateTo?: (view: string) => void;
 }>();
 
 let allProviders = $derived.by((): ProviderConfig[] => getAllProviderConfigs());
@@ -137,14 +141,14 @@ async function loadDomainOverrides() {
   if (domains.length === 0) return;
   const multiDomainAccounts = allInboxes.filter((a: Account) => a.provider === selectedProvider);
   if (multiDomainAccounts.length === 0) return;
-  const keys = multiDomainAccounts.map(
-    (a: Account) => `domainIndex_${selectedProvider}_${a.address.split('@')[0]}`
+  const keys = multiDomainAccounts.map((a: Account) =>
+    domainIndexKey(selectedProvider, a.address.split('@')[0])
   );
   const result = (await browser.storage.local.get(keys)) as Record<string, number>;
   const overrides: Record<string, string> = {};
   for (const acc of multiDomainAccounts) {
     const username = acc.address.split('@')[0];
-    const key = `domainIndex_${selectedProvider}_${username}`;
+    const key = domainIndexKey(selectedProvider, username);
     const idx = result[key];
     overrides[username] = idx !== undefined ? domains[idx] || domains[0] : domains[0];
   }
@@ -229,7 +233,7 @@ async function applyDomainSwitch() {
     const pendingIndex = domains.indexOf(pendingDomain);
     const storageUpdates: Record<string, number> = {};
     for (const acc of toUpdate) {
-      const key = `domainIndex_${selectedProvider}_${acc.address.split('@')[0]}`;
+      const key = domainIndexKey(selectedProvider, acc.address.split('@')[0]);
       storageUpdates[key] = pendingIndex >= 0 ? pendingIndex : 0;
     }
     if (Object.keys(storageUpdates).length > 0) {
@@ -649,8 +653,13 @@ async function applyDomainSwitch() {
           onclick={applyDomainSwitch}
         >{$t('mailProvider.apply')}</button>
       </div>
-    </div>
   </div>
+
+  <!-- ── Settings Sub-Navigation Bar ── -->
+  <div class="px-0 pb-1 mt-4">
+    <SettingsSubNav currentSubPage="mailProvider" {onNavigateTo} />
+  </div>
+</div>
 {/if}
 
 <ToastContainer />

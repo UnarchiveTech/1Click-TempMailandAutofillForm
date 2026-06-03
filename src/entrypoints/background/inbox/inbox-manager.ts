@@ -212,11 +212,8 @@ async function _createInbox(
                 throw new InboxSessionConflictError({ address: inbox.address });
               }
               const cleaned = inboxes.filter((i: Account) => i.address !== existingInbox.address);
+              cleaned.push(inbox);
               await browser.storage.local.set({ inboxes: cleaned });
-              inboxes.length = 0;
-              inboxes.push(...cleaned);
-              inboxes.push(inbox);
-              await browser.storage.local.set({ inboxes });
               log('Created fresh inbox after forgetting expired one');
               return inbox;
             }

@@ -470,6 +470,21 @@ const handlers: Record<string, HandlerFn> = {
       if (parsedUrl.protocol !== 'https:' && parsedUrl.protocol !== 'http:') {
         throw new Error('Invalid protocol: only http and https are allowed');
       }
+      const h = parsedUrl.hostname.toLowerCase();
+      if (
+        h === 'localhost' ||
+        h === '::1' ||
+        h.startsWith('127.') ||
+        h.startsWith('10.') ||
+        h.startsWith('192.168.') ||
+        /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(h) ||
+        h.startsWith('fc') ||
+        h.startsWith('fd') ||
+        h.startsWith('fe80') ||
+        h.startsWith('169.254.')
+      ) {
+        throw new Error('Favicon URL cannot point to internal/private networks');
+      }
 
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 60000); // 60 seconds timeout

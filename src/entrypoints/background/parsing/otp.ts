@@ -277,9 +277,8 @@ function buildKeywordAlternation(byLang: Record<string, readonly string[]>): str
     for (const kw of keywords) all.add(kw);
   }
   return Array.from(all)
-    .map((kw) => kw.replace(/[\s\u3000]+/g, '[\\s\\u3000]+'))
     .sort((a, b) => b.length - a.length)
-    .map(escapeRegex)
+    .map((kw) => escapeRegex(kw).replace(/[\s\u3000]+/g, '[\\s\\u3000]+'))
     .join('|');
 }
 

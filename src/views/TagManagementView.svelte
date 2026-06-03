@@ -3,16 +3,19 @@ import { get } from 'svelte/store';
 import { t } from 'svelte-i18n';
 import { browser } from 'wxt/browser';
 import Icon from '@/components/icons/Icon.svelte';
+import SettingsSubNav from '@/components/ui/SettingsSubNav.svelte';
 import type { Account } from '@/utils/types.js';
 
 let {
   onBack = () => {},
   allInboxes = [] as Account[],
   onReloadAccounts = async () => {},
+  onNavigateTo = undefined,
 } = $props<{
   onBack?: () => void;
   allInboxes?: Account[];
   onReloadAccounts?: () => Promise<void>;
+  onNavigateTo?: (view: string) => void;
 }>();
 
 // Collect unique tags across all inboxes
@@ -173,5 +176,10 @@ async function deleteTag(tag: string) {
         </div>
       {/each}
     {/if}
+  </div>
+
+  <!-- ── Settings Sub-Navigation Bar ── -->
+  <div class="px-0 pb-1 mt-4">
+    <SettingsSubNav currentSubPage="tagManagement" {onNavigateTo} />
   </div>
 </div>

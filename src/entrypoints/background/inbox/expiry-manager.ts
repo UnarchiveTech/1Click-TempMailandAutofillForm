@@ -5,6 +5,7 @@
 
 import { browser } from 'wxt/browser';
 import { EmailService, loadProviderConfig } from '@/utils/email-service.js';
+import { InboxCreationError } from '@/utils/errors.js';
 import { logError } from '@/utils/logger.js';
 import { getInboxes, setInboxes } from '@/utils/storage-keys.js';
 import type { Account, NotificationSettings } from '@/utils/types.js';
@@ -77,7 +78,10 @@ export async function checkInboxExpiry(): Promise<void> {
             const service = new EmailService(config, browser);
 
             if (!inbox.token && !inbox.sidToken) {
-              throw new Error('No token available for renewal');
+              throw new InboxCreationError(inbox.provider, {
+                inboxId: inbox.id,
+                reason: 'missing-token',
+              });
             }
 
             const currentUser = inbox.address.split('@')[0];
@@ -86,7 +90,10 @@ export async function checkInboxExpiry(): Promise<void> {
             });
 
             if (!newEmailResponse.token) {
-              throw new Error('Failed to get fresh token for renewal');
+              throw new InboxCreationError(inbox.provider, {
+                inboxId: inbox.id,
+                reason: 'missing-new-token',
+              });
             }
 
             const newSidToken = newEmailResponse.token as string;

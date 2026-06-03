@@ -1,19 +1,24 @@
 <script lang="ts">
 import Icon from '@/components/icons/Icon.svelte';
 
-type SubPage = {
-  label: string;
-  icon: string;
-  action: () => void;
-};
-
 let {
-  subPages = [],
   currentSubPage = null,
+  onNavigateTo = () => {},
 }: {
-  subPages?: SubPage[];
   currentSubPage?: string | null;
+  onNavigateTo?: (view: string) => void;
 } = $props();
+
+const subPages = [
+  { label: 'Provider', icon: 'mail', view: 'mailProvider' },
+  { label: 'Storage', icon: 'barChart', view: 'storagePerformance' },
+  { label: 'Shortcuts', icon: 'settings', view: 'keybindings' },
+  { label: 'Tags', icon: 'tag', view: 'tagManagement' },
+  { label: 'Filters', icon: 'filter', view: 'filtersManagement' },
+  { label: 'Labels', icon: 'tag', view: 'labelManagement' },
+  { label: 'Mailboxes', icon: 'archive', view: 'mailboxManagement' },
+  { label: 'Identities', icon: 'user', view: 'identities' },
+];
 
 // How many items visible in the sliding window
 const VISIBLE = 3;
@@ -57,13 +62,13 @@ function scrollRight() {
     <!-- Visible subpage buttons -->
     <div class="flex flex-1 items-center gap-1 min-w-0 overflow-hidden">
       {#each visiblePages as page (page.label)}
-        {@const isActive = currentSubPage === page.label}
+        {@const isActive = currentSubPage === page.view}
         <button
           class="subnav-item flex-1 flex items-center justify-center gap-1 px-2 py-1.5 rounded-[10px] text-[11px] font-semibold transition-all duration-200 hover:scale-105 active:scale-95 truncate
             {isActive
               ? 'bg-md-primary text-md-on-primary shadow-sm'
               : 'bg-md-surface-variant/60 text-md-on-surface/70 hover:bg-md-surface-variant hover:text-md-on-surface'}"
-          onclick={(e) => { e.stopPropagation(); page.action(); }}
+          onclick={(e) => { e.stopPropagation(); onNavigateTo(page.view); }}
           aria-label={page.label}
           title={page.label}
         >

@@ -15,6 +15,7 @@ import {
   PBKDF2_ITERATIONS,
   SALT_LENGTH,
 } from './constants.js';
+import { DecryptionError, EncryptionError, KeyRotationError } from './errors.js';
 import { logError } from './logger.js';
 
 // Master encryption key (in production, this should be stored securely)
@@ -79,11 +80,23 @@ async function generateKey(): Promise<CryptoKey> {
   );
 }
 
+// Single in-flight promise so concurrent callers share one key generation.
+let _masterKeyPromise: Promise<CryptoKey> | null = null;
+
 /**
  * Get or create the master encryption key
  * Uses a combination of device-specific data and random generation
  */
 async function getOrCreateMasterKey(): Promise<CryptoKey> {
+  if (_masterKeyPromise) return _masterKeyPromise;
+  _masterKeyPromise = _getOrCreateMasterKeyImpl().catch((e) => {
+    _masterKeyPromise = null;
+    throw e;
+  });
+  return _masterKeyPromise;
+}
+
+async function _getOrCreateMasterKeyImpl(): Promise<CryptoKey> {
   try {
     // Use session storage for encryption keys (cleared when browser closes)
     const storedKeyData = await browser.storage.session.get(MASTER_KEY_ID);
@@ -126,7 +139,10 @@ async function getOrCreateMasterKey(): Promise<CryptoKey> {
       undefined,
       e instanceof Error ? e : new Error(String(e))
     );
-    throw new Error('Failed to initialize encryption');
+    throw new EncryptionError(
+      { phase: 'getOrCreateMasterKey' },
+      e instanceof Error ? e : undefined
+    );
   }
 }
 
@@ -179,7 +195,7 @@ export async function rotateEncryptionKey(): Promise<void> {
 
     // Get current metadata
     const metadata = await getKeyMetadata();
-    if (!metadata) throw new Error('No key metadata found');
+    if (!metadata) throw new KeyRotationError({ reason: 'missing-metadata' });
 
     // Re-encrypt password settings with new key
     const passwordSettings = (await browser.storage.local.get('passwordSettings')) as {
@@ -218,7 +234,11 @@ export async function rotateEncryptionKey(): Promise<void> {
       undefined,
       e instanceof Error ? e : new Error(String(e))
     );
-    throw new Error('Failed to rotate encryption key');
+    if (e instanceof KeyRotationError) throw e;
+    throw new KeyRotationError(
+      { phase: 'rotateEncryptionKey' },
+      e instanceof Error ? e : undefined
+    );
   }
 }
 
@@ -252,7 +272,7 @@ async function encryptWithKey(plaintext: string, key: CryptoKey): Promise<string
     return btoa(String.fromCharCode(...combined));
   } catch (e) {
     logError('Encryption error:', e);
-    throw new Error('Failed to encrypt data');
+    throw new EncryptionError({ phase: 'encryptWithKey' }, e instanceof Error ? e : undefined);
   }
 }
 
@@ -287,7 +307,8 @@ export async function encrypt(plaintext: string): Promise<string> {
     return btoa(String.fromCharCode(...combined));
   } catch (e) {
     logError('Encryption error:', e);
-    throw new Error('Failed to encrypt data');
+    if (e instanceof EncryptionError) throw e;
+    throw new EncryptionError({ phase: 'encrypt' }, e instanceof Error ? e : undefined);
   }
 }
 
@@ -319,7 +340,7 @@ export async function decrypt(encryptedBase64: string): Promise<string> {
     return decoder.decode(decrypted);
   } catch (e) {
     logError('Decryption error:', e);
-    throw new Error('Failed to decrypt data');
+    throw new DecryptionError({ phase: 'decrypt' }, e instanceof Error ? e : undefined);
   }
 }
 

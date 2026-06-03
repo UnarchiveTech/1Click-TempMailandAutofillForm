@@ -88,13 +88,18 @@ export function validateCustomInstanceUrl(url: string): void {
       hostname.startsWith('192.168.') ||
       hostname.startsWith('10.') ||
       /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(hostname) ||
-      hostname === '[::1]'
+      // IPv6 loopback and private ranges (URL.hostname strips brackets)
+      hostname === '::1' ||
+      hostname.startsWith('fc') ||
+      hostname.startsWith('fd') ||
+      hostname.startsWith('fe80')
     ) {
       throw new ValidationError('Instance URL cannot point to internal/private networks', {
         field: 'instanceUrl',
       });
     }
-  } catch (_error) {
+  } catch (error) {
+    if (error instanceof ValidationError) throw error;
     throw new ValidationError('Instance URL is not a valid URL', { field: 'instanceUrl' });
   }
 }

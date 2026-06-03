@@ -2,6 +2,7 @@
 import { get } from 'svelte/store';
 import { t } from 'svelte-i18n';
 import Icon from '@/components/icons/Icon.svelte';
+import SettingsSubNav from '@/components/ui/SettingsSubNav.svelte';
 import type { Keybindings } from '@/utils/types.js';
 import { DEFAULT_KEYBINDINGS } from '@/utils/types.js';
 
@@ -10,11 +11,13 @@ let {
   keybindings = DEFAULT_KEYBINDINGS,
   onSetKeybindings = undefined,
   onSaveSettings = () => {},
+  onNavigateTo = undefined,
 } = $props<{
   onBack?: () => void;
   keybindings?: Keybindings;
   onSetKeybindings?: (value: Keybindings) => void;
   onSaveSettings?: () => void;
+  onNavigateTo?: (view: string) => void;
 }>();
 
 let editingKeybinding = $state<string | null>(null);
@@ -188,5 +191,10 @@ let hasCustomized = $derived(
         </div>
       </div>
     {/each}
+  </div>
+
+  <!-- ── Settings Sub-Navigation Bar ── -->
+  <div class="px-0 pb-1 mt-4">
+    <SettingsSubNav currentSubPage="keybindings" {onNavigateTo} />
   </div>
 </div>

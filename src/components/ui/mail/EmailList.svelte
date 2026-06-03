@@ -425,7 +425,7 @@ function stripHtml(html: string): string {
   <!-- Pull-to-refresh overlay (outside scrollable area) -->
   {#if pullDistance > 0}
     <div
-      class="absolute top-0 left-0 right-0 flex items-center justify-center py-2 z-10 bg-md-surface pointer-events-none"
+      class="absolute top-0 left-0 right-0 flex items-center justify-center py-2 z-10 pointer-events-none"
       style="opacity: {Math.min(pullDistance / 60, 1)}; transform: translateY({Math.min(pullDistance - 10, 50)}px); transition: opacity 0.1s;"
     >
       <span style="transform: rotate({refreshRotation}deg); display: inline-block;">

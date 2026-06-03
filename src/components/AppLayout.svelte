@@ -637,6 +637,57 @@ let mgmtSearch = $state<string>('');
 let selectedAddresses = $state<Set<string>>(new Set());
 let currentEmailDetail = $state<Account | null>(null);
 
+// --- EmailDetail tag dialog (AppLayout-level, works from any view) ---
+let emailDetailTagDialogOpen = $state(false);
+let emailDetailTagTarget = $state<Account | null>(null);
+
+let allExistingTags = $derived.by(() => {
+  const s = new Set<string>();
+  for (const a of allInboxes) {
+    if (a.tag) s.add(a.tag);
+  }
+  return Array.from(s);
+});
+let allTagColors = $derived.by(() => {
+  const c: Record<string, string> = {};
+  for (const a of allInboxes) {
+    if (a.tag && a.tagColor) c[a.tag] = a.tagColor;
+  }
+  return c;
+});
+
+function openEmailDetailTagDialog(account: Account) {
+  emailDetailTagTarget = account;
+  emailDetailTagDialogOpen = true;
+}
+function closeEmailDetailTagDialog() {
+  emailDetailTagDialogOpen = false;
+  emailDetailTagTarget = null;
+}
+async function saveEmailDetailTag(tag: string, color: string) {
+  if (!emailDetailTagTarget) return;
+  try {
+    await ext.runtime.sendMessage({
+      type: 'updateInboxTag',
+      inboxId: emailDetailTagTarget.id,
+      tag,
+      color,
+    });
+    await loadInboxes(true);
+    // Keep currentEmailDetail in sync
+    if (currentEmailDetail?.id === emailDetailTagTarget.id) {
+      currentEmailDetail = {
+        ...currentEmailDetail,
+        tag: tag || undefined,
+        tagColor: color || undefined,
+      };
+    }
+  } catch (e) {
+    /* ignore */
+  }
+  closeEmailDetailTagDialog();
+}
+
 let mgmtAccounts = $derived(
   allInboxes.filter((a) => {
     const isInactive =
@@ -1901,6 +1952,43 @@ function handleKeydown(event: KeyboardEvent) {
           exportAccountEmails(currentEmailDetail);
         }
       }}
+      onNavigateToMailbox={() => { currentView = 'main'; }}
+      onArchiveAccount={(account) => { archiveAccount(account); currentView = 'main'; currentEmailDetail = null; }}
+      onRemoveAccount={(address) => { removeAccount(address); currentView = 'main'; currentEmailDetail = null; }}
+      onToggleAutoExtend={async (account) => {
+        await toggleAutoExtend(account);
+        await loadInboxes(true);
+        // Sync currentEmailDetail so AutoRenewToggle reflects the new state immediately
+        const updated = allInboxes.find((a) => a.id === account.id);
+        if (updated) currentEmailDetail = updated;
+      }}
+      onMarkAllRead={async () => {
+        if (!currentEmailDetail) return;
+        try {
+          const { readEmails = {} } = (await ext.storage.local.get(['readEmails'])) as { readEmails?: Record<string, boolean> };
+          for (const e of emails) {
+            readEmails[`${currentEmailDetail.address}_${e.id}`] = true;
+            readEmails[e.id] = true;
+          }
+          await ext.storage.local.set({ readEmails });
+          await checkMessages(currentEmailDetail.id);
+        } catch { /* ignore */ }
+      }}
+      onMarkAllUnread={async () => {
+        if (!currentEmailDetail) return;
+        try {
+          const { readEmails = {} } = (await ext.storage.local.get(['readEmails'])) as { readEmails?: Record<string, boolean> };
+          for (const e of emails) {
+            delete readEmails[`${currentEmailDetail.address}_${e.id}`];
+            delete readEmails[e.id];
+          }
+          await ext.storage.local.set({ readEmails });
+          await checkMessages(currentEmailDetail.id);
+        } catch { /* ignore */ }
+      }}
+      onOpenTagDialog={() => {
+        if (currentEmailDetail) openEmailDetailTagDialog(currentEmailDetail);
+      }}
     />
 
   {:else if currentView === 'settings'}
@@ -1912,7 +2000,7 @@ function handleKeydown(event: KeyboardEvent) {
         autoRenew={autoRenew}
         selectedProvider={selectedProvider}
         savingSettings={savingSettings}
-        loading={loading}
+        loading={settingsLoading}
         onSaveSettings={saveSettings}
         onSetAutoCopy={(v: boolean) => { autoCopy = v; }}
         onSetAutoRenew={(v: boolean) => { autoRenew = v; }}
@@ -2340,5 +2428,16 @@ function handleKeydown(event: KeyboardEvent) {
     {confirmDialog}
     bind:confirmDialogRef
     onClose={closeConfirm}
+  />
+
+  <!-- Tag dialog for EmailDetail view -->
+  <TagDialog
+    open={emailDetailTagDialogOpen}
+    currentTag={emailDetailTagTarget?.tag ?? null}
+    currentTagColor={emailDetailTagTarget?.tagColor ?? null}
+    existingTags={allExistingTags}
+    tagColors={allTagColors}
+    onClose={closeEmailDetailTagDialog}
+    onSave={saveEmailDetailTag}
   />
 </ErrorBoundary>

@@ -4,6 +4,7 @@ import { browser } from 'wxt/browser';
  * Form filling logic: fills signup form fields with generated / stored data
  */
 
+import { decrypt } from '@/utils/crypto.js';
 import { NoActiveInboxError } from '@/utils/errors.js';
 import { logError } from '@/utils/logger.js';
 import { randomItem } from '@/utils/secure-random.js';
@@ -137,7 +138,11 @@ export async function fillSignupForm(
     const emailAddress = inbox.address;
     let password: string;
     if (!identity?.useRandomPassword && identity?.customPassword) {
-      password = identity.customPassword;
+      try {
+        password = await decrypt(identity.customPassword);
+      } catch {
+        password = identity.customPassword;
+      }
     } else {
       password = await getPasswordToFill();
     }

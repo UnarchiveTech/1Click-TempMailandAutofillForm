@@ -3,6 +3,7 @@ import { onMount } from 'svelte';
 import { t } from 'svelte-i18n';
 import { browser } from 'wxt/browser';
 import Icon from '@/components/icons/Icon.svelte';
+import SettingsSubNav from '@/components/ui/SettingsSubNav.svelte';
 import { STORAGE_LIMIT, STORAGE_WARNING_THRESHOLD } from '@/utils/constants.js';
 import { clearAllFaviconCache, getFaviconCacheStats } from '@/utils/favicon.js';
 import { logError } from '@/utils/logger.js';
@@ -23,6 +24,7 @@ let {
   onSetEmailRetentionDays = undefined as ((v: number) => void) | undefined,
   onSaveSettings = () => {},
   onClearOldEmails = async () => {},
+  onNavigateTo = undefined,
 } = $props<{
   onBack?: () => void;
   faviconCaching?: 'direct' | 'local';
@@ -31,6 +33,7 @@ let {
   onSetEmailRetentionDays?: (v: number) => void;
   onSaveSettings?: () => void;
   onClearOldEmails?: () => Promise<void>;
+  onNavigateTo?: (view: string) => void;
 }>();
 
 let faviconCacheCount = $state(0);
@@ -346,5 +349,10 @@ $effect(() => {
       </div>
     </section>
 
+  </div>
+
+  <!-- ── Settings Sub-Navigation Bar ── -->
+  <div class="px-0 pb-1 mt-4">
+    <SettingsSubNav currentSubPage="storagePerformance" {onNavigateTo} />
   </div>
 </div>

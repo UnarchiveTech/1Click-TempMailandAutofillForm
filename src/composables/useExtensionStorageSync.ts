@@ -38,9 +38,11 @@ export const SETTINGS_SYNC_KEYS = [
   'autoRenew',
   'selectedProvider',
   'customColor',
-  'developerSettings',
   'emailRetentionDays',
   'faviconCaching',
+  // 'developerSettings' intentionally excluded — toggling developer options
+  // updates local state directly and must not re-trigger loadSettings(),
+  // which would cause a full settings reload and blank the settings page.
 ];
 
 export const THEME_SYNC_KEYS = ['themeMode', 'contrastLevel'];
