@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 /**
- * Version bumper — keeps package.json as the single source of truth for the
+ * Version bumper - keeps package.json as the single source of truth for the
  * extension version. The WXT manifest version is derived from package.json at
  * build time (see wxt.config.ts), so editing package.json is enough.
  *
@@ -21,9 +21,7 @@
  *   git push origin v<version>   # triggers the release workflow
  */
 
-import { join } from 'node:path';
-
-const PKG_PATH = join(import.meta.dir, '..', 'package.json');
+const PKG_PATH = `${import.meta.dir}/../package.json`;
 
 type BumpKind = 'patch' | 'minor' | 'major' | 'prerelease';
 
@@ -217,7 +215,7 @@ if (args.explicit) {
 
 console.log(`${current} → ${next}`);
 if (args.dryRun) {
-  console.log('(dry run — no changes written)');
+  console.log('(dry run - no changes written)');
   process.exit(0);
 }
 

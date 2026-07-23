@@ -39,12 +39,11 @@ function scrollRight() {
 }
 </script>
 
-<div class="flex justify-center w-full px-0">
-  <div
-    class="settings-subnav flex items-center gap-1.5 px-1.5 py-1.5 rounded-xl backdrop-blur-3xl bg-md-surface/50 border border-white/10 w-[360px]"
-    aria-label="Settings subpage navigation"
-    role="navigation"
-  >
+<div
+  class="settings-subnav flex items-center gap-1.5 px-1.5 py-1.5 rounded-xl backdrop-blur-3xl bg-md-surface/50 border border-white/10 w-[360px] max-w-full mx-auto"
+  aria-label="Settings subpage navigation"
+  role="navigation"
+>
     <!-- Left chevron -->
     <button
       class="subnav-chevron flex-shrink-0 w-8 h-8 flex items-center justify-center rounded-[10px] transition-all duration-200
@@ -64,7 +63,7 @@ function scrollRight() {
       {#each visiblePages as page (page.label)}
         {@const isActive = currentSubPage === page.view}
         <button
-          class="subnav-item flex-1 flex items-center justify-center gap-1 px-2 py-1.5 rounded-[10px] text-[11px] font-semibold transition-all duration-200 hover:scale-105 active:scale-95 truncate
+          class="subnav-item flex-1 flex items-center justify-center gap-1 px-2 py-1.5 rounded-[10px] text-label-sm font-semibold transition-all duration-200 hover:scale-105 active:scale-95 truncate
             {isActive
               ? 'bg-md-primary text-md-on-primary shadow-sm'
               : 'bg-md-surface-variant/60 text-md-on-surface/70 hover:bg-md-surface-variant hover:text-md-on-surface'}"
@@ -89,9 +88,8 @@ function scrollRight() {
       aria-label="Scroll settings right"
       title="More settings"
     >
-      <Icon name="chevronRight" class="w-4 h-4" />
-    </button>
-  </div>
+    <Icon name="chevronRight" class="w-4 h-4 rtl-flip" />
+  </button>
 </div>
 
 <style>

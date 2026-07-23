@@ -2,7 +2,7 @@
 /**
  * Translation completeness checker
  *
- * Validates that every locale file in src/lib/locales/ contains exactly the
+ * Validates that every locale file in src/locales/ contains exactly the
  * same keys as the English source-of-truth (en.json).  Also checks that any
  * interpolation variables present in the English string (e.g. {n}, {count})
  * are carried over into every translation.
@@ -15,12 +15,9 @@
  * detected, summary at the bottom with counts).
  */
 
-import { readdirSync } from 'node:fs';
-import { join } from 'node:path';
-
 // ─── Configuration ────────────────────────────────────────────────────────────
 
-const LOCALES_DIR = join(import.meta.dir, '../src/lib/locales');
+const LOCALES_DIR = `${import.meta.dir}/../src/locales`;
 const SOURCE_LOCALE = 'en';
 const INTERPOLATION_RE = /\{(\w+)\}/g;
 
@@ -57,7 +54,7 @@ function extractVars(str: string): Set<string> {
 }
 
 async function loadLocale(file: string): Promise<LocaleData> {
-  return (await Bun.file(join(LOCALES_DIR, file)).json()) as LocaleData;
+  return (await Bun.file(`${LOCALES_DIR}/${file}`).json()) as LocaleData;
 }
 
 /** Detect TTY to decide whether to use ANSI colours */
@@ -78,7 +75,7 @@ function bold(s: string) {
 
 // ─── Main ────────────────────────────────────────────────────────────────────
 
-const files = readdirSync(LOCALES_DIR).filter((f) => f.endsWith('.json'));
+const files = (await Array.fromAsync(new Bun.Glob('*.json').scan(LOCALES_DIR))).sort();
 const sourceFile = `${SOURCE_LOCALE}.json`;
 
 if (!files.includes(sourceFile)) {
@@ -171,7 +168,7 @@ for (const { locale, missing, extra, missingVars } of localeResults) {
   const hasIssue = missing.length > 0 || extra.length > 0 || missingVars.length > 0;
   if (!hasIssue) {
     console.log(
-      `  ${green('✓')} ${bold(locale.padEnd(6))} — all ${sourceKeys.size} keys present, all variables match`
+      `  ${green('✓')} ${bold(locale.padEnd(6))} - all ${sourceKeys.size} keys present, all variables match`
     );
     continue;
   }

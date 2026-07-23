@@ -3,6 +3,7 @@
  */
 
 import { browser } from 'wxt/browser';
+import { withLock } from '@/utils/mutex.js';
 import { randomToken } from '@/utils/secure-random.js';
 import type { ActivityEvent, ActivityEventType } from '@/utils/types.js';
 
@@ -19,23 +20,25 @@ export async function addActivityEvent(
   type: ActivityEventType,
   data: ActivityEvent['data']
 ): Promise<void> {
-  const events = await getActivityEvents();
-  const newEvent: ActivityEvent = {
-    id: `${type}_${Date.now()}_${randomToken(9)}`,
-    type,
-    timestamp: Date.now(),
-    data,
-  };
+  await withLock('activity_events_lock', async () => {
+    const events = await getActivityEvents();
+    const newEvent: ActivityEvent = {
+      id: `${type}_${Date.now()}_${randomToken(9)}`,
+      type,
+      timestamp: Date.now(),
+      data,
+    };
 
-  // Add new event at the beginning
-  events.unshift(newEvent);
+    // Add new event at the beginning
+    events.unshift(newEvent);
 
-  // Keep only the most recent events
-  if (events.length > MAX_ACTIVITY_EVENTS) {
-    events.splice(MAX_ACTIVITY_EVENTS);
-  }
+    // Keep only the most recent events
+    if (events.length > MAX_ACTIVITY_EVENTS) {
+      events.splice(MAX_ACTIVITY_EVENTS);
+    }
 
-  await browser.storage.local.set({ activityEvents: events });
+    await browser.storage.local.set({ activityEvents: events });
+  });
 }
 
 export async function clearActivityEvents(): Promise<void> {

@@ -86,6 +86,16 @@ Use clear and descriptive commit messages:
 - Feature-specific logic goes in `src/features/`
 - Utilities go in `src/utils/`
 
+### AGENTS.md / CLAUDE.md Sync
+
+`AGENTS.md` and `CLAUDE.md` must always be byte-identical - `CLAUDE.md` is read
+by Claude Code, `AGENTS.md` by other AI tools. A pre-commit hook enforces this.
+When you edit one, copy it to the other:
+
+```bash
+cp AGENTS.md CLAUDE.md   # or vice versa
+```
+
 ### Svelte Best Practices
 - Use Svelte 5 runes (`$state`, `$derived`, etc.)
 - Keep components small and reusable

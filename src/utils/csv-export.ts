@@ -75,12 +75,16 @@ export function exportAnalyticsToCSV(
     const message = event.data.message || '';
     const toastType = event.data.toastType || '';
 
-    // Escape commas and quotes in CSV fields
+    // Neutralize formula injection and escape commas/quotes/newlines in CSV fields
     const escapeField = (field: string) => {
-      if (field.includes(',') || field.includes('"') || field.includes('\n')) {
-        return `"${field.replace(/"/g, '""')}"`;
+      let val = field;
+      if (/^[=+\-@\t\r]/.test(val)) {
+        val = `'${val}`;
       }
-      return field;
+      if (val.includes(',') || val.includes('"') || val.includes('\n') || val.includes('\r')) {
+        return `"${val.replace(/"/g, '""')}"`;
+      }
+      return val;
     };
 
     lines.push(

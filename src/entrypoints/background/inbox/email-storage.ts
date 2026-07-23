@@ -4,15 +4,17 @@
 
 import { browser } from 'wxt/browser';
 import { addActivityEvent } from '@/utils/activity-tracker.js';
-import { DEBUG, MAX_STORED_EMAILS_PER_INBOX } from '@/utils/constants.js';
+import { DEBUG, MAX_ARCHIVED_EMAILS, MAX_STORED_EMAILS_PER_INBOX } from '@/utils/constants.js';
 import { log, logError } from '@/utils/logger.js';
+import { withLock } from '@/utils/mutex.js';
 import {
   getAnalyticsRecord,
   getEmailMaps,
   getEmailRetentionDays,
   getStoredEmailsMap,
-  setAnalyticsRecord,
 } from '@/utils/storage-keys.js';
+import { safeStorageSet } from '@/utils/storageMonitor.js';
+import { timeAgo } from '@/utils/time.js';
 import type { Account, Email, EmailFilters, NotificationSettings } from '@/utils/types.js';
 
 /**
@@ -42,6 +44,19 @@ function playNotificationSound() {
     oscillator.type = 'sine';
     gainNode.gain.value = 0.1; // Volume
 
+    const cleanup = () => {
+      try {
+        if (audioContext.state !== 'closed') {
+          void audioContext.close();
+        }
+      } catch {
+        /* ignore cleanup errors */
+      }
+    };
+
+    oscillator.onended = cleanup;
+    setTimeout(cleanup, 500);
+
     oscillator.start();
     oscillator.stop(audioContext.currentTime + 0.2); // 200ms beep
   } catch (e) {
@@ -63,10 +78,22 @@ async function isQuotaExceeded(error: unknown): Promise<boolean> {
   return false;
 }
 
+/** Resolve bag for an address with case-insensitive key match. */
+function bagForAddress(storedEmails: Record<string, Email[]>, inboxAddress: string): Email[] {
+  if (!inboxAddress) return [];
+  if (storedEmails[inboxAddress]?.length) return storedEmails[inboxAddress] || [];
+  if (storedEmails[inboxAddress]) return storedEmails[inboxAddress] || [];
+  const lower = inboxAddress.toLowerCase();
+  for (const [k, list] of Object.entries(storedEmails)) {
+    if (k.toLowerCase() === lower) return list || [];
+  }
+  return [];
+}
+
 export async function getStoredEmails(inboxAddress: string): Promise<Email[]> {
   try {
     const storedEmails = await getStoredEmailsMap();
-    return storedEmails[inboxAddress] || [];
+    return bagForAddress(storedEmails, inboxAddress);
   } catch (error: unknown) {
     if (await isQuotaExceeded(error)) {
       logError('Storage quota exceeded, attempting to clean up old emails', { inboxAddress });
@@ -76,7 +103,7 @@ export async function getStoredEmails(inboxAddress: string): Promise<Email[]> {
       // Retry getting stored emails
       try {
         const storedEmails = await getStoredEmailsMap();
-        return storedEmails[inboxAddress] || [];
+        return bagForAddress(storedEmails, inboxAddress);
       } catch (retryError: unknown) {
         if (await isQuotaExceeded(retryError)) {
           logError('Storage quota still exceeded after cleanup', { inboxAddress });
@@ -87,6 +114,37 @@ export async function getStoredEmails(inboxAddress: string): Promise<Email[]> {
       }
     } else {
       throw error;
+    }
+  }
+}
+
+function enforceMaxArchivedEmailsLimit(archivedEmails: Record<string, Email[]>): void {
+  const allArchived: Array<{ address: string; email: Email }> = [];
+  for (const [address, emails] of Object.entries(archivedEmails)) {
+    for (const email of emails) {
+      allArchived.push({ address, email });
+    }
+  }
+  if (allArchived.length > MAX_ARCHIVED_EMAILS) {
+    allArchived.sort((a, b) => {
+      const tA = a.email.archived_at || a.email.received_at * 1000;
+      const tB = b.email.archived_at || b.email.received_at * 1000;
+      return tB - tA;
+    });
+    const kept = allArchived.slice(0, MAX_ARCHIVED_EMAILS);
+    const newArchivedEmails: Record<string, Email[]> = {};
+    for (const item of kept) {
+      if (!newArchivedEmails[item.address]) {
+        newArchivedEmails[item.address] = [];
+      }
+      newArchivedEmails[item.address].push(item.email);
+    }
+    for (const address of Object.keys(archivedEmails)) {
+      if (newArchivedEmails[address]) {
+        archivedEmails[address] = newArchivedEmails[address];
+      } else {
+        delete archivedEmails[address];
+      }
     }
   }
 }
@@ -103,6 +161,7 @@ export async function clearStoredEmails(inboxAddress: string): Promise<void> {
         original_inbox: inboxAddress,
       }));
       archivedEmails[inboxAddress].push(...emailsToArchive);
+      enforceMaxArchivedEmailsLimit(archivedEmails);
       delete storedEmails[inboxAddress];
       await browser.storage.local.set({ storedEmails, archivedEmails });
       log(`Archived ${emailsToArchive.length} emails for expired inbox: ${inboxAddress}`);
@@ -185,163 +244,59 @@ export async function cleanupOldStoredEmails(
     }
   }
 
+  const originalCount = Object.values(archivedEmails).flat().length;
+  enforceMaxArchivedEmailsLimit(archivedEmails);
+  const newCount = Object.values(archivedEmails).flat().length;
+  if (originalCount !== newCount) {
+    totalCleaned += originalCount - newCount;
+  }
+
   if (totalCleaned > 0) {
-    await browser.storage.local.set({ storedEmails, archivedEmails });
-    log(`Cleaned up ${totalCleaned} old emails`);
+    await safeStorageSet(browser, { storedEmails, archivedEmails });
+    log(`Cleaned up ${totalCleaned} old/excess emails`);
   }
 }
 
 export async function storeNewMessages(inboxAddress: string, newMessages: Email[]): Promise<void> {
-  const storedEmails = await getStoredEmailsMap();
-  if (!storedEmails[inboxAddress]) {
-    storedEmails[inboxAddress] = [];
-  }
-
-  // Deduplicate messages by ID to avoid duplicates
-  const existingIds = new Set(storedEmails[inboxAddress].map((e: Email) => e.id));
-  const uniqueNewMessages = newMessages.filter((msg: Email) => !existingIds.has(msg.id));
-
-  if (uniqueNewMessages.length > 0) {
-    for (const msg of uniqueNewMessages) {
-      if (!msg.original_inbox) msg.original_inbox = inboxAddress;
-    }
-    storedEmails[inboxAddress].push(...uniqueNewMessages);
-    storedEmails[inboxAddress].sort((a: Email, b: Email) => b.received_at - a.received_at);
-
-    if (storedEmails[inboxAddress].length > MAX_STORED_EMAILS_PER_INBOX) {
-      storedEmails[inboxAddress] = storedEmails[inboxAddress].slice(0, MAX_STORED_EMAILS_PER_INBOX);
+  await withLock('emails_storage_lock', async () => {
+    const storedEmails = await getStoredEmailsMap();
+    if (!storedEmails[inboxAddress]) {
+      storedEmails[inboxAddress] = [];
     }
 
-    await browser.storage.local.set({ storedEmails });
-    if (DEBUG) log(`Stored ${uniqueNewMessages.length} new emails for ${inboxAddress}`);
-  }
+    // Deduplicate messages by ID to avoid duplicates
+    const existingIds = new Set(storedEmails[inboxAddress].map((e: Email) => e.id));
+    const uniqueNewMessages = newMessages.filter((msg: Email) => !existingIds.has(msg.id));
+
+    if (uniqueNewMessages.length > 0) {
+      for (const msg of uniqueNewMessages) {
+        if (!msg.original_inbox) msg.original_inbox = inboxAddress;
+      }
+      storedEmails[inboxAddress].push(...uniqueNewMessages);
+      storedEmails[inboxAddress].sort((a: Email, b: Email) => b.received_at - a.received_at);
+
+      if (storedEmails[inboxAddress].length > MAX_STORED_EMAILS_PER_INBOX) {
+        storedEmails[inboxAddress] = storedEmails[inboxAddress].slice(
+          0,
+          MAX_STORED_EMAILS_PER_INBOX
+        );
+      }
+
+      await safeStorageSet(browser, { storedEmails });
+      if (DEBUG) log(`Stored ${uniqueNewMessages.length} new emails for ${inboxAddress}`);
+
+      // Process side effects for new messages
+      await processNewMessages(inboxAddress, uniqueNewMessages);
+    }
+  });
 }
 
-export async function applyFiltersAndProcessMessages(
-  messages: Email[],
-  filters: EmailFilters = {},
-  inbox: Account
-): Promise<Email[]> {
-  const result = (await browser.storage.local.get(['notificationSettings'])) as {
-    notificationSettings?: NotificationSettings;
-  };
-  const notificationSettings: NotificationSettings = result.notificationSettings ?? {
-    enabled: true,
-    soundEnabled: true,
-    expiryWarningThreshold: 60 * 60 * 1000, // Default 1 hour
-  };
-
-  const tsResult = (await browser.storage.local.get(['lastMessageTimestamps'])) as {
-    lastMessageTimestamps?: Record<string, number>;
-  };
-  const lastMessageTimestamps: Record<string, number> = tsResult.lastMessageTimestamps ?? {};
-  const lastTimestamp = lastMessageTimestamps[inbox.id] || 0;
-  const newMessages = messages.filter((msg: Email) => msg.received_at * 1000 > lastTimestamp);
-
-  // Send OTP from new messages to active tab
-  if (newMessages.length > 0) {
-    const latestNewMessageWithOtp = newMessages
-      .filter((msg: Email) => msg.otp)
-      .sort((a: Email, b: Email) => b.received_at - a.received_at)[0];
-
-    if (latestNewMessageWithOtp) {
-      try {
-        browser.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-          if (tabs.length > 0 && tabs[0].id) {
-            browser.tabs
-              .sendMessage(tabs[0].id, {
-                type: 'fillOTP',
-                otp: latestNewMessageWithOtp.otp,
-              })
-              .catch(() => {
-                // Ignore if content script not loaded in the tab
-              });
-          }
-        });
-      } catch {
-        // Ignore if no active tab or tab query fails
-      }
-    }
-  }
-
-  // Update last message timestamp
-  if (messages.length > 0) {
-    lastMessageTimestamps[inbox.id] = Math.max(
-      ...messages.map((msg: Email) => msg.received_at * 1000)
-    );
-    await browser.storage.local.set({ lastMessageTimestamps });
-  }
-
-  // Track activity events for new emails
-  for (const msg of newMessages) {
-    await addActivityEvent('email_received', {
-      inboxAddress: inbox.address,
-      emailId: msg.id,
-      sender: msg.from_name || msg.from,
-      subject: msg.subject,
-    });
-
-    if (msg.otp) {
-      await addActivityEvent('otp_detected', {
-        inboxAddress: inbox.address,
-        emailId: msg.id,
-        otp: msg.otp,
-        sender: msg.from_name || msg.from,
-        subject: msg.subject,
-      });
-    }
-  }
-
-  // Update email received analytics
-  const analytics = await getAnalyticsRecord();
-  analytics.emailsReceived = (analytics.emailsReceived || 0) + newMessages.length;
-  await setAnalyticsRecord(analytics);
-
-  // Send notifications for new messages
-  if (notificationSettings.enabled && newMessages.length > 0) {
-    // Play sound if enabled
-    if (notificationSettings.soundEnabled) {
-      playNotificationSound();
-    }
-
-    newMessages.forEach((msg: Email) => {
-      const notificationId = `email_${msg.id}_${inbox.id}`;
-      browser.notifications.create(notificationId, {
-        type: 'basic',
-        iconUrl: 'icons/icon48.png',
-        title: `New Email in ${inbox.address}`,
-        message: `${msg.from_name || 'Unknown Sender'}: ${msg.subject || 'No Subject'}`,
-        priority: 0,
-        contextMessage: 'Click to view email',
-      });
-    });
-
-    // Update notifications sent analytics
-    analytics.notificationsSent = (analytics.notificationsSent || 0) + newMessages.length;
-    await setAnalyticsRecord(analytics);
-
-    // Track notification events
-    for (const msg of newMessages) {
-      await addActivityEvent('notification_sent', {
-        inboxAddress: inbox.address,
-        emailId: msg.id,
-        sender: msg.from_name || msg.from,
-        subject: msg.subject,
-      });
-    }
-  }
-
-  // Update OTP analytics — only count new OTPs to avoid double-counting on refresh
-  const newOtpCount = newMessages.filter((msg: Email) => msg.otp).length;
-  if (newOtpCount > 0) {
-    // Re-read analytics to get latest value after the notifications write above
-    const latestAnalytics = await getAnalyticsRecord();
-    latestAnalytics.otpsDetected = (latestAnalytics.otpsDetected || 0) + newOtpCount;
-    await setAnalyticsRecord(latestAnalytics);
-  }
-
-  // Apply filters
-  let filteredMessages: Email[] = messages;
+export function filterMessages(messages: Email[], filters: EmailFilters = {}): Email[] {
+  // Return a new array of fresh copies to avoid mutating input objects in place
+  let filteredMessages = messages.map((msg) => ({
+    ...msg,
+    stored_at: msg.stored_at || Date.now(),
+  }));
 
   if (filters.searchQuery?.trim()) {
     const query = filters.searchQuery.toLowerCase().trim();
@@ -367,23 +322,254 @@ export async function applyFiltersAndProcessMessages(
     });
   }
 
+  if (filters.recipient?.trim()) {
+    const recipient = filters.recipient.toLowerCase().trim();
+    filteredMessages = filteredMessages.filter((msg: Email) => {
+      const originalInbox = msg.original_inbox || '';
+      return originalInbox.toLowerCase().includes(recipient);
+    });
+  }
+
   if (filters.dateFrom) {
-    filteredMessages = filteredMessages.filter(
-      (msg: Email) => msg.received_at * 1000 >= filters.dateFrom!
-    );
+    const fromTime =
+      typeof filters.dateFrom === 'string'
+        ? new Date(filters.dateFrom).getTime()
+        : filters.dateFrom;
+    filteredMessages = filteredMessages.filter((msg: Email) => msg.received_at * 1000 >= fromTime);
   }
 
   if (filters.dateTo) {
-    filteredMessages = filteredMessages.filter(
-      (msg: Email) => msg.received_at * 1000 <= filters.dateTo!
-    );
+    const toTime =
+      typeof filters.dateTo === 'string'
+        ? new Date(filters.dateTo).getTime() + 24 * 60 * 60 * 1000 - 1
+        : filters.dateTo;
+    filteredMessages = filteredMessages.filter((msg: Email) => msg.received_at * 1000 <= toTime);
   }
 
-  filteredMessages.forEach((msg: Email) => {
-    msg.stored_at = Date.now();
-  });
-
   return filteredMessages;
+}
+
+export async function applyFiltersAndProcessMessages(
+  messages: Email[],
+  filters: EmailFilters = {},
+  _inbox?: Account
+): Promise<Email[]> {
+  // Backward compatibility wrapper
+  return filterMessages(messages, filters);
+}
+
+async function processNewMessages(inboxAddress: string, uniqueNewMessages: Email[]): Promise<void> {
+  if (uniqueNewMessages.length === 0) return;
+
+  try {
+    const { inboxes = [], lastMessageTimestamps = {} } = (await browser.storage.local.get([
+      'inboxes',
+      'lastMessageTimestamps',
+    ])) as {
+      inboxes?: Account[];
+      lastMessageTimestamps?: Record<string, number>;
+    };
+
+    const inbox = inboxes.find((i) => i.address === inboxAddress);
+
+    // 1. Send OTP from new messages to active tab
+    const latestNewMessageWithOtp = uniqueNewMessages
+      .filter((msg: Email) => msg.otp)
+      .sort((a: Email, b: Email) => b.received_at - a.received_at)[0];
+
+    if (latestNewMessageWithOtp?.otp) {
+      try {
+        browser.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+          if (tabs.length > 0 && tabs[0].id) {
+            browser.tabs
+              .sendMessage(tabs[0].id, {
+                type: 'fillOTP',
+                otp: latestNewMessageWithOtp.otp,
+                sender: latestNewMessageWithOtp.from,
+                senderName: latestNewMessageWithOtp.from_name,
+                subject: latestNewMessageWithOtp.subject,
+              })
+              .catch(() => {});
+          }
+        });
+      } catch {}
+
+      // M5: Update latestOtp cache in storage
+      const latestOtpRecord = {
+        otp: latestNewMessageWithOtp.otp,
+        sender: latestNewMessageWithOtp.from || '',
+        senderName: latestNewMessageWithOtp.from_name || '',
+        context: [
+          latestNewMessageWithOtp.from_name ? `From: ${latestNewMessageWithOtp.from_name}` : '',
+          timeAgo(latestNewMessageWithOtp.received_at),
+        ]
+          .filter(Boolean)
+          .join(' | '),
+        received_at: latestNewMessageWithOtp.received_at,
+      };
+      const currentLatestOtp = (
+        (await browser.storage.local.get('latestOtp')) as {
+          latestOtp?: { received_at: number };
+        }
+      ).latestOtp;
+      const currentReceived = currentLatestOtp?.received_at || 0;
+      if (latestNewMessageWithOtp.received_at > currentReceived) {
+        await safeStorageSet(browser, { latestOtp: latestOtpRecord });
+      }
+    }
+
+    // 2. Track activity events for new emails
+    if (inbox) {
+      for (const msg of uniqueNewMessages) {
+        await addActivityEvent('email_received', {
+          inboxAddress: inbox.address,
+          emailId: msg.id,
+          sender: msg.from_name || msg.from,
+          subject: msg.subject,
+        });
+
+        if (msg.otp) {
+          await addActivityEvent('otp_detected', {
+            inboxAddress: inbox.address,
+            emailId: msg.id,
+            otp: '••••',
+            sender: msg.from_name || msg.from,
+            subject: msg.subject,
+          });
+        }
+      }
+    }
+
+    // 3. Update last message timestamp
+    if (inbox) {
+      let maxTimestamp = lastMessageTimestamps[inbox.id] || 0;
+      for (const msg of uniqueNewMessages) {
+        const ts = msg.received_at * 1000;
+        if (ts > maxTimestamp) maxTimestamp = ts;
+      }
+      lastMessageTimestamps[inbox.id] = maxTimestamp;
+      await safeStorageSet(browser, { lastMessageTimestamps });
+    }
+
+    // 4. Update email received analytics & OTP analytics
+    const analytics = await getAnalyticsRecord();
+    analytics.emailsReceived = (analytics.emailsReceived || 0) + uniqueNewMessages.length;
+
+    const newOtpCount = uniqueNewMessages.filter((msg: Email) => msg.otp).length;
+    if (newOtpCount > 0) {
+      analytics.otpsDetected = (analytics.otpsDetected || 0) + newOtpCount;
+    }
+
+    // 5. Send notifications for new messages
+    const result = (await browser.storage.local.get(['notificationSettings'])) as {
+      notificationSettings?: NotificationSettings;
+    };
+    const notificationSettings: NotificationSettings = result.notificationSettings ?? {
+      enabled: true,
+      soundEnabled: true,
+      expiryWarningThreshold: 60 * 60 * 1000,
+    };
+
+    if (notificationSettings.enabled && inbox) {
+      // Per-address snooze: skip OS notifications while muted for this mailbox
+      let snoozedUntil = 0;
+      try {
+        const snoozeRes = (await browser.storage.local.get(['notificationSnoozeByAddress'])) as {
+          notificationSnoozeByAddress?: Record<string, number>;
+        };
+        const map = snoozeRes.notificationSnoozeByAddress || {};
+        snoozedUntil = map[inbox.address] || map[inbox.address.toLowerCase()] || 0;
+      } catch {
+        snoozedUntil = 0;
+      }
+      if (snoozedUntil > Date.now()) {
+        // Still track analytics? Skip notifications only
+      } else {
+        // Intelligence: quiet hours / OTP-only / muted senders / digest
+        let toNotify = uniqueNewMessages;
+        let useDigest = false;
+        try {
+          const { filterEmailsForNotification } = await import(
+            '@/features/intelligence/notification-policy.js'
+          );
+          const decision = await filterEmailsForNotification(uniqueNewMessages);
+          if (!decision.allow) {
+            toNotify = [];
+          } else {
+            toNotify = decision.emails;
+            useDigest = decision.digest;
+          }
+        } catch {
+          toNotify = uniqueNewMessages;
+        }
+
+        if (toNotify.length > 0) {
+          if (notificationSettings.soundEnabled) {
+            playNotificationSound();
+          }
+
+          if (useDigest && toNotify.length > 1) {
+            const otpN = toNotify.filter((m) => m.otp || m.isOtp).length;
+            const notificationId = `email-digest:${inbox.id}:${Date.now()}`;
+            browser.notifications.create(notificationId, {
+              type: 'basic',
+              iconUrl: 'icons/icon48.png',
+              title: `${toNotify.length} new in ${inbox.address}`,
+              message:
+                otpN > 0
+                  ? `${otpN} OTP · ${toNotify.length - otpN} other`
+                  : toNotify
+                      .slice(0, 3)
+                      .map((m) => m.subject || m.from_name || 'Mail')
+                      .join(' · '),
+              priority: 0,
+              contextMessage: 'Click to open mailbox',
+            });
+            analytics.notificationsSent = (analytics.notificationsSent || 0) + 1;
+            await addActivityEvent('notification_sent', {
+              inboxAddress: inbox.address,
+              message: `digest:${toNotify.length}`,
+            });
+          } else {
+            toNotify.forEach((msg: Email) => {
+              const notificationId = `email:${msg.id}:${inbox.id}`;
+              browser.notifications.create(notificationId, {
+                type: 'basic',
+                iconUrl: 'icons/icon48.png',
+                title: `New Email in ${inbox.address}`,
+                message: `${msg.from_name || 'Unknown Sender'}: ${msg.subject || 'No Subject'}`,
+                priority: 0,
+                contextMessage: 'Click to view email',
+              });
+            });
+            analytics.notificationsSent = (analytics.notificationsSent || 0) + toNotify.length;
+            for (const msg of toNotify) {
+              await addActivityEvent('notification_sent', {
+                inboxAddress: inbox.address,
+                emailId: msg.id,
+                sender: msg.from_name || msg.from,
+                subject: msg.subject,
+              });
+            }
+          }
+        }
+      } // end not-snoozed
+
+      // Lifecycle: mail signals for this inbox
+      try {
+        const { recordInboxMailSignals } = await import(
+          '@/features/intelligence/inbox-lifecycle.js'
+        );
+        await recordInboxMailSignals(inbox.id, inbox.address, uniqueNewMessages);
+      } catch {
+        /* ignore */
+      }
+    }
+
+    await safeStorageSet(browser, { analytics });
+  } catch (error: unknown) {
+    logError('Error processing new messages side effects:', error);
+  }
 }
 
 export async function getStorageUsage(): Promise<{
@@ -483,4 +669,17 @@ export async function getEmailsToBeDeleted(
     archivedEmails: archivedEmailsToDelete,
     totalEmails: activeEmailsToDelete + archivedEmailsToDelete,
   };
+}
+
+export async function clearAllOtps(): Promise<void> {
+  await withLock('emails_storage_lock', async () => {
+    const storedEmails = await getStoredEmailsMap();
+    for (const msgs of Object.values(storedEmails)) {
+      for (const m of msgs) {
+        m.otp = null;
+      }
+    }
+    await browser.storage.local.set({ storedEmails });
+    await browser.storage.local.remove('latestOtp');
+  });
 }

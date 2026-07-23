@@ -12,9 +12,12 @@ import {
   applyFiltersAndProcessMessages,
   storeNewMessages,
 } from '@/entrypoints/background/inbox/email-storage.js';
+import { extractMagicLinks } from '@/entrypoints/background/parsing/magic-link.js';
 import { extractOTP } from '@/entrypoints/background/parsing/otp.js';
 import { log } from '@/utils/logger.js';
+import { withInboxLock } from '@/utils/mutex.js';
 import { getInboxes, getStoredEmailsMap, setInboxes } from '@/utils/storage-keys.js';
+import { toSeconds } from '@/utils/time.js';
 import type { Account, Email, EmailFilters } from '@/utils/types.js';
 import type { EmailServiceContext, OperationConfig, ProviderConfig } from '../email-service.js';
 import { randomToken } from '../secure-random.js';
@@ -44,7 +47,13 @@ function extractPath(obj: unknown, path: string): unknown {
     return obj;
   }
 
-  const keys = path.split('.');
+  // Direct property check for literal keys containing dots
+  if (path in (obj as Record<string, unknown>)) {
+    return (obj as Record<string, unknown>)[path];
+  }
+
+  // Split by unescaped dot (\.)
+  const keys = path.match(/(?:\\.|[^.])+/g)?.map((k) => k.replace(/\\(.)/g, '$1')) || [path];
   let current: unknown = obj;
 
   for (const key of keys) {
@@ -74,6 +83,18 @@ function resolveTemplateValue(value: string, context: EmailServiceContext): unkn
   if (value === '{auth.token}' && context.auth?.token) {
     return context.auth.token;
   }
+  if (value === '{auth.jwt}' && context.auth?.jwt) {
+    return context.auth.jwt;
+  }
+  if (value === '{auth.cookie}' && context.auth?.cookie) {
+    return context.auth.cookie;
+  }
+  if (value === '{auth.apiKey}' && context.auth?.apiKey) {
+    return context.auth.apiKey;
+  }
+  if (value === '{auth.refreshToken}' && context.auth?.refreshToken) {
+    return context.auth.refreshToken;
+  }
 
   // Replace {timestamp}
   if (value === '{timestamp}') {
@@ -90,6 +111,16 @@ function resolveTemplateValue(value: string, context: EmailServiceContext): unkn
     return context.instanceUrl;
   }
 
+  // Replace {clientIp}
+  if (value === '{clientIp}') {
+    return '127.0.0.1';
+  }
+
+  // Replace {userAgent}
+  if (value === '{userAgent}') {
+    return typeof navigator !== 'undefined' ? navigator.userAgent : '1ClickExt';
+  }
+
   // Replace context variables
   if (value.startsWith('{') && value.endsWith('}')) {
     const varName = value.slice(1, -1);
@@ -98,7 +129,20 @@ function resolveTemplateValue(value: string, context: EmailServiceContext): unkn
     }
   }
 
-  return value;
+  // Replace headers and cookies variables
+  let result = value;
+  if (context.sessionHeaders) {
+    for (const [key, val] of Object.entries(context.sessionHeaders)) {
+      result = result.replace(new RegExp(`\\{headers\\.${key}\\}`, 'g'), val);
+    }
+  }
+  if (context.sessionCookies) {
+    for (const [key, val] of Object.entries(context.sessionCookies)) {
+      result = result.replace(new RegExp(`\\{cookies\\.${key}\\}`, 'g'), val);
+    }
+  }
+
+  return result;
 }
 
 /**
@@ -136,6 +180,18 @@ function buildRequest(
     apiUrl = apiUrl.replace('{instanceUrl}', context.instanceUrl);
   }
 
+  // Support substituting header/cookie template variables in API URL
+  if (context.sessionHeaders) {
+    for (const [key, value] of Object.entries(context.sessionHeaders)) {
+      apiUrl = apiUrl.replace(new RegExp(`\\{headers\\.${key}\\}`, 'g'), value);
+    }
+  }
+  if (context.sessionCookies) {
+    for (const [key, value] of Object.entries(context.sessionCookies)) {
+      apiUrl = apiUrl.replace(new RegExp(`\\{cookies\\.${key}\\}`, 'g'), value);
+    }
+  }
+
   const url = new URL(apiUrl);
   const headers: Record<string, string> = { ...config.headers?.default };
 
@@ -148,25 +204,55 @@ function buildRequest(
         functionPath = functionPath.replace(`{${key}}`, String(value));
       }
     }
+    if (context.sessionHeaders) {
+      for (const [key, value] of Object.entries(context.sessionHeaders)) {
+        functionPath = functionPath.replace(new RegExp(`\\{headers\\.${key}\\}`, 'g'), value);
+      }
+    }
+    if (context.sessionCookies) {
+      for (const [key, value] of Object.entries(context.sessionCookies)) {
+        functionPath = functionPath.replace(new RegExp(`\\{cookies\\.${key}\\}`, 'g'), value);
+      }
+    }
     url.pathname = url.pathname.replace(/\/$/, '') + functionPath;
   } else {
     // For query parameter based APIs (function appended to URL)
     url.searchParams.append('f', operation.function);
   }
 
+  const isPostLike = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(operation.method);
+  const useBody = isPostLike && (operation.bodyType === 'json' || operation.bodyType === 'form');
+
   // Add required parameters
   const requiredParams = resolveTemplateParams(operation.requiredParams, context);
-  for (const [key, value] of Object.entries(requiredParams)) {
-    url.searchParams.append(key, value);
+  const optionalParams = operation.optionalParams
+    ? resolveTemplateParams(operation.optionalParams, context)
+    : {};
+
+  const allParams = { ...requiredParams };
+  for (const [key, value] of Object.entries(optionalParams)) {
+    if (value !== undefined && value !== null) {
+      allParams[key] = value;
+    }
   }
 
-  // Add optional parameters if provided in context
-  if (operation.optionalParams) {
-    const optionalParams = resolveTemplateParams(operation.optionalParams, context);
-    for (const [key, value] of Object.entries(optionalParams)) {
-      if (value !== undefined && value !== null) {
-        url.searchParams.append(key, value);
+  let requestBody: string | undefined;
+
+  if (useBody) {
+    if (operation.bodyType === 'json') {
+      headers['Content-Type'] = 'application/json';
+      requestBody = JSON.stringify(allParams);
+    } else if (operation.bodyType === 'form') {
+      headers['Content-Type'] = 'application/x-www-form-urlencoded';
+      const formParams = new URLSearchParams();
+      for (const [key, value] of Object.entries(allParams)) {
+        formParams.append(key, value);
       }
+      requestBody = formParams.toString();
+    }
+  } else {
+    for (const [key, value] of Object.entries(allParams)) {
+      url.searchParams.append(key, value);
     }
   }
 
@@ -178,6 +264,18 @@ function buildRequest(
   } else if (config.auth.type === 'header' && context.auth?.token) {
     if (config.auth.headerName) {
       headers[config.auth.headerName] = context.auth.token;
+    }
+  } else if (config.auth.type === 'bearer' && context.auth?.token) {
+    headers.Authorization = `Bearer ${context.auth.token}`;
+  }
+
+  // Handle captured cookies injection if send is true
+  if (config.cookies?.send && context.sessionCookies) {
+    const cookiePairs = Object.entries(context.sessionCookies)
+      .map(([name, value]) => `${name}=${value}`)
+      .join('; ');
+    if (cookiePairs) {
+      headers.Cookie = cookiePairs;
     }
   }
 
@@ -199,6 +297,7 @@ function buildRequest(
       useForceNewSession && config.forceNewSession
         ? config.forceNewSession.cache
         : config.headers?.cache || 'default',
+    body: requestBody,
   };
 
   log(`Request URL: ${url.toString()}`);
@@ -254,14 +353,123 @@ function parseResponse(
 
   // Map fields
   const result: Record<string, unknown> = {};
-  for (const [targetKey, sourcePath] of Object.entries(responseConfig.fields)) {
-    const value = extractPath(workingData, sourcePath);
-    if (value !== undefined) {
-      result[targetKey] = value;
+  for (const [targetKey, mappingInfo] of Object.entries(responseConfig.fields)) {
+    if (typeof mappingInfo === 'string') {
+      const value = extractPath(workingData, mappingInfo);
+      if (value !== undefined) {
+        result[targetKey] = value;
+      }
+    } else if (mappingInfo && typeof mappingInfo === 'object' && 'path' in mappingInfo) {
+      let value = extractPath(workingData, mappingInfo.path);
+      if ((value === undefined || value === null) && 'default' in mappingInfo) {
+        value = mappingInfo.default;
+      }
+      if (value !== undefined) {
+        result[targetKey] = applyFieldTransforms(value, mappingInfo.transform);
+      }
     }
   }
 
   return result;
+}
+
+/**
+ * Decodes HTML entity references in a string.
+ */
+function decodeHtmlEntities(str: string): string {
+  return str
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, ' ');
+}
+
+/**
+ * Apply one or more declarative transforms to a raw value.
+ */
+function applyFieldTransforms(value: unknown, transforms?: string | string[]): unknown {
+  if (value === undefined || value === null || !transforms) {
+    return value;
+  }
+
+  const transformList = Array.isArray(transforms) ? transforms : [transforms];
+  let currentVal = value;
+
+  for (const transform of transformList) {
+    if (transform === 'parseInt') {
+      const parsed = Number.parseInt(String(currentVal), 10);
+      currentVal = Number.isNaN(parsed) ? currentVal : parsed;
+    } else if (transform === 'parseDate') {
+      const date = parseDateString(String(currentVal));
+      currentVal = date ? Math.floor(date.getTime() / 1000) : currentVal;
+    } else if (transform === 'htmlEntityDecode') {
+      currentVal = decodeHtmlEntities(String(currentVal));
+    } else if (transform === 'urlDecode') {
+      try {
+        currentVal = decodeURIComponent(String(currentVal));
+      } catch {
+        // Fallback if malformed URL
+      }
+    } else if (transform === 'trim') {
+      currentVal = String(currentVal).trim();
+    }
+  }
+
+  return currentVal;
+}
+
+/**
+ * Map a raw message item to internal format, including optional attachments mapping.
+ */
+function mapMessageItem(
+  item: unknown,
+  responseMapping:
+    | Record<string, string | { path: string; transform?: string | string[]; default?: unknown }>
+    | null
+    | undefined,
+  attachmentMapping: NonNullable<ProviderConfig['emailFetching']>['attachmentMapping']
+): Record<string, unknown> {
+  const mapped: Record<string, unknown> = {};
+  if (responseMapping) {
+    for (const [targetKey, mappingInfo] of Object.entries(responseMapping)) {
+      if (typeof mappingInfo === 'string') {
+        const value = extractPath(item, mappingInfo);
+        if (value !== undefined) {
+          mapped[targetKey] = value;
+        }
+      } else if (mappingInfo && typeof mappingInfo === 'object' && 'path' in mappingInfo) {
+        let value = extractPath(item, mappingInfo.path);
+        if ((value === undefined || value === null) && 'default' in mappingInfo) {
+          value = (mappingInfo as { default?: unknown }).default;
+        }
+        if (value !== undefined) {
+          mapped[targetKey] = applyFieldTransforms(value, mappingInfo.transform);
+        }
+      }
+    }
+  }
+
+  // Map attachments if configured
+  if (attachmentMapping?.enabled && attachmentMapping.path) {
+    const rawAtts = extractPath(item, attachmentMapping.path);
+    if (Array.isArray(rawAtts)) {
+      mapped.attachments = rawAtts.map((att: unknown) => {
+        const mappedAtt: Record<string, unknown> = {};
+        for (const [targetField, sourceField] of Object.entries(attachmentMapping.fields)) {
+          if (sourceField) {
+            mappedAtt[targetField] = extractPath(att, sourceField as string);
+          } else {
+            mappedAtt[targetField] = null;
+          }
+        }
+        return mappedAtt;
+      });
+    }
+  }
+
+  return mapped;
 }
 
 // ============================================================================
@@ -272,6 +480,7 @@ export {
   buildRequest,
   checkForErrors,
   extractPath,
+  mapMessageItem,
   parseDateString,
   parseResponse,
   parseTimestamp,
@@ -302,11 +511,16 @@ export async function fetchEmails(
 
   let result: Email[];
   if (emailFetchingConfig.type === 'single_step') {
+    const operation = emailFetchingConfig.operation;
+    if (!operation) {
+      log('single_step email fetching requires an operation');
+      return [];
+    }
     result = await fetchEmailsSingleStep(
       config,
       inbox,
       executeOperation,
-      emailFetchingConfig.operation!,
+      operation,
       filters,
       emailFetchingConfig
     );
@@ -355,6 +569,17 @@ async function fetchEmailsSingleStep(
     variables: { inboxId: inbox.id },
   };
 
+  const pagination = emailFetchingConfig.pagination;
+  if (pagination) {
+    context.variables = context.variables || {};
+    if (pagination.type === 'offset') {
+      context.variables[pagination.paramName] = context.variables[pagination.paramName] ?? 0;
+    } else if (pagination.type === 'page') {
+      context.variables[pagination.paramName] = context.variables[pagination.paramName] ?? 1;
+    }
+    context.variables.pageSize = context.variables.pageSize ?? pagination.pageSize;
+  }
+
   if (config.multiInstance?.enabled) {
     const inboxUnknown = inbox as unknown;
     if (inboxUnknown && typeof inboxUnknown === 'object' && 'instanceUrl' in inboxUnknown) {
@@ -374,61 +599,34 @@ async function fetchEmailsSingleStep(
 
   // Apply responseMapping if configured
   let messages: unknown[] = [];
-  if (emailFetchingConfig.responseMapping && emailFetchingConfig.dataPath) {
+  const responseMapping = emailFetchingConfig.responseMapping;
+  const attachmentMapping = emailFetchingConfig.attachmentMapping;
+  if (responseMapping && emailFetchingConfig.dataPath) {
     const rawData = extractPath(response, emailFetchingConfig.dataPath);
     log(
       `Extracted data from path ${emailFetchingConfig.dataPath}:`,
       JSON.stringify(rawData).substring(0, 200)
     );
     if (Array.isArray(rawData)) {
-      messages = rawData.map((item: unknown) => {
-        const mapped: Record<string, unknown> = {};
-        for (const [targetKey, sourcePath] of Object.entries(
-          emailFetchingConfig.responseMapping!
-        )) {
-          const value = extractPath(item, sourcePath as string);
-          if (value !== undefined) {
-            mapped[targetKey] = value;
-          }
-        }
-        return mapped;
-      });
+      messages = rawData.map((item: unknown) =>
+        mapMessageItem(item, responseMapping, attachmentMapping)
+      );
     } else if (rawData === null || rawData === undefined) {
       // No emails yet, return empty array
       messages = [];
     }
   } else if (Array.isArray(response)) {
     // If response is already an array, use it directly
-    messages = response.map((item: unknown) => {
-      const mapped: Record<string, unknown> = {};
-      if (emailFetchingConfig.responseMapping) {
-        for (const [targetKey, sourcePath] of Object.entries(emailFetchingConfig.responseMapping)) {
-          const value = extractPath(item, sourcePath as string);
-          if (value !== undefined) {
-            mapped[targetKey] = value;
-          }
-        }
-      }
-      return mapped;
-    });
+    messages = response.map((item: unknown) =>
+      mapMessageItem(item, emailFetchingConfig.responseMapping, attachmentMapping)
+    );
   } else if (response && typeof response === 'object' && 'result' in response) {
     // Handle wrapped response with result field
     const result = (response as Record<string, unknown>).result;
     if (Array.isArray(result)) {
-      messages = result.map((item: unknown) => {
-        const mapped: Record<string, unknown> = {};
-        if (emailFetchingConfig.responseMapping) {
-          for (const [targetKey, sourcePath] of Object.entries(
-            emailFetchingConfig.responseMapping
-          )) {
-            const value = extractPath(item, sourcePath as string);
-            if (value !== undefined) {
-              mapped[targetKey] = value;
-            }
-          }
-        }
-        return mapped;
-      });
+      messages = result.map((item: unknown) =>
+        mapMessageItem(item, emailFetchingConfig.responseMapping, attachmentMapping)
+      );
     } else if (result === null || result === undefined) {
       messages = [];
     }
@@ -438,10 +636,20 @@ async function fetchEmailsSingleStep(
 
   log(`Fetched ${messages.length} messages`);
 
-  // Extract OTP from messages
+  // Extract OTP + magic links from messages
   (messages as Email[]).forEach((msg: Email) => {
     const otp = extractOTP(msg.subject || '', msg.body_html || msg.body_plain || '');
     msg.otp = otp || undefined;
+
+    const magicLinks = extractMagicLinks(
+      msg.subject || '',
+      msg.body_html || '',
+      msg.body_plain || msg.body || ''
+    );
+    if (magicLinks.length > 0) {
+      msg.magicLinks = magicLinks;
+      msg.hasMagicLink = true;
+    }
 
     // Extract sender name from from field if it contains "Name <email>" format
     if (!msg.from_name && msg.from) {
@@ -483,6 +691,22 @@ async function fetchEmailsMultiStep(
       ? Number((inboxUnknown as Record<string, unknown>).lastSequence) || 0
       : 0;
 
+  if (emailFetchingConfig.selectMailboxOperation) {
+    const emailUser =
+      typeof inbox.emailUser === 'string' && inbox.emailUser
+        ? inbox.emailUser
+        : inbox.address.split('@')[0];
+    const selectContext: EmailServiceContext = token
+      ? {
+          auth: { token: token as string },
+          variables: { [emailFetchingConfig.selectMailboxVariable || 'emailUser']: emailUser },
+        }
+      : {
+          variables: { [emailFetchingConfig.selectMailboxVariable || 'emailUser']: emailUser },
+        };
+    await executeOperation(emailFetchingConfig.selectMailboxOperation, selectContext);
+  }
+
   // Step 1: Get list of emails
   const listContext: EmailServiceContext = token
     ? {
@@ -493,7 +717,25 @@ async function fetchEmailsMultiStep(
         variables: { seq: String(sequenceNumber) },
       };
 
-  const listData = await executeOperation(emailFetchingConfig.listOperation!, listContext);
+  const pagination = emailFetchingConfig.pagination;
+  if (pagination) {
+    listContext.variables = listContext.variables || {};
+    if (pagination.type === 'offset') {
+      listContext.variables[pagination.paramName] =
+        listContext.variables[pagination.paramName] ?? 0;
+    } else if (pagination.type === 'page') {
+      listContext.variables[pagination.paramName] =
+        listContext.variables[pagination.paramName] ?? 1;
+    }
+    listContext.variables.pageSize = listContext.variables.pageSize ?? pagination.pageSize;
+  }
+
+  const listOperation = emailFetchingConfig.listOperation;
+  if (!listOperation) {
+    log('multi_step email fetching requires a listOperation');
+    return [];
+  }
+  const listData = await executeOperation(listOperation, listContext);
 
   const listPath = emailFetchingConfig.listPath || '';
   const messages = (extractPath(listData, listPath) as unknown as Record<string, unknown>[]) || [];
@@ -505,8 +747,12 @@ async function fetchEmailsMultiStep(
     storedEmails[inbox.address] = [];
   }
 
+  const listItemIdField = emailFetchingConfig.listItemIdField;
+  if (!listItemIdField) {
+    log('multi_step email fetching requires a listItemIdField');
+    return [];
+  }
   const existingEmailIds = new Set(storedEmails[inbox.address].map((email: Email) => email.id));
-  const listItemIdField = emailFetchingConfig.listItemIdField!;
   const newMessages = messages.filter(
     (msg: Record<string, unknown>) => !existingEmailIds.has(String(msg[listItemIdField]))
   );
@@ -514,9 +760,15 @@ async function fetchEmailsMultiStep(
   log(`${messages.length} total, ${newMessages.length} are new`);
 
   // Step 2: Fetch details for each new email
-  const detailOperation = emailFetchingConfig.detailOperation!;
-  const detailItemIdParam = emailFetchingConfig.detailItemIdParam!;
-  const detailResponseMapping = emailFetchingConfig.detailResponseMapping!;
+  const detailOperation = emailFetchingConfig.detailOperation;
+  const detailItemIdParam = emailFetchingConfig.detailItemIdParam;
+  const detailResponseMapping = emailFetchingConfig.detailResponseMapping;
+  if (!detailOperation || !detailItemIdParam || !detailResponseMapping) {
+    log(
+      'multi_step email fetching requires detailOperation, detailItemIdParam, and detailResponseMapping'
+    );
+    return [];
+  }
 
   const newDetailedMessages = await Promise.all(
     newMessages.map(async (msg: Record<string, unknown>) => {
@@ -535,15 +787,11 @@ async function fetchEmailsMultiStep(
       await recordProviderLatency(_config.id, detailApiLatency);
 
       // Map response fields to internal format
-      const mapped: Record<string, unknown> = {};
-      for (const [targetKey, sourcePath] of Object.entries(detailResponseMapping)) {
-        if (sourcePath.includes('_field')) {
-          // These are special fields for timestamp parsing
-          mapped[sourcePath] = extractPath(emailData, sourcePath);
-        } else {
-          mapped[targetKey] = extractPath(emailData, sourcePath);
-        }
-      }
+      const mapped = mapMessageItem(
+        emailData,
+        detailResponseMapping,
+        emailFetchingConfig.attachmentMapping
+      );
 
       // Parse timestamp
       const timestamp = parseTimestamp(
@@ -553,11 +801,12 @@ async function fetchEmailsMultiStep(
         listData
       );
 
-      // Extract OTP
-      const otp = extractOTP(
-        String(mapped.subject || ''),
-        String(mapped.body_html || mapped.body_plain || '')
-      );
+      // Extract OTP + magic links
+      const subject = String(mapped.subject || '');
+      const bodyHtml = String(mapped.body_html || '');
+      const bodyPlain = String(mapped.body_plain || '');
+      const otp = extractOTP(subject, bodyHtml || bodyPlain);
+      const magicLinks = extractMagicLinks(subject, bodyHtml, bodyPlain);
 
       // Extract sender name from from field if it contains "Name <email>" format
       let senderName = String(mapped.from_name || '');
@@ -574,12 +823,15 @@ async function fetchEmailsMultiStep(
         id: String(mapped.id || msg[listItemIdField]),
         from_name: senderName,
         from: String(mapped.from || mapped.from_name || ''),
-        subject: String(mapped.subject || ''),
-        body_html: String(mapped.body_html || ''),
-        body_plain: String(mapped.body_plain || ''),
+        subject,
+        body_html: bodyHtml,
+        body_plain: bodyPlain,
         received_at: timestamp || Math.floor(Date.now() / 1000),
         otp: otp || undefined,
+        magicLinks: magicLinks.length > 0 ? magicLinks : undefined,
+        hasMagicLink: magicLinks.length > 0,
         stored_at: Date.now(),
+        attachments: mapped.attachments as Email['attachments'],
       };
     })
   );
@@ -617,10 +869,14 @@ function parseTimestamp(
   let timestamp: number | null = null;
 
   // Try date field first
-  if (dateField && typeof dateField === 'string') {
-    const parsedDate = parseDateString(dateField as string);
-    if (parsedDate) {
-      timestamp = Math.floor(parsedDate.getTime() / 1000);
+  if (dateField) {
+    if (typeof dateField === 'number') {
+      timestamp = dateField;
+    } else if (typeof dateField === 'string') {
+      const parsedDate = parseDateString(dateField as string);
+      if (parsedDate) {
+        timestamp = Math.floor(parsedDate.getTime() / 1000);
+      }
     }
   }
 
@@ -701,7 +957,7 @@ function parseTimestampValue(value: unknown): number | null {
     }
   }
   if (typeof timestamp === 'number' && timestamp > 0) {
-    return timestamp > 1e10 ? Math.floor(timestamp / 1000) : timestamp;
+    return toSeconds(timestamp);
   }
   return null;
 }
@@ -715,12 +971,12 @@ async function updateSequenceNumber(
   sequenceTracking: NonNullable<ProviderConfig['emailFetching']>['sequenceTracking'],
   _listItemIdField: string
 ): Promise<void> {
-  const sequenceField = sequenceTracking!.sequenceField;
-  const listSequenceField = sequenceTracking!.listSequenceField;
+  if (!sequenceTracking) return;
+  const { sequenceField, listSequenceField, sequenceOperation } = sequenceTracking;
 
   let newSequence: number;
-  if (sequenceTracking!.sequenceOperation === 'max') {
-    // Avoid `Math.max(...arr)` — V8 throws "Maximum call stack size exceeded" once
+  if (sequenceOperation === 'max') {
+    // Avoid `Math.max(...arr)` - V8 throws "Maximum call stack size exceeded" once
     // the spread argument count exceeds the per-platform argument-count limit
     // (~65,536 on most platforms). For a provider that returns thousands of
     // messages we would blow past that. Reduce manually instead.
@@ -735,12 +991,14 @@ async function updateSequenceNumber(
     newSequence = Number(lastMailId);
   }
 
-  const inboxes = await getInboxes();
-  const updatedInboxes = inboxes.map((inb: Account) => {
-    if (inb.id === inbox.id) {
-      return { ...inb, [sequenceField]: newSequence } as Account;
-    }
-    return inb;
+  await withInboxLock(async () => {
+    const inboxes = await getInboxes();
+    const updatedInboxes = inboxes.map((inb: Account) => {
+      if (inb.id === inbox.id) {
+        return { ...inb, [sequenceField]: newSequence } as Account;
+      }
+      return inb;
+    });
+    await setInboxes(updatedInboxes);
   });
-  await setInboxes(updatedInboxes);
 }

@@ -1,5 +1,6 @@
 import type { Browser } from 'wxt/browser';
 import { logError } from '@/utils/logger.js';
+import { DEFAULT_ANALYTICS } from '@/utils/storage-keys.js';
 
 export interface AnalyticsData {
   createdAt: string | number | undefined;
@@ -7,6 +8,9 @@ export interface AnalyticsData {
   emailsReceived: number;
   otpsDetected: number;
   notificationsSent: number;
+  extensionOpens?: number;
+  emailsRead?: number;
+  pageVisits?: Record<string, number>;
   performance?: {
     emailFetchTimes: number[];
     providerLatency: Record<string, number[]>;
@@ -33,7 +37,23 @@ export async function loadAnalytics(
     setters.setAnalyticsLoading(true);
     const response = await ext.runtime.sendMessage({ type: 'getAnalytics' });
     if (response?.success && response.analytics) {
-      setters.setAnalytics(response.analytics);
+      const loaded = response.analytics;
+      const normalized: AnalyticsData = {
+        createdAt: loaded.createdAt || Date.now(),
+        accountsCreated: loaded.accountsCreated || 0,
+        emailsReceived: loaded.emailsReceived || 0,
+        otpsDetected: loaded.otpsDetected || 0,
+        notificationsSent: loaded.notificationsSent || 0,
+        extensionOpens: loaded.extensionOpens || 0,
+        emailsRead: loaded.emailsRead || 0,
+        pageVisits: loaded.pageVisits || {},
+        performance: {
+          emailFetchTimes: loaded.performance?.emailFetchTimes || [],
+          providerLatency: loaded.performance?.providerLatency || {},
+          uiRenderTimes: loaded.performance?.uiRenderTimes || [],
+        },
+      };
+      setters.setAnalytics(normalized);
     }
   } catch (e: unknown) {
     logError('loadAnalytics error:', undefined, e instanceof Error ? e : new Error(String(e)));
@@ -48,20 +68,19 @@ export async function resetAnalytics(
   setters: AnalyticsSetters
 ) {
   try {
-    const resetData: AnalyticsData = {
-      createdAt: Date.now(),
-      accountsCreated: 0,
-      emailsReceived: 0,
-      otpsDetected: 0,
-      notificationsSent: 0,
-      performance: {
-        emailFetchTimes: [],
-        providerLatency: {},
-        uiRenderTimes: [],
-      },
-    };
-    await ext.storage.local.set({ analytics: resetData });
-    setters.setAnalytics(resetData);
+    const response = await ext.runtime.sendMessage({ type: 'resetAnalytics' });
+    if (response?.success) {
+      const resetData: AnalyticsData = {
+        ...DEFAULT_ANALYTICS,
+        createdAt: Date.now(),
+        performance: {
+          emailFetchTimes: [],
+          providerLatency: {},
+          uiRenderTimes: [],
+        },
+      };
+      setters.setAnalytics(resetData);
+    }
   } catch (e: unknown) {
     logError('resetAnalytics error:', undefined, e instanceof Error ? e : new Error(String(e)));
   }

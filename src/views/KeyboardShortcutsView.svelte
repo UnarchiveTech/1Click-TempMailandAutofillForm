@@ -2,7 +2,6 @@
 import { get } from 'svelte/store';
 import { t } from 'svelte-i18n';
 import Icon from '@/components/icons/Icon.svelte';
-import SettingsSubNav from '@/components/ui/SettingsSubNav.svelte';
 import type { Keybindings } from '@/utils/types.js';
 import { DEFAULT_KEYBINDINGS } from '@/utils/types.js';
 
@@ -44,6 +43,26 @@ const KEYBINDING_LABELS: Record<keyof Keybindings, { labelKey: string; descripti
   closeDialogs: {
     labelKey: 'keyboardShortcuts.closeDialogs',
     descriptionKey: 'keyboardShortcuts.closeDialogsDescription',
+  },
+  openAddresses: {
+    labelKey: 'keyboardShortcuts.openAddresses',
+    descriptionKey: 'keyboardShortcuts.openAddressesDescription',
+  },
+  openIdentities: {
+    labelKey: 'keyboardShortcuts.openIdentities',
+    descriptionKey: 'keyboardShortcuts.openIdentitiesDescription',
+  },
+  openSavedLogins: {
+    labelKey: 'keyboardShortcuts.openSavedLogins',
+    descriptionKey: 'keyboardShortcuts.openSavedLoginsDescription',
+  },
+  toggleAccountSelector: {
+    labelKey: 'keyboardShortcuts.toggleAccountSelector',
+    descriptionKey: 'keyboardShortcuts.toggleAccountSelectorDescription',
+  },
+  focusSearch: {
+    labelKey: 'keyboardShortcuts.focusSearch',
+    descriptionKey: 'keyboardShortcuts.focusSearchDescription',
   },
 };
 
@@ -130,22 +149,16 @@ let hasCustomized = $derived(
 </script>
 
 <div class="flex flex-col h-full">
-  <!-- Header -->
-  <div class="px-4 py-3 border-b border-md-secondary-container flex items-center gap-3">
-    <button
-      class="w-8 h-8 flex items-center justify-center rounded-lg bg-transparent hover:bg-md-secondary-container transition-colors"
-      onclick={onBack}
-      aria-label={$t('common.back')}
-    >
-      <Icon name="chevronLeft" class="w-5 h-5" />
-    </button>
-    <div class="flex-1">
-      <div class="font-semibold text-sm">{$t('keyboardShortcuts.title')}</div>
-      <div class="text-xs text-md-on-surface/50">{$t('keyboardShortcuts.subtitle')}</div>
-    </div>
+  <!-- Title + actions - back lives in app header on this deep page -->
+  <div class="px-2 py-3 border-b border-md-outline-variant/30 flex items-center gap-3">
+    <h1 class="flex-1 min-w-0 font-semibold text-sm">
+      {$t('keyboardShortcuts.title')}
+      <span class="block text-xs font-normal text-md-on-surface/50">{$t('keyboardShortcuts.subtitle')}</span>
+    </h1>
     {#if hasCustomized}
       <button
-        class="text-xs text-md-error hover:text-md-error/80 transition-colors px-2 py-1 rounded-lg hover:bg-md-error/10"
+        type="button"
+        class="text-xs text-md-error hover:text-md-error/80 transition-colors px-2 py-1 rounded-lg hover:bg-md-error/10 shrink-0"
         onclick={resetAll}
       >
         {$t('keyboardShortcuts.resetAll')}
@@ -154,7 +167,7 @@ let hasCustomized = $derived(
   </div>
 
   <!-- Shortcut list -->
-  <div class="flex-1 overflow-y-auto px-4 py-3 space-y-2">
+  <div class="flex-1 overflow-y-auto px-2 py-3 space-y-2">
     {#each Object.keys(KEYBINDING_LABELS) as action}
       {@const info = KEYBINDING_LABELS[action as keyof Keybindings]}
       {@const binding = keybindings[action as keyof Keybindings]}
@@ -164,7 +177,7 @@ let hasCustomized = $derived(
           <div class="text-sm font-medium text-md-on-surface flex items-center gap-2">
             {$t(info.labelKey)}
             {#if !isDefault}
-              <span class="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-md-primary/20 text-md-primary">{$t('keyboardShortcuts.custom')}</span>
+              <span class="text-xs font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-md-primary/20 text-md-primary">{$t('keyboardShortcuts.custom')}</span>
             {/if}
           </div>
           <div class="text-xs text-md-on-surface/50">{$t(info.descriptionKey)}</div>
@@ -193,8 +206,4 @@ let hasCustomized = $derived(
     {/each}
   </div>
 
-  <!-- ── Settings Sub-Navigation Bar ── -->
-  <div class="px-0 pb-1 mt-4">
-    <SettingsSubNav currentSubPage="keybindings" {onNavigateTo} />
-  </div>
 </div>

@@ -1,11 +1,24 @@
 import { DEFAULT_PROVIDER, loadProviderConfig } from '@/utils/email-service.js';
 import { ApiError, getErrorMessage, ValidationError } from '@/utils/errors.js';
+import { t } from '@/utils/i18n-utils.js';
 import { setProviderInstance as setProviderInstanceStorage } from '@/utils/instance-manager.js';
+import {
+  validateCustomInstanceName,
+  validateCustomInstanceUrl,
+} from '@/utils/instance-validation.js';
 import { logError } from '@/utils/logger.js';
 import { defaultDomainKey, selectedInstanceKey } from '@/utils/storage-keys.js';
+import { debounce } from '@/utils/time.js';
 import type { Keybindings, ProviderInstance } from '@/utils/types.js';
 import { DEFAULT_KEYBINDINGS } from '@/utils/types.js';
-import { validateCustomInstanceName, validateCustomInstanceUrl } from '@/utils/validation.js';
+import {
+  ALL_BACKUP_CATEGORIES,
+  type BackupCategory,
+  exportBackup,
+  importBackup,
+  parseBackupFile,
+  resolveBackupPayload,
+} from './backup-actions.js';
 
 export interface SettingsState {
   autoCopy: boolean;
@@ -124,7 +137,8 @@ export async function loadSettings(
       setters.setExpiryWarningThreshold(60 * 60 * 1000);
     }
     if (result.keybindings) {
-      setters.setKeybindings(result.keybindings);
+      // Merge with defaults so newly added shortcuts appear for existing users
+      setters.setKeybindings({ ...DEFAULT_KEYBINDINGS, ...result.keybindings });
     } else {
       setters.setKeybindings(DEFAULT_KEYBINDINGS);
     }
@@ -189,13 +203,36 @@ export async function saveSettings(
         [defaultDomainKey(state.selectedProvider)]: state.defaultDomain,
       });
     }
-    setters.setShowToast('Settings saved', 'success');
+    setters.setShowToast(await t('toasts.settingsSaved'), 'success');
   } catch (e: unknown) {
     logError('saveSettings error:', undefined, e instanceof Error ? e : new Error(String(e)));
-    setters.setShowToast('Failed to save settings', 'error');
+    setters.setShowToast(await t('toasts.settingsSaveFailed'), 'error');
   } finally {
     setters.setSavingSettings(false);
   }
+}
+
+// Centralized write queue cache to prevent storage write thrashing
+let pendingSettings: Record<string, unknown> = {};
+
+const flushSettingsWrite = debounce(async (ext: typeof browser) => {
+  if (Object.keys(pendingSettings).length === 0) return;
+  const toWrite = { ...pendingSettings };
+  pendingSettings = {};
+  try {
+    await ext.storage.local.set(toWrite);
+  } catch (e) {
+    logError(
+      'Failed flushing debounced settings write:',
+      undefined,
+      e instanceof Error ? e : new Error(String(e))
+    );
+  }
+}, 400);
+
+export function queueSettingsWrite(ext: typeof browser, key: string, value: unknown) {
+  pendingSettings[key] = value;
+  flushSettingsWrite(ext);
 }
 
 /**
@@ -211,8 +248,9 @@ export async function toggleDeveloperSettings(
 ) {
   const newValue = !state.showDeveloperSettings;
   setters.setShowDeveloperSettings(newValue);
-  await ext.storage.local.set({
-    developerSettings: { showDeveloperSettings: newValue, enableLogging: state.enableLogging },
+  queueSettingsWrite(ext, 'developerSettings', {
+    showDeveloperSettings: newValue,
+    enableLogging: state.enableLogging,
   });
 }
 
@@ -229,11 +267,9 @@ export async function toggleEnableLogging(
 ) {
   const newValue = !state.enableLogging;
   setters.setEnableLogging(newValue);
-  await ext.storage.local.set({
-    developerSettings: {
-      showDeveloperSettings: state.showDeveloperSettings,
-      enableLogging: newValue,
-    },
+  queueSettingsWrite(ext, 'developerSettings', {
+    showDeveloperSettings: state.showDeveloperSettings,
+    enableLogging: newValue,
   });
   setters.setShowToast(`Logging ${newValue ? 'enabled' : 'disabled'}`, 'success');
 }
@@ -259,7 +295,7 @@ export async function handleProviderChange(
  * @param value - Auto-copy enabled/disabled
  */
 export async function saveAutoCopy(ext: typeof browser, value: boolean) {
-  await ext.storage.local.set({ autoCopy: value });
+  queueSettingsWrite(ext, 'autoCopy', value);
 }
 
 /**
@@ -268,7 +304,7 @@ export async function saveAutoCopy(ext: typeof browser, value: boolean) {
  * @param value - Auto-renew enabled/disabled
  */
 export async function saveAutoRenew(ext: typeof browser, value: boolean) {
-  await ext.storage.local.set({ autoRenew: value });
+  queueSettingsWrite(ext, 'autoRenew', value);
 }
 
 /**
@@ -277,7 +313,7 @@ export async function saveAutoRenew(ext: typeof browser, value: boolean) {
  * @param value - Number of days to retain emails
  */
 export async function saveEmailRetentionDays(ext: typeof browser, value: number) {
-  await ext.storage.local.set({ emailRetentionDays: value });
+  queueSettingsWrite(ext, 'emailRetentionDays', value);
 }
 
 /**
@@ -286,7 +322,7 @@ export async function saveEmailRetentionDays(ext: typeof browser, value: number)
  * @param value - Favicon caching mode ('direct' or 'local')
  */
 export async function saveFaviconCaching(ext: typeof browser, value: 'direct' | 'local') {
-  await ext.storage.local.set({ faviconCaching: value });
+  queueSettingsWrite(ext, 'faviconCaching', value);
 }
 
 /**
@@ -295,7 +331,7 @@ export async function saveFaviconCaching(ext: typeof browser, value: 'direct' | 
  * @param color - Hex color code
  */
 export async function handleColorChange(ext: typeof browser, color: string) {
-  await ext.storage.local.set({ customColor: color });
+  queueSettingsWrite(ext, 'customColor', color);
 }
 
 /**
@@ -369,9 +405,9 @@ export async function setProviderInstance(
   const provider = selectedProvider || DEFAULT_PROVIDER;
   await setProviderInstanceStorage(provider, instanceId);
   if (instanceId === 'random') {
-    setters.setShowToast('Random instance mode enabled', 'success');
+    setters.setShowToast(await t('toasts.randomInstanceEnabled'), 'success');
   } else {
-    setters.setShowToast('Instance updated', 'success');
+    setters.setShowToast(await t('toasts.instanceUpdated'), 'success');
   }
   await setters.loadInboxes();
 }
@@ -384,13 +420,13 @@ export async function addCustomInstance(
 ) {
   try {
     validateCustomInstanceName(name);
-    validateCustomInstanceUrl(url);
+    await validateCustomInstanceUrl(url);
   } catch (e) {
     if (e instanceof ValidationError) {
       setters.setShowToast(e.message, 'error');
       return;
     }
-    setters.setShowToast('Validation failed', 'error');
+    setters.setShowToast(await t('toasts.validationFailed'), 'error');
     return;
   }
 
@@ -416,7 +452,7 @@ export async function addCustomInstance(
   );
 
   if (isBlacklisted) {
-    setters.setShowToast('Domain not allowed', 'error');
+    setters.setShowToast(await t('toasts.domainNotAllowed'), 'error');
     return;
   }
 
@@ -428,9 +464,9 @@ export async function addCustomInstance(
     instance: { name: name.toLowerCase().replace(/\s+/g, '-'), displayName: name, apiUrl: url },
   });
   if (response?.success) {
-    setters.setShowToast('Custom instance added', 'success');
+    setters.setShowToast(await t('toasts.customInstanceAdded'), 'success');
     await loadProviderInstances(ext, setters);
-  } else setters.setShowToast('Failed to add instance', 'error');
+  } else setters.setShowToast(await t('toasts.customInstanceAddFailed'), 'error');
 }
 
 export async function hardReset(ext: typeof browser, setters: SettingsSetters) {
@@ -445,55 +481,44 @@ export async function hardReset(ext: typeof browser, setters: SettingsSetters) {
     }
 
     if (response?.success) {
-      setters.setShowToast('Hard reset completed', 'success');
+      setters.setShowToast(await t('toasts.hardResetCompleted'), 'success');
       setTimeout(() => window.location.reload(), 1000);
-    } else throw new ApiError(response?.error || 'Hard reset failed', { response });
+    } else throw new ApiError(response?.error || (await t('toasts.hardResetFailed')), { response });
   } catch (_e) {
-    setters.setShowToast('Hard reset failed', 'error');
+    setters.setShowToast(await t('toasts.hardResetFailed'), 'error');
   }
 }
 
+// ── Backup export/import (UI uses ExportBackupDialog / ImportBackupDialog) ──
+// Thin wrappers kept for programmatic / legacy callers.
+
+export type { BackupCategory };
+export type ExportCategory = BackupCategory | 'all';
+
+/** Export full backup (all categories). Prefer ExportBackupDialog in UI. */
 export async function exportData(ext: typeof browser) {
   try {
-    const result = await ext.storage.local.get([
-      'emailHistory',
-      'loginInfo',
-      'storedEmails',
-      'archivedEmails',
-      'inboxes',
-      'activeInboxId',
-      'identities',
-      'selectedIdentityId',
-      'savedSearchFilters',
-      'themeMode',
-      'contrastLevel',
-      'customColor',
-      'autoCopy',
-      'autoRenew',
-      'selectedProvider',
-      'passwordSettings',
-      'nameSettings',
-      'developerSettings',
-      'emailRetentionDays',
-      'faviconCaching',
-      'providerInstances',
-    ]);
-    if (result.passwordSettings && typeof result.passwordSettings === 'object') {
-      delete (result.passwordSettings as Record<string, unknown>).customPassword;
-    }
-    const data = { version: '3.0', exportDate: new Date().toISOString(), data: { ...result } };
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `1click-backup-${new Date().toISOString().split('T')[0]}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-  } catch (_e) {
+    await exportBackup(ext, { categories: [...ALL_BACKUP_CATEGORIES] });
+  } catch {
     throw new Error('Export failed');
   }
 }
 
+/** Export a single category (or all). Prefer ExportBackupDialog in UI. */
+export async function exportCategory(ext: typeof browser, category: ExportCategory): Promise<void> {
+  try {
+    const categories =
+      category === 'all' ? [...ALL_BACKUP_CATEGORIES] : [category as BackupCategory];
+    await exportBackup(ext, { categories });
+  } catch {
+    throw new Error(`Export of ${category} failed`);
+  }
+}
+
+/**
+ * Legacy one-shot import: pick file and import everything present (including expired).
+ * Prefer ImportBackupDialog in UI for selective import.
+ */
 export function importData(ext: typeof browser, loadInboxes: () => Promise<void>) {
   const input = document.createElement('input');
   input.type = 'file';
@@ -506,117 +531,21 @@ export function importData(ext: typeof browser, loadInboxes: () => Promise<void>
     const file = (e.target as HTMLInputElement).files?.[0];
     if (!file) return;
     try {
-      const text = await file.text();
-      let parsed: { version?: string; data?: unknown };
-      try {
-        parsed = JSON.parse(text);
-      } catch (_parseError) {
-        throw new Error('Invalid JSON format');
+      const parsed = await parseBackupFile(file);
+      if (parsed.kind === 'encrypted') {
+        throw new Error('Password-protected backup requires the Import dialog');
       }
-      if (!parsed.version || !parsed.data)
-        throw new Error('Missing required format fields (version/data)');
-      const importedData = parsed.data;
-
-      // Merge arrays (inboxes, emailHistory, loginInfo, identities, storedEmails, archivedEmails) to avoid overwriting
-      const existing = await ext.storage.local.get([
-        'inboxes',
-        'emailHistory',
-        'loginInfo',
-        'storedEmails',
-        'archivedEmails',
-        'identities',
-        'savedSearchFilters',
-      ]);
-
-      const mergeById = <T extends { id: string }>(existing: T[], incoming: T[]): T[] => {
-        const merged = [...existing];
-        for (const item of incoming) {
-          if (!merged.some((e) => e.id === item.id)) merged.push(item);
-        }
-        return merged;
-      };
-
-      const mergeByKey = <T>(existing: T[], incoming: T[], key: keyof T): T[] => {
-        const merged = [...existing];
-        for (const item of incoming) {
-          if (!merged.some((e) => e[key] === item[key])) merged.push(item);
-        }
-        return merged;
-      };
-
-      const mergeRecord = <T>(
-        existing: Record<string, T>,
-        incoming: Record<string, T>
-      ): Record<string, T> => {
-        const merged = { ...existing };
-        for (const [key, value] of Object.entries(incoming)) {
-          if (!(key in merged)) merged[key] = value;
-        }
-        return merged;
-      };
-
-      const allowedKeys = [
-        'themeMode',
-        'contrastLevel',
-        'customColor',
-        'autoCopy',
-        'autoRenew',
-        'selectedProvider',
-        'nameSettings',
-        'developerSettings',
-        'emailRetentionDays',
-        'faviconCaching',
-        'providerInstances',
-      ];
-      const toSet: Record<string, unknown> = {};
-      const importedDict = importedData as Record<string, unknown>;
-      for (const key of allowedKeys) {
-        if (key in importedDict) {
-          toSet[key] = importedDict[key];
-        }
-      }
-
-      if (Array.isArray(importedDict.inboxes)) {
-        toSet.inboxes = mergeById(existing.inboxes || [], importedDict.inboxes as never[]);
-      }
-      if (Array.isArray(importedDict.emailHistory)) {
-        toSet.emailHistory = mergeByKey(
-          existing.emailHistory || [],
-          importedDict.emailHistory as never[],
-          'email' as keyof unknown
-        );
-      }
-      if (Array.isArray(importedDict.loginInfo)) {
-        toSet.loginInfo = mergeByKey(
-          existing.loginInfo || [],
-          importedDict.loginInfo as never[],
-          'domain' as keyof unknown
-        );
-      }
-      if (Array.isArray(importedDict.identities)) {
-        toSet.identities = mergeById(existing.identities || [], importedDict.identities as never[]);
-      }
-      if (Array.isArray(importedDict.savedSearchFilters)) {
-        toSet.savedSearchFilters = mergeById(
-          existing.savedSearchFilters || [],
-          importedDict.savedSearchFilters as never[]
-        );
-      }
-      if (typeof importedDict.storedEmails === 'object' && importedDict.storedEmails !== null) {
-        toSet.storedEmails = mergeRecord(
-          existing.storedEmails || {},
-          importedDict.storedEmails as Record<string, unknown>
-        );
-      }
-      if (typeof importedDict.archivedEmails === 'object' && importedDict.archivedEmails !== null) {
-        toSet.archivedEmails = mergeRecord(
-          existing.archivedEmails || {},
-          importedDict.archivedEmails as Record<string, unknown>
-        );
-      }
-
-      await ext.storage.local.set(toSet);
-      await loadInboxes();
+      const payload = await resolveBackupPayload(parsed);
+      await importBackup(
+        ext,
+        payload,
+        {
+          categories: [...ALL_BACKUP_CATEGORIES],
+          includeEmails: true,
+          expiredMode: 'all',
+        },
+        loadInboxes
+      );
     } catch (err: unknown) {
       throw new Error(`Import failed: ${err instanceof Error ? err.message : String(err)}`);
     }

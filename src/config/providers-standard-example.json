@@ -1,36 +1,125 @@
 {
+  "id": "example",
+  "name": "Example Mail",
+  "displayName": "Example Mail",
+  "apiUrl": "https://api.example.com/ajax.php",
+  "websiteUrl": "https://example.com",
+  "auth": {
+    "type": "cookie",
+    "cookieName": "PHPSESSID",
+    "description": "Session cookie returned when creating an inbox"
+  },
+  "retry": {
+    "maxAttempts": 3,
+    "delayMs": 1000,
+    "backoffMultiplier": 2
+  },
   "operations": {
     "createInbox": {
       "method": "GET",
-      "endpoint": "get_email_address",
+      "function": "get_email_address",
+      "requiredParams": {
+        "ip": "127.0.0.1",
+        "agent": "1ClickExt"
+      },
+      "optionalParams": {},
       "response": {
-        "address": "email_addr",
-        "id": "sid_token",
-        "token": "sid_token",
-        "createdAt": "email_timestamp"
+        "successPath": "!error",
+        "dataPath": null,
+        "fields": {
+          "address": "email_addr",
+          "token": "sid_token",
+          "timestamp": "email_timestamp"
+        }
+      },
+      "errorHandling": {
+        "errorPath": "error",
+        "errorMessagePath": "error"
       }
     },
-    "fetchEmails": {
+    "checkEmail": {
       "method": "GET",
-      "endpoint": "check_email",
-      "response": {}
-    },
-    "getEmailDetail": {
-      "method": "GET",
-      "endpoint": "fetch_email",
-      "response": {}
-    },
-    "deleteInbox": {
-      "method": "GET",
-      "endpoint": "forget_me",
-      "response": {}
+      "function": "check_email",
+      "requiredParams": {
+        "ip": "127.0.0.1",
+        "agent": "1ClickExt"
+      },
+      "optionalParams": {
+        "seq": "{seq}"
+      },
+      "response": {
+        "successPath": "!error",
+        "dataPath": null,
+        "fields": {}
+      },
+      "errorHandling": {
+        "errorPath": "error",
+        "errorMessagePath": "error"
+      }
     },
     "setEmailUser": {
       "method": "POST",
-      "endpoint": "set_email_user",
+      "function": "set_email_user",
+      "requiredParams": {
+        "ip": "127.0.0.1",
+        "agent": "1ClickExt",
+        "email_user": "{emailUser}"
+      },
+      "optionalParams": {},
       "response": {
-        "address": "email_addr"
+        "successPath": "!error",
+        "dataPath": null,
+        "fields": {
+          "address": "email_addr",
+          "token": "sid_token",
+          "timestamp": "email_timestamp"
+        }
+      },
+      "errorHandling": {
+        "errorPath": "error",
+        "errorMessagePath": "error"
       }
     }
+  },
+  "emailFetching": {
+    "type": "multi_step",
+    "operation": null,
+    "listOperation": "checkEmail",
+    "listPath": "list",
+    "listItemIdField": "mail_id",
+    "detailOperation": "fetchEmail",
+    "detailItemIdParam": "email_id",
+    "detailResponseMapping": {
+      "id": "mail_id",
+      "from": "mail_from",
+      "from_name": "mail_from",
+      "subject": "mail_subject",
+      "body_html": "mail_body",
+      "body_plain": "mail_excerpt",
+      "timestamp_field": "mail_timestamp"
+    },
+    "responseMapping": null,
+    "selectMailboxOperation": "setEmailUser",
+    "selectMailboxVariable": "emailUser"
+  },
+  "expiry": {
+    "duration": 3600000,
+    "renewable": true,
+    "renewalMethod": "setEmailUser"
+  },
+  "customEmail": {
+    "supported": true,
+    "operation": "setEmailUser"
+  },
+  "headers": {
+    "default": {},
+    "credentials": "include",
+    "cache": "default"
+  },
+  "ui": {
+    "canUnarchive": true,
+    "supportsCustomEmail": true,
+    "multiInstance": false,
+    "supportsCustomInstance": false
   }
 }

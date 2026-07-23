@@ -4,8 +4,9 @@ import { t, tSync } from './i18n-utils.js';
  * Centralized error types for the 1Click extension
  * Provides structured error handling across the application
  *
- * Error messages use translation keys (e.g., "errors.apiCallFailed")
- * Use getErrorMessage() to get translated text for display
+ * Error messages use human-readable English strings.
+ * translationKey property contains the localization key (e.g., "errors.apiCallFailed")
+ * Use getTranslatedErrorMessage() to get translated text for display in the UI.
  */
 
 // Error codes for categorization
@@ -66,7 +67,7 @@ export enum ErrorCode {
 /**
  * Map error codes to translation keys
  */
-const ERROR_CODE_TO_TRANSLATION_KEY: Record<ErrorCode, string> = {
+export const ERROR_CODE_TO_TRANSLATION_KEY: Record<ErrorCode, string> = {
   [ErrorCode.API_CALL_FAILED]: 'errors.apiCallFailed',
   [ErrorCode.API_TIMEOUT]: 'errors.apiTimeout',
   [ErrorCode.API_INVALID_RESPONSE]: 'errors.apiInvalidResponse',
@@ -123,24 +124,37 @@ export class BaseExtensionError extends Error {
   public readonly context?: Record<string, unknown>;
   public readonly timestamp: number;
   public readonly originalError?: Error;
+  public readonly translationKey: string;
 
   constructor(
     message: string,
     code: ErrorCode = ErrorCode.UNKNOWN_ERROR,
     severity: ErrorSeverity = ErrorSeverity.MEDIUM,
     context?: Record<string, unknown>,
-    originalError?: Error
+    originalError?: Error,
+    translationKey?: string
   ) {
-    super(message);
+    // If message is a translation key, use it as translationKey too
+    const resolvedKey =
+      translationKey ||
+      (message.startsWith('errors.')
+        ? message
+        : ERROR_CODE_TO_TRANSLATION_KEY[code] || 'errors.unknownError');
+    // If message is a translation key, provide a fallback English string for message
+    const resolvedMessage = message.startsWith('errors.')
+      ? message.split('.').pop() || message
+      : message;
+
+    super(resolvedMessage);
     this.name = this.constructor.name;
     this.code = code;
     this.severity = severity;
     this.context = context;
     this.timestamp = Date.now();
     this.originalError = originalError;
+    this.translationKey = resolvedKey;
 
     // Maintains proper stack trace (Node.js only, not available in browser)
-    // Type-safe access to optional Node.js captureStackTrace method
     const ErrorWithStackTrace = Error as {
       // biome-ignore lint/complexity/noBannedTypes: Node.js Error.captureStackTrace is not in TypeScript DOM types
       captureStackTrace?: (target: Error, ctor: Function) => void;
@@ -157,6 +171,7 @@ export class BaseExtensionError extends Error {
       context: this.context,
       timestamp: this.timestamp,
       originalError: this.originalError?.message,
+      translationKey: this.translationKey,
       stack: this.stack,
     };
   }
@@ -171,18 +186,26 @@ export class ApiError extends BaseExtensionError {
 
 export class ApiTimeoutError extends BaseExtensionError {
   constructor(context?: Record<string, unknown>) {
-    super('errors.apiTimeout', ErrorCode.API_TIMEOUT, ErrorSeverity.MEDIUM, context);
+    super(
+      'API request timed out',
+      ErrorCode.API_TIMEOUT,
+      ErrorSeverity.MEDIUM,
+      context,
+      undefined,
+      'errors.apiTimeout'
+    );
   }
 }
 
 export class ApiInvalidResponseError extends BaseExtensionError {
   constructor(context?: Record<string, unknown>, originalError?: Error) {
     super(
-      'errors.apiInvalidResponse',
+      'Invalid API response received',
       ErrorCode.API_INVALID_RESPONSE,
       ErrorSeverity.HIGH,
       context,
-      originalError
+      originalError,
+      'errors.apiInvalidResponse'
     );
   }
 }
@@ -190,51 +213,74 @@ export class ApiInvalidResponseError extends BaseExtensionError {
 // Inbox-specific errors
 export class InboxNotFoundError extends BaseExtensionError {
   constructor(inboxId: string, context?: Record<string, unknown>) {
-    super('errors.inboxNotFound', ErrorCode.INBOX_NOT_FOUND, ErrorSeverity.MEDIUM, {
-      inboxId,
-      ...context,
-    });
+    super(
+      'Inbox not found',
+      ErrorCode.INBOX_NOT_FOUND,
+      ErrorSeverity.MEDIUM,
+      {
+        inboxId,
+        ...context,
+      },
+      undefined,
+      'errors.inboxNotFound'
+    );
   }
 }
 
 export class InboxCreationError extends BaseExtensionError {
   constructor(provider: string, context?: Record<string, unknown>, originalError?: Error) {
     super(
-      'errors.inboxCreationFailed',
+      'Failed to create inbox',
       ErrorCode.INBOX_CREATION_FAILED,
       ErrorSeverity.HIGH,
       { provider, ...context },
-      originalError
+      originalError,
+      'errors.inboxCreationFailed'
     );
   }
 }
 
 export class InboxExpiredError extends BaseExtensionError {
   constructor(inboxId: string, context?: Record<string, unknown>) {
-    super('errors.inboxExpired', ErrorCode.INBOX_EXPIRED, ErrorSeverity.LOW, {
-      inboxId,
-      ...context,
-    });
+    super(
+      'Inbox has expired',
+      ErrorCode.INBOX_EXPIRED,
+      ErrorSeverity.LOW,
+      {
+        inboxId,
+        ...context,
+      },
+      undefined,
+      'errors.inboxExpired'
+    );
   }
 }
 
 export class InboxAlreadyExistsError extends BaseExtensionError {
   constructor(address: string, context?: Record<string, unknown>) {
-    super('errors.inboxAlreadyExists', ErrorCode.INBOX_ALREADY_EXISTS, ErrorSeverity.MEDIUM, {
-      address,
-      ...context,
-    });
+    super(
+      'Inbox address already exists',
+      ErrorCode.INBOX_ALREADY_EXISTS,
+      ErrorSeverity.MEDIUM,
+      {
+        address,
+        ...context,
+      },
+      undefined,
+      'errors.inboxAlreadyExists'
+    );
   }
 }
 
 export class InboxSessionConflictError extends BaseExtensionError {
   constructor(context?: Record<string, unknown>, originalError?: Error) {
     super(
-      'errors.inboxSessionConflict',
+      'Session conflict detected',
       ErrorCode.INBOX_SESSION_CONFLICT,
       ErrorSeverity.HIGH,
       context,
-      originalError
+      originalError,
+      'errors.inboxSessionConflict'
     );
   }
 }
@@ -242,29 +288,45 @@ export class InboxSessionConflictError extends BaseExtensionError {
 // Provider-specific errors
 export class ProviderNotFoundError extends BaseExtensionError {
   constructor(provider: string, context?: Record<string, unknown>) {
-    super('errors.providerNotFound', ErrorCode.PROVIDER_NOT_FOUND, ErrorSeverity.MEDIUM, {
-      provider,
-      ...context,
-    });
+    super(
+      'Mail provider not found',
+      ErrorCode.PROVIDER_NOT_FOUND,
+      ErrorSeverity.MEDIUM,
+      {
+        provider,
+        ...context,
+      },
+      undefined,
+      'errors.providerNotFound'
+    );
   }
 }
 
 export class ProviderUnsupportedError extends BaseExtensionError {
   constructor(provider: string, context?: Record<string, unknown>) {
-    super('errors.providerUnsupported', ErrorCode.PROVIDER_UNSUPPORTED, ErrorSeverity.MEDIUM, {
-      provider,
-      ...context,
-    });
+    super(
+      'Mail provider is unsupported',
+      ErrorCode.PROVIDER_UNSUPPORTED,
+      ErrorSeverity.MEDIUM,
+      {
+        provider,
+        ...context,
+      },
+      undefined,
+      'errors.providerUnsupported'
+    );
   }
 }
 
 export class ProviderInstanceNotFoundError extends BaseExtensionError {
   constructor(instanceId: string, context?: Record<string, unknown>) {
     super(
-      'errors.providerInstanceNotFound',
+      'Provider instance not found',
       ErrorCode.PROVIDER_INSTANCE_NOT_FOUND,
       ErrorSeverity.MEDIUM,
-      { instanceId, ...context }
+      { instanceId, ...context },
+      undefined,
+      'errors.providerInstanceNotFound'
     );
   }
 }
@@ -273,11 +335,12 @@ export class ProviderInstanceNotFoundError extends BaseExtensionError {
 export class StorageReadError extends BaseExtensionError {
   constructor(key: string, context?: Record<string, unknown>, originalError?: Error) {
     super(
-      'errors.storageReadFailed',
+      'Failed to read from local storage',
       ErrorCode.STORAGE_READ_FAILED,
       ErrorSeverity.HIGH,
       { key, ...context },
-      originalError
+      originalError,
+      'errors.storageReadFailed'
     );
   }
 }
@@ -285,11 +348,12 @@ export class StorageReadError extends BaseExtensionError {
 export class StorageWriteError extends BaseExtensionError {
   constructor(key: string, context?: Record<string, unknown>, originalError?: Error) {
     super(
-      'errors.storageWriteFailed',
+      'Failed to write to local storage',
       ErrorCode.STORAGE_WRITE_FAILED,
       ErrorSeverity.HIGH,
       { key, ...context },
-      originalError
+      originalError,
+      'errors.storageWriteFailed'
     );
   }
 }
@@ -298,11 +362,12 @@ export class StorageWriteError extends BaseExtensionError {
 export class EncryptionError extends BaseExtensionError {
   constructor(context?: Record<string, unknown>, originalError?: Error) {
     super(
-      'errors.encryptionFailed',
+      'Encryption failed',
       ErrorCode.ENCRYPTION_FAILED,
       ErrorSeverity.CRITICAL,
       context,
-      originalError
+      originalError,
+      'errors.encryptionFailed'
     );
   }
 }
@@ -310,11 +375,12 @@ export class EncryptionError extends BaseExtensionError {
 export class DecryptionError extends BaseExtensionError {
   constructor(context?: Record<string, unknown>, originalError?: Error) {
     super(
-      'errors.decryptionFailed',
+      'Decryption failed',
       ErrorCode.DECRYPTION_FAILED,
       ErrorSeverity.CRITICAL,
       context,
-      originalError
+      originalError,
+      'errors.decryptionFailed'
     );
   }
 }
@@ -322,11 +388,12 @@ export class DecryptionError extends BaseExtensionError {
 export class KeyRotationError extends BaseExtensionError {
   constructor(context?: Record<string, unknown>, originalError?: Error) {
     super(
-      'errors.keyRotationFailed',
+      'Encryption key rotation failed',
       ErrorCode.KEY_ROTATION_FAILED,
       ErrorSeverity.CRITICAL,
       context,
-      originalError
+      originalError,
+      'errors.keyRotationFailed'
     );
   }
 }
@@ -334,25 +401,40 @@ export class KeyRotationError extends BaseExtensionError {
 // Form/Content Script errors
 export class FormNotFoundError extends BaseExtensionError {
   constructor(context?: Record<string, unknown>) {
-    super('errors.formNotFound', ErrorCode.FORM_NOT_FOUND, ErrorSeverity.LOW, context);
+    super(
+      'Signup form not found',
+      ErrorCode.FORM_NOT_FOUND,
+      ErrorSeverity.LOW,
+      context,
+      undefined,
+      'errors.formNotFound'
+    );
   }
 }
 
 export class FormFillError extends BaseExtensionError {
   constructor(context?: Record<string, unknown>, originalError?: Error) {
     super(
-      'errors.formFillFailed',
+      'Failed to fill form fields',
       ErrorCode.FORM_FILL_FAILED,
       ErrorSeverity.MEDIUM,
       context,
-      originalError
+      originalError,
+      'errors.formFillFailed'
     );
   }
 }
 
 export class NoActiveInboxError extends BaseExtensionError {
   constructor(context?: Record<string, unknown>) {
-    super('errors.noActiveInbox', ErrorCode.NO_ACTIVE_INBOX, ErrorSeverity.MEDIUM, context);
+    super(
+      'No active temporary inbox selected',
+      ErrorCode.NO_ACTIVE_INBOX,
+      ErrorSeverity.MEDIUM,
+      context,
+      undefined,
+      'errors.noActiveInbox'
+    );
   }
 }
 
@@ -372,10 +454,12 @@ export class ExportError extends BaseExtensionError {
 export class InvalidBackupFormatError extends BaseExtensionError {
   constructor(context?: Record<string, unknown>) {
     super(
-      'errors.invalidBackupFormat',
+      'Invalid backup configuration format',
       ErrorCode.INVALID_BACKUP_FORMAT,
       ErrorSeverity.MEDIUM,
-      context
+      context,
+      undefined,
+      'errors.invalidBackupFormat'
     );
   }
 }
@@ -389,7 +473,14 @@ export class ValidationError extends BaseExtensionError {
 
 export class InvalidUrlError extends BaseExtensionError {
   constructor(url: string, context?: Record<string, unknown>) {
-    super('errors.invalidUrl', ErrorCode.INVALID_URL, ErrorSeverity.LOW, { url, ...context });
+    super(
+      'Invalid URL provided',
+      ErrorCode.INVALID_URL,
+      ErrorSeverity.LOW,
+      { url, ...context },
+      undefined,
+      'errors.invalidUrl'
+    );
   }
 }
 
@@ -470,9 +561,8 @@ export function getErrorMessage(error: unknown): string {
  */
 export async function getTranslatedErrorMessage(error: unknown): Promise<string> {
   if (error instanceof BaseExtensionError) {
-    // If message is a translation key (starts with 'errors.'), translate it
-    if (error.message.startsWith('errors.')) {
-      return await t(error.message);
+    if (error.translationKey?.startsWith('errors.')) {
+      return await t(error.translationKey);
     }
     return error.message;
   }
@@ -490,9 +580,8 @@ export async function getTranslatedErrorMessage(error: unknown): Promise<string>
  */
 export function getTranslatedErrorMessageSync(error: unknown): string {
   if (error instanceof BaseExtensionError) {
-    // If message is a translation key (starts with 'errors.'), translate it
-    if (error.message.startsWith('errors.')) {
-      return tSync(error.message);
+    if (error.translationKey?.startsWith('errors.')) {
+      return tSync(error.translationKey);
     }
     return error.message;
   }

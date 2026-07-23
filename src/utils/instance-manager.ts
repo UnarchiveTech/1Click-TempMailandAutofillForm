@@ -7,7 +7,8 @@ import { browser } from 'wxt/browser';
 import { DEFAULT_PROVIDER, loadProviderConfig } from '@/utils/email-service.js';
 import { ProviderInstanceNotFoundError } from '@/utils/errors.js';
 import { logError, logWarn } from '@/utils/logger.js';
-import { randomItem } from '@/utils/secure-random.js';
+import { withLock } from '@/utils/mutex.js';
+import { randomItem, randomToken } from '@/utils/secure-random.js';
 import { getStorage, type ProviderStorageKey, setStorage } from '@/utils/storage-keys.js';
 import type { ProviderInstance } from '@/utils/types.js';
 
@@ -36,7 +37,10 @@ export async function getProviderInstancesWithCustom(
   const predefinedInstances = getProviderInstances(providerId);
   const storageKey: ProviderStorageKey = `customInstances_${providerId}`;
   const result = await getStorage<ProviderInstance[]>(storageKey);
-  const customInstances: ProviderInstance[] = result[storageKey] || [];
+  const customInstances: ProviderInstance[] =
+    result && typeof result === 'object' && Array.isArray(result[storageKey])
+      ? result[storageKey]
+      : [];
   return [...predefinedInstances, ...customInstances];
 }
 
@@ -48,7 +52,7 @@ export async function getSelectedProviderInstance(
 ): Promise<ProviderInstance | null> {
   const storageKey: ProviderStorageKey = `selectedInstance_${providerId}`;
   const result = await getStorage<string>(storageKey);
-  const selectedInstance = result[storageKey];
+  const selectedInstance = result && typeof result === 'object' ? result[storageKey] : undefined;
 
   const instances = await getProviderInstancesWithCustom(providerId);
 
@@ -95,16 +99,18 @@ export async function addCustomProviderInstance(
   providerId: string,
   instance: Omit<ProviderInstance, 'id' | 'isCustom'>
 ): Promise<void> {
-  const storageKey: ProviderStorageKey = `customInstances_${providerId}`;
-  const result = await getStorage<ProviderInstance[]>(storageKey);
-  const customInstances: ProviderInstance[] = result[storageKey] || [];
-  const newInstance: ProviderInstance = {
-    ...instance,
-    id: `custom_${providerId}_${Date.now()}`,
-    isCustom: true,
-  };
-  customInstances.push(newInstance);
-  await setStorage(storageKey, customInstances);
+  await withLock('custom_instances_lock', async () => {
+    const storageKey: ProviderStorageKey = `customInstances_${providerId}`;
+    const result = await getStorage<ProviderInstance[]>(storageKey);
+    const customInstances: ProviderInstance[] = result[storageKey] || [];
+    const newInstance: ProviderInstance = {
+      ...instance,
+      id: `custom_${providerId}_${Date.now()}_${randomToken(6)}`,
+      isCustom: true,
+    };
+    customInstances.push(newInstance);
+    await setStorage(storageKey, customInstances);
+  });
 }
 
 /**
@@ -114,13 +120,15 @@ export async function removeCustomProviderInstance(
   providerId: string,
   instanceId: string
 ): Promise<void> {
-  const storageKey: ProviderStorageKey = `customInstances_${providerId}`;
-  const result = await getStorage<ProviderInstance[]>(storageKey);
-  const customInstances: ProviderInstance[] = result[storageKey] || [];
-  const filtered = customInstances.filter(
-    (instance: ProviderInstance) => instance.id !== instanceId
-  );
-  await setStorage(storageKey, filtered);
+  await withLock('custom_instances_lock', async () => {
+    const storageKey: ProviderStorageKey = `customInstances_${providerId}`;
+    const result = await getStorage<ProviderInstance[]>(storageKey);
+    const customInstances: ProviderInstance[] = result[storageKey] || [];
+    const filtered = customInstances.filter(
+      (instance: ProviderInstance) => instance.id !== instanceId
+    );
+    await setStorage(storageKey, filtered);
+  });
 }
 
 /**

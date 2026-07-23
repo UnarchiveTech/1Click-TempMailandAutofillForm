@@ -14,9 +14,3 @@ declare module '*.jsonc' {
   const value: unknown;
   export default value;
 }
-
-// webextension-polyfill
-declare module 'webextension-polyfill' {
-  const browser: Browser;
-  export default browser;
-}

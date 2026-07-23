@@ -1,16 +1,46 @@
+import { extractMagicLinks } from '@/entrypoints/background/parsing/magic-link.js';
 import { logDebug } from '@/utils/logger.js';
-import { initSanitize, sanitizeHtml } from '@/utils/sanitize-html.js';
+import { estimateExpiresAt } from '@/utils/otp-magic-expiry.js';
+import { htmlToPlainText, initSanitize, sanitizeHtml } from '@/utils/sanitize-html.js';
 import { timeAgo } from '@/utils/time.js';
-import type { Email } from '@/utils/types.js';
+import type { Email, MagicLink } from '@/utils/types.js';
 
 // Preload DOMPurify so sanitizeHtml() is ready when emails arrive.
 initSanitize();
+
+/** Resolve magic links from stored fields or re-scan body (legacy messages). */
+function resolveMagicLinks(m: Email): MagicLink[] {
+  if (m.magicLinks && m.magicLinks.length > 0) return m.magicLinks;
+  if (m.hasMagicLink === false) return [];
+  // Lazy re-detect for emails stored before magic-link support
+  try {
+    return extractMagicLinks(m.subject || '', m.body_html || '', m.body_plain || m.body || '');
+  } catch {
+    return [];
+  }
+}
 
 export function mapEmailForDisplay(
   m: Email,
   readEmails: Record<string, boolean>,
   addr: string = ''
 ): Email {
+  const bodyPlain = m.body_plain || htmlToPlainText(m.body_html || m.body || '');
+  const receivedMs =
+    m.received_at > 1e12 ? m.received_at : (m.received_at || 0) * 1000 || Date.now();
+  let magicLinks = resolveMagicLinks(m);
+  const otpExpiresAt =
+    m.otpExpiresAt ||
+    (m.otp ? estimateExpiresAt(receivedMs, m.subject || '', bodyPlain) || undefined : undefined);
+  if (magicLinks.length > 0) {
+    magicLinks = magicLinks.map((link) => ({
+      ...link,
+      expiresAt:
+        link.expiresAt ||
+        estimateExpiresAt(receivedMs, m.subject || '', `${bodyPlain}\n${link.url}`) ||
+        undefined,
+    }));
+  }
   return {
     id: m.id,
     from:
@@ -20,16 +50,21 @@ export function mapEmailForDisplay(
     time: timeAgo(m.received_at),
     isOtp: !!m.otp,
     otp: m.otp || null,
-    body: m.body_plain || (m.body_html || '').replace(/<[^>]*>/g, ''),
+    otpExpiresAt,
+    magicLinks: magicLinks.length > 0 ? magicLinks : undefined,
+    hasMagicLink: magicLinks.length > 0,
+    body: bodyPlain,
     body_html: m.body_html ? sanitizeHtml(m.body_html) : m.body_html,
     unread: !readEmails[`${m.original_inbox || addr}_${m.id}`] && !readEmails[m.id],
     received_at: m.received_at,
     local_only: m.local_only,
+    local_only_since: m.local_only_since,
     original_inbox: m.original_inbox,
     local_archived: m.local_archived,
     local_archived_at: m.local_archived_at,
     local_deleted: m.local_deleted,
     local_deleted_at: m.local_deleted_at,
+    stored_at: m.stored_at,
   } as Email;
 }
 
@@ -59,7 +94,10 @@ export function extractLatestOtp(
     }
   }
   const latestOtpMsg = allOtps.sort((a: Email, b: Email) => b.received_at - a.received_at)[0];
-  logDebug(`[${context}] latestOtpMsg: ${JSON.stringify(latestOtpMsg)}`);
+  if (latestOtpMsg) {
+    const redactedMsg = { ...latestOtpMsg, otp: latestOtpMsg.otp ? '****' : null };
+    logDebug(`[${context}] latestOtpMsg: ${JSON.stringify(redactedMsg)}`);
+  }
   if (latestOtpMsg?.otp) {
     logDebug(
       `[${context}] Set OTP sender - from: ${latestOtpMsg.from}, from_name: ${latestOtpMsg.from_name}`

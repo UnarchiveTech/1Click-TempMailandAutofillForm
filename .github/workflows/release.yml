@@ -32,38 +32,42 @@ jobs:
 
       - name: Resolve build version
         id: resolve
+        env:
+          VERSION_OVERRIDE: ${{ inputs.version_override }}
+          EVENT_NAME: ${{ github.event_name }}
+          GITHUB_REF_VAL: ${{ github.ref }}
         run: |
           set -euo pipefail
           PKG_VERSION=$(node -p "require('./package.json').version")
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            echo "PR build — using package.json version: $PKG_VERSION"
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            echo "PR build - using package.json version: $PKG_VERSION"
             echo "version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
             echo "from_tag=false"       >> "$GITHUB_OUTPUT"
-          elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == refs/tags/* ]]; then
-            TAG="${GITHUB_REF#refs/tags/}"
+          elif [[ "$EVENT_NAME" == "push" && "$GITHUB_REF_VAL" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF_VAL#refs/tags/}"
             TAG_VERSION="${TAG#v}"
             if [[ "$TAG_VERSION" != "$PKG_VERSION" ]]; then
               echo "::error::Tag $TAG does not match package.json version $PKG_VERSION."
               echo "::error::Run: bun run bump-version $TAG_VERSION  (or fix the tag)"
               exit 1
             fi
-            echo "Tag $TAG matches package.json — using $PKG_VERSION"
+            echo "Tag $TAG matches package.json - using $PKG_VERSION"
             echo "version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
             echo "from_tag=true"        >> "$GITHUB_OUTPUT"
-          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            OVERRIDE='${{ inputs.version_override }}'
+          elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            OVERRIDE="$VERSION_OVERRIDE"
             if [[ -n "$OVERRIDE" ]]; then
               OVERRIDE="${OVERRIDE#v}"
               echo "Manual override: $OVERRIDE (package.json: $PKG_VERSION)"
               echo "version=$OVERRIDE" >> "$GITHUB_OUTPUT"
               echo "from_tag=false"     >> "$GITHUB_OUTPUT"
             else
-              echo "Dispatch with no override — using package.json: $PKG_VERSION"
+              echo "Dispatch with no override - using package.json: $PKG_VERSION"
               echo "version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
               echo "from_tag=false"       >> "$GITHUB_OUTPUT"
             fi
           else
-            echo "Branch push — using package.json: $PKG_VERSION"
+            echo "Branch push - using package.json: $PKG_VERSION"
             echo "version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
             echo "from_tag=false"       >> "$GITHUB_OUTPUT"
           fi
@@ -97,6 +101,18 @@ jobs:
       - name: Install dependencies
         run: bun install
 
+      - name: Run Biome lint check
+        run: bun x biome check
+
+      - name: Run TypeScript type check
+        run: bun run typecheck
+
+      - name: Check translation completeness
+        run: bun run check-translations
+
+      - name: Run unit tests
+        run: bun test
+
       - name: Build extension for ${{ matrix.browser }}
         env:
           # Forward the resolved version to wxt.config.ts via VERSION_OVERRIDE.
@@ -106,19 +122,22 @@ jobs:
         run: bun wxt build --browser ${{ matrix.browser }}
 
       - name: Verify built manifest version
+        env:
+          EXPECTED_VERSION: ${{ needs.version.outputs.version }}
         run: |
           BUILT_VERSION=$(node -p "require('./.output/${{ matrix.browser }}-mv3/manifest.json').version")
-          EXPECTED='${{ needs.version.outputs.version }}'
-          if [[ "$BUILT_VERSION" != "$EXPECTED" ]]; then
-            echo "::error::Built manifest version $BUILT_VERSION does not match expected $EXPECTED"
+          if [[ "$BUILT_VERSION" != "$EXPECTED_VERSION" ]]; then
+            echo "::error::Built manifest version $BUILT_VERSION does not match expected $EXPECTED_VERSION"
             exit 1
           fi
           echo "✓ ${{ matrix.browser }} manifest version: $BUILT_VERSION"
 
       - name: Zip extension
+        env:
+          RELEASE_VERSION: ${{ needs.version.outputs.version }}
         run: |
           cd .output/${{ matrix.browser }}-mv3
-          zip -r ../../${{ matrix.browser }}-extension-${{ needs.version.outputs.version }}.zip .
+          zip -r "../../${{ matrix.browser }}-extension-${RELEASE_VERSION}.zip" .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7

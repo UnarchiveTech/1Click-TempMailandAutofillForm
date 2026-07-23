@@ -1,0 +1,23 @@
+# lefthook.yml
+#
+# Lefthook configuration for 1Click Temp Mail & Autofill Extension.
+# Refer to https://github.com/evilmartians/lefthook/blob/master/docs/configuration.md
+
+pre-commit:
+  parallel: true
+  commands:
+    sync-check:
+      run: bun scripts/check-sync-docs.ts
+
+    biome:
+      glob: "*.{js,ts,jsx,tsx,svelte,json,jsonc}"
+      run: bun x biome check --write --no-errors-on-unmatched {staged_files} && git add {staged_files}
+
+    check-translations:
+      run: bun run check-translations
+
+    typecheck:
+      run: bun run typecheck
+
+    test:
+      run: bun test tests/unit

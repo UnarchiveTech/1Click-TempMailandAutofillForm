@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Fixture · Basic Signup</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 420px; margin: 2rem auto; padding: 1rem; }
+    label { display: block; margin-top: 0.75rem; font-size: 0.875rem; }
+    input { width: 100%; padding: 0.5rem; box-sizing: border-box; margin-top: 0.25rem; }
+    button { margin-top: 1rem; width: 100%; padding: 0.65rem; }
+    h1 { font-size: 1.25rem; }
+  </style>
+</head>
+<body>
+  <h1>Create your free account</h1>
+  <p>QA fixture — signup form for Autofill All testing.</p>
+  <form id="signup" action="/register" method="post">
+    <label>Email <input type="email" name="email" autocomplete="email" required /></label>
+    <label>Confirm email <input type="email" name="email_confirm" autocomplete="email" /></label>
+    <label>Password <input type="password" name="password" autocomplete="new-password" minlength="8" required /></label>
+    <label>Confirm password <input type="password" name="password_confirm" autocomplete="new-password" /></label>
+    <label>First name <input type="text" name="first_name" autocomplete="given-name" /></label>
+    <label>Last name <input type="text" name="last_name" autocomplete="family-name" /></label>
+    <label><input type="checkbox" name="terms" /> I agree to Terms and Privacy</label>
+    <button type="submit">Create account</button>
+  </form>
+  <p><a href="login-only.html">Login fixture</a> · <a href="otp-wait.html">OTP fixture</a></p>
+</body>
+</html>

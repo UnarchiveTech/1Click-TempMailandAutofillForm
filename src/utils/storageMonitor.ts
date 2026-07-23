@@ -4,11 +4,7 @@
  */
 
 import { browser } from 'wxt/browser';
-import {
-  STORAGE_CRITICAL_THRESHOLD,
-  STORAGE_LIMIT,
-  STORAGE_WARNING_THRESHOLD,
-} from '@/utils/constants.js';
+import { STORAGE_CRITICAL_THRESHOLD, STORAGE_WARNING_THRESHOLD } from '@/utils/constants.js';
 import { logDebug, logError } from '@/utils/logger.js';
 
 /**
@@ -26,46 +22,61 @@ export async function getStorageUsage(): Promise<number> {
 }
 
 /**
- * Check if the unlimitedStorage optional permission is currently granted.
+ * Check if unlimitedStorage is available.
+ * Declared as a required permission in the manifest (Chrome rejects it as optional).
  */
 export async function hasUnlimitedStoragePermission(): Promise<boolean> {
+  if (isFirefox()) return true;
   try {
     return await browser.permissions.contains({ permissions: ['unlimitedStorage'] });
   } catch {
-    return false;
+    // Required permission is always present once installed
+    return true;
   }
 }
 
 /**
  * Detect if the current browser is Firefox.
- * Firefox does not support the unlimitedStorage permission.
+ * Firefox does not use the unlimitedStorage permission (large quota by default).
  */
 export function isFirefox(): boolean {
   return navigator.userAgent.toLowerCase().includes('firefox');
 }
 
 /**
- * Request the unlimitedStorage optional permission from the user.
- * Skips the request on Firefox (not supported) and returns false.
- * Must be called from a user gesture context (e.g., button click).
+ * Ensure unlimitedStorage is available.
+ * Now a required manifest permission — no optional request needed.
  */
 export async function requestUnlimitedStorage(): Promise<boolean> {
   if (isFirefox()) {
-    logDebug('storageMonitor: Firefox detected — unlimitedStorage not supported, skipping request');
-    return false;
+    logDebug('storageMonitor: Firefox - treating storage as unlimited');
+    return true;
   }
 
   try {
+    if (await hasUnlimitedStoragePermission()) {
+      try {
+        await browser.storage.local.set({ storageQuotaWarning: false });
+      } catch {
+        /* ignore */
+      }
+      return true;
+    }
+    // Fallback: try request if somehow not granted (legacy installs)
     const granted = await browser.permissions.request({ permissions: ['unlimitedStorage'] });
     if (granted) {
       logDebug('storageMonitor: unlimitedStorage permission granted');
-    } else {
-      logDebug('storageMonitor: unlimitedStorage permission denied by user');
+      try {
+        await browser.storage.local.set({ storageQuotaWarning: false });
+      } catch {
+        /* ignore */
+      }
     }
     return granted;
   } catch (e) {
-    logError('storageMonitor: failed to request unlimitedStorage permission', e);
-    return false;
+    logError('storageMonitor: unlimitedStorage check failed', e);
+    // Required permission — treat as granted on failure
+    return true;
   }
 }
 
@@ -110,10 +121,8 @@ export async function beforeStorageWrite(estimatedWriteSize = 0): Promise<Storag
     return { canWrite: true, shouldPromptPermission: false, currentUsage };
   }
 
-  if (projectedUsage >= STORAGE_LIMIT) {
-    return { canWrite: false, shouldPromptPermission: true, currentUsage };
-  }
-
+  // Critical threshold (4.8 MB) is always hit before the hard 5 MB limit,
+  // so the limit check is subsumed here.
   if (projectedUsage >= STORAGE_CRITICAL_THRESHOLD) {
     return { canWrite: false, shouldPromptPermission: true, currentUsage };
   }
@@ -132,4 +141,34 @@ export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+/**
+ * Safe wrapper for browser.storage.local.set that checks quota limits.
+ * Sets the 'storageQuotaWarning' flag if approaching or exceeding limit.
+ */
+export async function safeStorageSet(
+  ext: typeof browser,
+  data: Record<string, unknown>
+): Promise<boolean> {
+  try {
+    // Basic estimation: serialize the data to write
+    const estimatedSize = JSON.stringify(data).length;
+    const check = await beforeStorageWrite(estimatedSize);
+
+    if (check.shouldPromptPermission) {
+      await ext.storage.local.set({ storageQuotaWarning: true });
+    }
+
+    if (!check.canWrite) {
+      logError('safeStorageSet: Write blocked due to storage quota limits.');
+      return false;
+    }
+
+    await ext.storage.local.set(data);
+    return true;
+  } catch (error: unknown) {
+    logError('safeStorageSet: Write failed', error);
+    return false;
+  }
 }

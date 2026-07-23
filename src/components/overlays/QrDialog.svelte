@@ -1,9 +1,10 @@
 <script lang="ts">
-import { onMount } from 'svelte';
+import { onMount, tick } from 'svelte';
 import Icon from '@/components/icons/Icon.svelte';
 import { rgbToHex } from '@/utils/color-utils.js';
 import { setupFocusTrap } from '@/utils/focusTrap.js';
 import { logError } from '@/utils/logger.js';
+import { portalToBody } from '@/utils/portal-layers.js';
 
 interface Props {
   open: boolean;
@@ -25,21 +26,42 @@ let {
 }: Props = $props();
 
 let localCanvas: HTMLCanvasElement | null = null;
+let overlayEl = $state<HTMLElement | null>(null);
 let cleanupFocusTrap: (() => void) | null = null;
+
+$effect(() => {
+  if (open && overlayEl) {
+    return portalToBody(overlayEl);
+  }
+});
+
+let previousActiveElement = $state<HTMLElement | null>(null);
 
 // Setup focus trap when dialog opens
 $effect(() => {
-  if (open && qrDialogElement) {
-    setTimeout(() => {
+  let prevOverflow = '';
+  if (open) {
+    previousActiveElement = document.activeElement as HTMLElement;
+    // Lock body scroll so the background doesn't scroll behind the overlay
+    prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    void tick().then(() => {
       if (qrDialogElement) {
         cleanupFocusTrap = setupFocusTrap(qrDialogElement);
       }
-    }, 50);
+    });
   }
   return () => {
     if (cleanupFocusTrap) {
       cleanupFocusTrap();
       cleanupFocusTrap = null;
+    }
+    if (prevOverflow !== '') {
+      document.body.style.overflow = prevOverflow;
+    }
+    if (previousActiveElement) {
+      previousActiveElement.focus();
+      previousActiveElement = null;
     }
   };
 });
@@ -99,9 +121,14 @@ $effect(() => {
 </script>
 
 {#if open}
-  <div class="fixed inset-0 z-50 flex items-center justify-center" role="dialog" aria-modal="true">
+  <div
+    bind:this={overlayEl}
+    class="fixed inset-0 z-[10000] flex items-center justify-center"
+    role="dialog"
+    aria-modal="true"
+  >
     <div
-      class="absolute inset-0 bg-md-surface/30 backdrop-blur-sm"
+      class="absolute inset-0 bg-md-scrim/30 backdrop-blur-sm"
       role="button"
       tabindex="-1"
       onclick={(e) => { e.stopPropagation(); onClose(); }}
@@ -109,7 +136,7 @@ $effect(() => {
     ></div>
 
     <button
-      class="absolute top-4 right-4 z-10 w-9 h-9 rounded-full bg-md-surface hover:bg-md-surface-variant flex items-center justify-center shadow-md transition-colors"
+      class="absolute top-4 end-4 z-10 w-9 h-9 rounded-full bg-md-surface-container hover:bg-md-surface-variant flex items-center justify-center shadow-md transition-colors"
       aria-label="Close dialog"
       onclick={(e) => { e.stopPropagation(); onClose(); }}
     >
@@ -117,7 +144,7 @@ $effect(() => {
     </button>
 
     <div
-      class="relative z-10 bg-md-surface rounded-xl shadow-2xl p-4 flex flex-col items-center gap-3 w-60"
+      class="relative z-10 bg-md-surface-container rounded-xl shadow-2xl p-4 flex flex-col items-center gap-3 w-60"
       bind:this={qrDialogElement}
       tabindex="-1"
     >

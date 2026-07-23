@@ -1,4 +1,7 @@
 import type { Browser } from 'wxt/browser';
+import { t } from '@/utils/i18n-utils.js';
+import { logError } from '@/utils/logger.js';
+import { withInboxLock } from '@/utils/mutex.js';
 import type { Account, Email } from '@/utils/types.js';
 import { canUnarchive } from './inbox-management.js';
 
@@ -13,7 +16,7 @@ export interface BulkActionsSetters {
   setShowToast: (
     message: string,
     type?: 'success' | 'error' | 'warning',
-    undoAction?: (() => void) | null
+    undoAction?: (() => void | Promise<void>) | null
   ) => void;
   loadInboxes: () => Promise<void>;
   showConfirm: (message: string, onConfirm: () => void) => void;
@@ -44,29 +47,35 @@ export async function archiveSelected(
 ) {
   try {
     const count = state.selectedAddresses.size;
-    const result = (await ext.storage.local.get(['inboxes'])) as { inboxes?: Account[] };
-    const inboxes = result.inboxes || [];
-    const archivedInboxes = inboxes.filter((i: Account) => state.selectedAddresses.has(i.id));
-    const updated = inboxes.map((i) =>
-      state.selectedAddresses.has(i.id) ? { ...i, accountStatus: 'archived' as const } : i
-    );
-    await ext.storage.local.set({ inboxes: updated });
+    let archivedInboxes: Account[] = [];
+    await withInboxLock(async () => {
+      const result = (await ext.storage.local.get(['inboxes'])) as { inboxes?: Account[] };
+      const inboxes = result.inboxes || [];
+      archivedInboxes = inboxes.filter((i: Account) => state.selectedAddresses.has(i.id));
+      const updated = inboxes.map((i) =>
+        state.selectedAddresses.has(i.id) ? { ...i, accountStatus: 'archived' as const } : i
+      );
+      await ext.storage.local.set({ inboxes: updated });
+    });
     await setters.loadInboxes();
     setters.setSelectedAddresses(new Set());
-    setters.setShowToast(`${count} email(s) archived`, 'success', async () => {
+    setters.setShowToast(await t('toasts.emailsArchivedCount', { count }), 'success', async () => {
       // Undo: restore archived inboxes
-      const currentResult = (await ext.storage.local.get(['inboxes'])) as { inboxes?: Account[] };
-      const currentInboxes = currentResult.inboxes || [];
-      const restored = currentInboxes.map((i: Account) => {
-        const wasArchived = archivedInboxes.find((a) => a.id === i.id);
-        return wasArchived ? { ...i, accountStatus: 'active' as const } : i;
+      await withInboxLock(async () => {
+        const currentResult = (await ext.storage.local.get(['inboxes'])) as { inboxes?: Account[] };
+        const currentInboxes = currentResult.inboxes || [];
+        const restored = currentInboxes.map((i: Account) => {
+          const wasArchived = archivedInboxes.find((a) => a.id === i.id);
+          return wasArchived ? { ...i, accountStatus: 'active' as const } : i;
+        });
+        await ext.storage.local.set({ inboxes: restored });
       });
-      await ext.storage.local.set({ inboxes: restored });
       await setters.loadInboxes();
-      setters.setShowToast('Archive undone');
+      setters.setShowToast(await t('toasts.archiveUndone'));
     });
-  } catch (_e) {
-    setters.setShowToast('Failed to archive', 'error');
+  } catch (e) {
+    logError('Bulk archiving of selected inboxes failed', e);
+    setters.setShowToast(await t('toasts.archiveFailed'), 'error');
   }
 }
 
@@ -77,42 +86,64 @@ export async function unarchiveSelected(
 ) {
   try {
     const count = state.selectedAddresses.size;
-    const result = (await ext.storage.local.get(['inboxes'])) as { inboxes?: Account[] };
-    const inboxes = result.inboxes || [];
+    let actualUnarchivedCount = 0;
+    let showUnarchiveFailed = false;
+    let showWarning = false;
+    let warningCount = 0;
 
-    // Filter out expired emails that cannot be unarchived
-    const canUnarchiveIds = new Set<string>();
-    for (const id of state.selectedAddresses) {
-      const inbox = inboxes.find((i) => i.id === id);
-      if (inbox && canUnarchive(inbox)) {
-        canUnarchiveIds.add(id);
+    await withInboxLock(async () => {
+      const result = (await ext.storage.local.get(['inboxes'])) as { inboxes?: Account[] };
+      const inboxes = result.inboxes || [];
+
+      // Filter out expired emails that cannot be unarchived
+      const canUnarchiveIds = new Set<string>();
+      for (const id of state.selectedAddresses) {
+        const inbox = inboxes.find((i) => i.id === id);
+        if (inbox && canUnarchive(inbox)) {
+          canUnarchiveIds.add(id);
+        }
       }
-    }
 
-    if (canUnarchiveIds.size === 0) {
-      setters.setShowToast(
-        'No emails can be unarchived (expired emails cannot be unarchived)',
-        'error'
+      if (canUnarchiveIds.size === 0) {
+        showUnarchiveFailed = true;
+        return;
+      }
+
+      if (canUnarchiveIds.size < state.selectedAddresses.size) {
+        showWarning = true;
+        warningCount = canUnarchiveIds.size;
+      }
+
+      const updated = inboxes.map((i) =>
+        canUnarchiveIds.has(i.id) ? { ...i, accountStatus: 'active' as const } : i
       );
+      await ext.storage.local.set({ inboxes: updated });
+      actualUnarchivedCount = canUnarchiveIds.size;
+    });
+
+    if (showUnarchiveFailed) {
+      setters.setShowToast(await t('toasts.noEmailsCanBeUnarchived'), 'error');
       return;
     }
 
-    if (canUnarchiveIds.size < state.selectedAddresses.size) {
+    if (showWarning) {
       setters.setShowToast(
-        `${canUnarchiveIds.size} of ${count} email(s) can be unarchived (expired emails cannot be unarchived)`,
+        await t('toasts.someEmailsCanBeUnarchived', { unarchivedCount: warningCount, count }),
         'warning'
       );
     }
 
-    const updated = inboxes.map((i) =>
-      canUnarchiveIds.has(i.id) ? { ...i, accountStatus: 'active' as const } : i
-    );
-    await ext.storage.local.set({ inboxes: updated });
-    await setters.loadInboxes();
-    setters.setSelectedAddresses(new Set());
-    setters.setShowToast(`${canUnarchiveIds.size} email(s) unarchived`, 'success');
-  } catch (_e) {
-    setters.setShowToast('Failed to unarchive', 'error');
+    if (actualUnarchivedCount > 0) {
+      await setters.loadInboxes();
+      setters.setSelectedAddresses(new Set());
+      setters.setShowToast(
+        await t('toasts.emailsUnarchivedCount', { count: actualUnarchivedCount }),
+        'success'
+      );
+    }
+  } catch (e) {
+    logError('Bulk unarchiving of selected inboxes failed', e);
+    setters.setShowToast(await t('toasts.unarchiveFailed'), 'error');
   }
 }
 
@@ -121,44 +152,46 @@ export async function deleteSelected(
   state: BulkActionsState,
   setters: BulkActionsSetters
 ) {
-  setters.showConfirm(
-    `Permanently delete ${state.selectedAddresses.size} inbox(es) from this extension? This cannot be undone.`,
-    async () => {
-      try {
-        const count = state.selectedAddresses.size;
-        const storageSnapshot = (await ext.storage.local.get([
-          'inboxes',
-          'storedEmails',
-          'archivedEmails',
-          'readEmails',
-          'starredEmails',
-          'seenEmailIds',
-          'lastMessageTimestamps',
-        ])) as {
-          inboxes?: Account[];
-          storedEmails?: Record<string, Email[]>;
-          archivedEmails?: Record<string, Email[]>;
-          readEmails?: Record<string, boolean>;
-          starredEmails?: string[];
-          seenEmailIds?: Record<string, string[]>;
-          lastMessageTimestamps?: Record<string, number>;
-        };
-        const deletedInboxes = (storageSnapshot.inboxes || []).filter((inbox) =>
-          state.selectedAddresses.has(inbox.id)
-        );
+  const count = state.selectedAddresses.size;
+  const confirmMsg = await t('toasts.deleteConfirmMessage', { count });
+  setters.showConfirm(confirmMsg, async () => {
+    try {
+      const storageSnapshot = (await ext.storage.local.get([
+        'inboxes',
+        'storedEmails',
+        'archivedEmails',
+        'readEmails',
+        'starredEmails',
+        'seenEmailIds',
+        'lastMessageTimestamps',
+      ])) as {
+        inboxes?: Account[];
+        storedEmails?: Record<string, Email[]>;
+        archivedEmails?: Record<string, Email[]>;
+        readEmails?: Record<string, boolean>;
+        starredEmails?: string[];
+        seenEmailIds?: Record<string, string[]>;
+        lastMessageTimestamps?: Record<string, number>;
+      };
+      const deletedInboxes = (storageSnapshot.inboxes || []).filter((inbox) =>
+        state.selectedAddresses.has(inbox.id)
+      );
 
-        for (const id of state.selectedAddresses) {
-          const result = await ext.runtime.sendMessage({
-            type: 'deleteInbox',
-            inboxId: id,
-            preserveEmails: false,
-          });
-          if (!result?.success) {
-            throw new Error(result?.error || `Failed to delete inbox ${id}`);
-          }
+      for (const id of state.selectedAddresses) {
+        const result = await ext.runtime.sendMessage({
+          type: 'deleteInbox',
+          inboxId: id,
+          preserveEmails: false,
+        });
+        if (!result?.success) {
+          throw new Error(result?.error || `Failed to delete inbox ${id}`);
         }
-        await setters.loadInboxes();
-        setters.setShowToast(`${count} inbox(es) permanently deleted`, 'success', async () => {
+      }
+      await setters.loadInboxes();
+      setters.setShowToast(
+        await t('toasts.inboxesDeletedCount', { count }),
+        'success',
+        async () => {
           const current = (await ext.storage.local.get([
             'inboxes',
             'storedEmails',
@@ -210,15 +243,16 @@ export async function deleteSelected(
             lastMessageTimestamps,
           });
           await setters.loadInboxes();
-          setters.setShowToast('Delete undone');
-        });
-        setters.setSelectedAddresses(new Set());
-        setters.closeConfirm();
-      } catch (_e) {
-        setters.setShowToast('Failed to delete', 'error');
-      }
+          setters.setShowToast(await t('toasts.deleteUndone'));
+        }
+      );
+      setters.setSelectedAddresses(new Set());
+      setters.closeConfirm();
+    } catch (e) {
+      logError('Bulk deletion of selected inboxes failed', e);
+      setters.setShowToast(await t('toasts.deleteFailed'), 'error');
     }
-  );
+  });
 }
 
 export async function exportSelected(

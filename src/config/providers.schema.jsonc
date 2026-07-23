@@ -1,20 +1,13 @@
 // =============================================================================
 // JSON Schema for the providers DSL (providers.jsonc).
 //
-// This schema is intentionally NOT enforced at runtime — it serves as
+// This schema is intentionally NOT enforced at runtime - it serves as
 // documentation and editor intellisense. Provider configs are validated by
 // src/utils/provider-validation.ts which performs a hand-rolled structural
 // check. Keep this file in sync with the ProviderConfig / OperationConfig
 // TypeScript interfaces in src/utils/email-service.ts.
 //
-// KNOWN DRIFT (tracked in AUDIT.md §A):
-//   - successPath accepts null at runtime (Burner fetchEmails)
-//   - renewalMethod accepts null at runtime (Burner)
-//   - canUnarchive accepts "ifNotExpired" string in addition to boolean
-//   - multiDomain block is not declared here
-//   - multiInstance.instances[] array is not declared here
-//   - emailFetching, ui, retry blocks are not declared here
-//   - randomSelectionDefault is declared but never used
+// Keep this schema in sync with ProviderConfig / OperationConfig.
 // =============================================================================
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
@@ -39,16 +32,24 @@
       },
       "auth": {
         "type": "object",
-        "required": ["type", "paramName", "description"],
+        "required": ["type", "description"],
         "properties": {
           "type": {
             "type": "string",
-            "enum": ["query_parameter", "header"],
+            "enum": ["query_parameter", "header", "cookie", "bearer", "none"],
             "description": "Authentication method type"
           },
           "paramName": {
             "type": "string",
             "description": "Parameter or header name for the auth token"
+          },
+          "headerName": {
+            "type": "string",
+            "description": "Header name for header auth"
+          },
+          "cookieName": {
+            "type": "string",
+            "description": "Cookie name for cookie auth"
           },
           "description": {
             "type": "string",
@@ -81,6 +82,19 @@
             // the null case.
             "type": ["string", "null"],
             "description": "Operation name used for renewal (null if non-renewable)"
+          },
+          "strategy": {
+            "type": "string",
+            "enum": ["relative", "absolute", "ttl"],
+            "description": "Expiry calculation strategy"
+          },
+          "fields": {
+            "type": "object",
+            "properties": {
+              "createdAt": { "type": "string" },
+              "expiresAt": { "type": "string" },
+              "ttl": { "type": "string" }
+            }
           }
         }
       },
@@ -116,6 +130,81 @@
           }
         }
       },
+      "retry": {
+        "type": "object",
+        "required": ["maxAttempts", "delayMs", "backoffMultiplier"],
+        "properties": {
+          "maxAttempts": { "type": "number" },
+          "delayMs": { "type": "number" },
+          "backoffMultiplier": { "type": "number" },
+          "retryOn": {
+            "type": "array",
+            "items": { "type": "number" },
+            "description": "HTTP status codes to trigger retry on"
+          }
+        }
+      },
+      "emailFetching": {
+        "type": "object",
+        "required": ["type"],
+        "properties": {
+          "type": { "type": "string", "enum": ["single_step", "multi_step"] },
+          "operation": { "type": ["string", "null"] },
+          "dataPath": { "type": ["string", "null"] },
+          "responseMapping": {
+            "type": ["object", "null"],
+            "additionalProperties": { "$ref": "#/definitions/fieldMapping" }
+          },
+          "listOperation": { "type": "string" },
+          "listPath": { "type": "string" },
+          "listItemIdField": { "type": "string" },
+          "detailOperation": { "type": "string" },
+          "detailItemIdParam": { "type": "string" },
+          "detailResponseMapping": {
+            "type": "object",
+            "additionalProperties": { "$ref": "#/definitions/fieldMapping" }
+          },
+          "selectMailboxOperation": { "type": "string" },
+          "selectMailboxVariable": { "type": "string" },
+          "sequenceTracking": {
+            "type": "object",
+            "required": ["enabled", "sequenceField", "listSequenceField", "sequenceOperation"],
+            "properties": {
+              "enabled": { "type": "boolean" },
+              "sequenceField": { "type": "string" },
+              "listSequenceField": { "type": "string" },
+              "sequenceOperation": { "type": "string", "enum": ["max", "last"] }
+            }
+          },
+          "attachmentMapping": {
+            "type": "object",
+            "required": ["enabled", "path", "fields"],
+            "properties": {
+              "enabled": { "type": "boolean" },
+              "path": { "type": "string" },
+              "fields": {
+                "type": "object",
+                "required": ["filename", "mimeType"],
+                "properties": {
+                  "filename": { "type": "string" },
+                  "mimeType": { "type": "string" },
+                  "partNumber": { "type": ["string", "null"] },
+                  "downloadUrl": { "type": ["string", "null"] }
+                }
+              }
+            }
+          },
+          "pagination": {
+            "type": "object",
+            "required": ["type", "paramName", "pageSize"],
+            "properties": {
+              "type": { "type": "string", "enum": ["offset", "page", "cursor"] },
+              "paramName": { "type": "string" },
+              "pageSize": { "type": "number" }
+            }
+          }
+        }
+      },
       "forceNewSession": {
         "type": "object",
         "properties": {
@@ -141,6 +230,18 @@
           }
         }
       },
+      "ui": {
+        "type": "object",
+        "properties": {
+          "canUnarchive": { "type": ["boolean", "string"], "enum": [true, false, "ifNotExpired"] },
+          "supportsCustomEmail": { "type": "boolean" },
+          "multiInstance": { "type": "boolean" },
+          "supportsCustomInstance": { "type": "boolean" },
+          "icon": { "type": "string" },
+          "color": { "type": "string" },
+          "description": { "type": "string" }
+        }
+      },
       "multiInstance": {
         "type": "object",
         "properties": {
@@ -153,8 +254,6 @@
             "description": "Whether to randomly select instance by default"
           },
           "instances": {
-            // NOTE: not previously declared in the schema. Added for
-            // completeness — runtime data has this array (Burner).
             "type": "array",
             "description": "Available instances for multi-instance providers",
             "items": {
@@ -170,8 +269,21 @@
           }
         }
       },
+      "cookies": {
+        "type": "object",
+        "properties": {
+          "capture": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Cookie names to capture from Set-Cookie headers"
+          },
+          "send": {
+            "type": "boolean",
+            "description": "Whether to send captured cookies on requests"
+          }
+        }
+      },
       "multiDomain": {
-        // NOTE: not previously declared in the schema. Added for Guerrilla.
         "type": "object",
         "properties": {
           "enabled": {
@@ -183,6 +295,36 @@
             "items": { "type": "string" },
             "description": "Available domains for the provider"
           }
+        }
+      },
+      "responseHeaders": {
+        "type": "object",
+        "properties": {
+          "capture": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Response headers to capture and store as session variables"
+          }
+        }
+      },
+      "capabilities": {
+        "type": "object",
+        "properties": {
+          "supportsAttachments": { "type": "boolean" },
+          "supportsDelete": { "type": "boolean" },
+          "supportsRenew": { "type": "boolean" },
+          "supportsPagination": { "type": "boolean" },
+          "supportsCustomEmail": { "type": "boolean" },
+          "supportsMultipleInstances": { "type": "boolean" }
+        }
+      },
+      "metadata": {
+        "type": "object",
+        "properties": {
+          "website": { "type": "string", "format": "uri" },
+          "family": { "type": "string" },
+          "apiVersion": { "type": "string" },
+          "documentationUrl": { "type": "string", "format": "uri" }
         }
       }
     }
@@ -205,13 +347,18 @@
           "type": "object",
           "description": "Required parameters with template variable support"
         },
+        "bodyType": {
+          "type": "string",
+          "enum": ["json", "form", "none"],
+          "description": "Request body type for POST/PUT/PATCH/DELETE requests"
+        },
         "optionalParams": {
           "type": "object",
           "description": "Optional parameters with template variable support"
         },
         "response": {
           "type": "object",
-          "required": ["fields", "errorHandling"],
+          "required": ["fields"],
           "properties": {
             "successPath": {
               // Runtime accepts null (Burner fetchEmails) and "!" negation
@@ -225,7 +372,29 @@
             },
             "fields": {
               "type": "object",
-              "description": "Field mappings from API response to internal format"
+              "description": "Field mappings from API response to internal format",
+              "additionalProperties": { "$ref": "#/definitions/fieldMapping" }
+            },
+            "allowEmptyBody": {
+              "type": "boolean",
+              "description": "Whether an empty body response is allowed"
+            },
+            "emptyMeansError": {
+              "type": "boolean",
+              "description": "Whether an empty response is considered an error"
+            },
+            "requiredFields": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Keys required to be present on the parsed response object"
+            },
+            "schema": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string",
+                "enum": ["string", "number", "boolean", "object", "array"]
+              },
+              "description": "Explicit JSON response schema contract validation rules"
             }
           }
         },
@@ -242,8 +411,39 @@
               "description": "Path to error message in response"
             }
           }
+        },
+        "responseType": {
+          "type": "string",
+          "enum": ["json", "boolean", "text", "empty"],
+          "description": "Expected response payload type (default is json)"
+        },
+        "statusHandling": {
+          "type": "object",
+          "properties": {
+            "ignoreStatus": { "type": "boolean" },
+            "require2xx": { "type": "boolean" },
+            "allowedStatuses": { "type": "array", "items": { "type": "number" } }
+          }
         }
       }
+    },
+    "fieldMapping": {
+      "anyOf": [
+        { "type": "string" },
+        {
+          "type": "object",
+          "required": ["path"],
+          "properties": {
+            "path": { "type": "string" },
+            "transform": {
+              "anyOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }]
+            },
+            "default": {
+              "description": "Default fallback value if path is missing or null"
+            }
+          }
+        }
+      ]
     }
   }
 }

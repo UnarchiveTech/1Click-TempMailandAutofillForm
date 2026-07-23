@@ -9,12 +9,5 @@ node_modules/
 
 package-lock.json
 
-
 .DS_Store
 *.log
-
-.commandcode/taste/taste.md
-docs/BUNDLE_OPTIMIZATION.md
-reference/
-docs/OTP_EXTRACTION.md
-AUDIT.md

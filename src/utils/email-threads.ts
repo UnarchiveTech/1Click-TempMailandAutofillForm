@@ -1,3 +1,4 @@
+import { toMs } from './time.js';
 import type { Email } from './types.js';
 
 export interface EmailThread {
@@ -13,15 +14,14 @@ export interface EmailThread {
  * Strip common reply/forward prefixes and normalize whitespace
  */
 export function normalizeSubject(subject: string): string {
-  return subject
-    .toLowerCase()
-    .replace(/^(re|fwd?|fw|aw|回复|回覆|答复|vidarebefordra|sv|vs|tr|rif):\s*/gi, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function toMs(receivedAt: number): number {
-  return receivedAt > 1_000_000_000_000 ? receivedAt : receivedAt * 1000;
+  let cleaned = subject.toLowerCase().trim();
+  const prefixRegex = /^(re|fwd?|fw|aw|回复|回覆|答复|vidarebefordra|sv|vs|tr|rif):\s*/i;
+  let previous = '';
+  while (cleaned !== previous) {
+    previous = cleaned;
+    cleaned = cleaned.replace(prefixRegex, '').trim();
+  }
+  return cleaned.replace(/\s+/g, ' ').trim();
 }
 
 /**
@@ -60,7 +60,14 @@ export function groupEmailsByThread(emails: Email[]): EmailThread[] {
         const threadLatestMs = toMs(thread.latestEmail.received_at);
         const withinWindow = Math.abs(threadLatestMs - emailMs) < 72 * 60 * 60 * 1000;
 
-        if (overlap || withinWindow) {
+        // Domain check for pure time-proximity match to prevent different OTP services grouping together
+        const getDomain = (emailAddr?: string) => emailAddr?.split('@')[1]?.toLowerCase() || '';
+        const emailFromDomain = getDomain(email.from);
+        const threadFromDomain = getDomain(thread.latestEmail.from);
+        const sameDomain =
+          emailFromDomain && threadFromDomain && emailFromDomain === threadFromDomain;
+
+        if (overlap || (withinWindow && sameDomain)) {
           matched = thread;
           break;
         }
@@ -86,7 +93,7 @@ export function groupEmailsByThread(emails: Email[]): EmailThread[] {
       if (!subjectThreads.has(norm)) {
         subjectThreads.set(norm, []);
       }
-      subjectThreads.get(norm)!.push(thread);
+      subjectThreads.get(norm)?.push(thread);
     }
   }
 

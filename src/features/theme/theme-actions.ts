@@ -1,3 +1,4 @@
+import { browser } from 'wxt/browser';
 import { applyThemeFromSeed } from '@/utils/theme-generator.js';
 
 export type ThemeMode = 'light' | 'system' | 'dark';
@@ -33,7 +34,7 @@ export async function toggleTheme(state: ThemeState, setters: ThemeSetters, ext:
   setters.setThemeMode(newMode);
   applyTheme(newMode, state.contrastLevel);
   await reapplyCustomColor(state.customColor);
-  ext.storage.local.set({ themeMode: newMode });
+  await ext.storage.local.set({ themeMode: newMode });
 }
 
 /**
@@ -54,7 +55,7 @@ export async function setThemeMode(
   setters.setThemeMode(mode);
   applyTheme(mode, contrastLevel);
   await reapplyCustomColor(customColor);
-  ext.storage.local.set({ themeMode: mode });
+  await ext.storage.local.set({ themeMode: mode });
 }
 
 /**
@@ -71,6 +72,9 @@ export function applyTheme(themeMode: ThemeMode, contrastLevel: ContrastLevel = 
   }
   const themeValue = `${isDark ? 'dark' : 'light'}-${contrastLevel}`;
   document.documentElement.setAttribute('data-theme', themeValue);
+  setTimeout(() => {
+    void syncThemeColors();
+  }, 50);
 }
 
 /**
@@ -112,7 +116,7 @@ export async function setContrastLevel(
   setters.setContrastLevel(level);
   applyTheme(themeMode, level);
   await reapplyCustomColor(customColor);
-  ext.storage.local.set({ contrastLevel: level });
+  await ext.storage.local.set({ contrastLevel: level });
 }
 
 export async function reapplyCustomColor(customColor: string) {
@@ -120,6 +124,7 @@ export async function reapplyCustomColor(customColor: string) {
     await applyCustomColor(customColor);
   }
 }
+
 export async function applyCustomColor(customColor: string) {
   if (customColor) {
     // Get current theme mode and contrast level from data-theme attribute
@@ -137,7 +142,7 @@ export async function applyCustomColor(customColor: string) {
     const contrastLevel = contrastLevelMap[contrastLevelStr] || 0;
 
     // Generate full Material Design color scheme from the seed color
-    applyThemeFromSeed(customColor, isDark, contrastLevel);
+    await applyThemeFromSeed(customColor, isDark, contrastLevel);
   } else {
     // Remove all inline CSS custom properties set by applyThemeFromSeed
     const root = document.documentElement;
@@ -166,6 +171,18 @@ export async function applyCustomColor(customColor: string) {
       '--md-on-surface-variant',
       '--md-outline',
       '--md-outline-variant',
+      '--md-surface-container-lowest',
+      '--md-surface-container-low',
+      '--md-surface-container',
+      '--md-surface-container-high',
+      '--md-surface-container-highest',
+      '--md-inverse-surface',
+      '--md-inverse-on-surface',
+      '--md-inverse-primary',
+      '--md-shadow',
+      '--md-scrim',
+      '--md-surface-bright',
+      '--md-surface-dim',
       '--md-success',
       '--md-on-success',
       '--md-warning',
@@ -173,6 +190,72 @@ export async function applyCustomColor(customColor: string) {
     ];
     for (const prop of propsToRemove) {
       root.style.removeProperty(prop);
+    }
+  }
+  await syncThemeColors();
+}
+
+export async function syncThemeColors(): Promise<void> {
+  if (typeof document === 'undefined') return;
+  const root = document.documentElement;
+  const computedStyle = getComputedStyle(root);
+  const colors: Record<string, string> = {};
+
+  const props = [
+    '--md-primary',
+    '--md-on-primary',
+    '--md-primary-container',
+    '--md-on-primary-container',
+    '--md-secondary',
+    '--md-on-secondary',
+    '--md-secondary-container',
+    '--md-on-secondary-container',
+    '--md-tertiary',
+    '--md-on-tertiary',
+    '--md-tertiary-container',
+    '--md-on-tertiary-container',
+    '--md-error',
+    '--md-on-error',
+    '--md-error-container',
+    '--md-on-error-container',
+    '--md-background',
+    '--md-on-background',
+    '--md-surface',
+    '--md-on-surface',
+    '--md-surface-variant',
+    '--md-on-surface-variant',
+    '--md-outline',
+    '--md-outline-variant',
+    '--md-surface-container-lowest',
+    '--md-surface-container-low',
+    '--md-surface-container',
+    '--md-surface-container-high',
+    '--md-surface-container-highest',
+    '--md-inverse-surface',
+    '--md-inverse-on-surface',
+    '--md-inverse-primary',
+    '--md-shadow',
+    '--md-scrim',
+    '--md-surface-bright',
+    '--md-surface-dim',
+    '--md-success',
+    '--md-on-success',
+    '--md-warning',
+    '--md-on-warning',
+  ];
+
+  for (const prop of props) {
+    const val = root.style.getPropertyValue(prop) || computedStyle.getPropertyValue(prop);
+    if (val) {
+      colors[prop] = val.trim();
+    }
+  }
+
+  if (Object.keys(colors).length > 0) {
+    try {
+      await browser.storage.local.set({ themeColors: colors });
+    } catch {
+      // ignore storage write errors
     }
   }
 }

@@ -1,6 +1,7 @@
 import type { ToastType } from '@/components/feedback/Toast.svelte';
 import { loadProviderConfig } from '@/utils/email-service.js';
 import { getErrorMessage } from '@/utils/errors.js';
+import { t } from '@/utils/i18n-utils.js';
 import { detectIconFromMessage } from '@/utils/iconMapping.js';
 import { logError } from '@/utils/logger.js';
 import type { Account, Email } from '@/utils/types.js';
@@ -24,7 +25,7 @@ export interface ManagementSetters {
         }
       | string,
     type?: ToastType,
-    undoAction?: (() => void) | null
+    undoAction?: (() => void | Promise<void>) | null
   ) => void;
   loadInboxes: (skipEmailSelection?: boolean) => Promise<void>;
   setDropdownOpen: (open: boolean) => void;
@@ -57,11 +58,53 @@ export async function toggleAutoExtend(ext: Browser, account: Account, setters: 
       );
     }
     await setters.loadInboxes(true);
-    const iconType = detectIconFromMessage(
-      `Auto-extend ${newAutoExtendValue ? 'enabled' : 'disabled'} for ${account.address}`
-    );
+
+    // Enabling auto-renew on an already-expired renewable address must renew now
+    // (dismissing the renew strip previously left the flag on without extending).
+    if (newAutoExtendValue) {
+      const now = Date.now();
+      const isExpired = account.expiresAt > 0 && account.expiresAt <= now;
+      if (isExpired && (await canRenew(account.provider))) {
+        try {
+          setters.setShowToast(await t('toasts.extendingExpiry'));
+          const renewResult = await ext.runtime.sendMessage({
+            type: 'renewInbox',
+            inboxId: account.id,
+          });
+          if (renewResult?.success) {
+            await setters.loadInboxes(true);
+            setters.setShowToast({
+              message: await t('toasts.autoExtendRenewed', { address: account.address }),
+              type: 'success',
+            });
+            return;
+          }
+          setters.setShowToast({
+            message: await t('toasts.autoExtendRenewFailed', { address: account.address }),
+            type: 'warning',
+          });
+          return;
+        } catch (renewErr) {
+          logError(
+            'toggleAutoExtend renew error:',
+            undefined,
+            renewErr instanceof Error ? renewErr : new Error(String(renewErr))
+          );
+          setters.setShowToast({
+            message: await t('toasts.autoExtendRenewFailed', { address: account.address }),
+            type: 'warning',
+          });
+          return;
+        }
+      }
+    }
+
+    const toggleMsg = newAutoExtendValue
+      ? await t('toasts.autoExtendEnabled', { address: account.address })
+      : await t('toasts.autoExtendDisabled', { address: account.address });
+    const iconType = detectIconFromMessage(toggleMsg);
     setters.setShowToast({
-      message: `Auto-extend ${newAutoExtendValue ? 'enabled' : 'disabled'} for ${account.address}`,
+      message: toggleMsg,
       type: iconType,
     });
   } catch (_e) {
@@ -130,7 +173,7 @@ export async function removeAccount(
 
     await setters.loadInboxes();
 
-    // Handle navigation after deletion — only if it was the active selected account
+    // Handle navigation after deletion - only if it was the active selected account
     if (wasActiveAndSelected) {
       const { inboxes: updatedInboxes = [] } = (await ext.storage.local.get(['inboxes'])) as {
         inboxes?: Account[];
@@ -165,7 +208,7 @@ export async function removeAccount(
         setters.setDropdownOpen(true);
       }
     }
-    // If account was already inactive (archived→deleted), keep current view — no navigation needed
+    // If account was already inactive (archived→deleted), keep current view - no navigation needed
     setters.setShowToast(
       { message: `Address ${acct.address} deleted`, type: 'success', icon: 'deleted' },
       undefined,
@@ -224,12 +267,15 @@ export async function removeAccount(
           lastMessageTimestamps,
         });
         await setters.loadInboxes(true);
-        setters.setShowToast('Delete undone');
+        setters.setShowToast(await t('toasts.deleteUndone'));
       }
     );
   } catch (error: unknown) {
     const msg = getErrorMessage(error);
-    setters.setShowToast({ message: `Failed to delete inbox: ${msg}`, type: 'error' });
+    setters.setShowToast({
+      message: await t('toasts.deleteInboxFailed', { msg }),
+      type: 'error',
+    });
   }
 }
 
@@ -280,7 +326,7 @@ export async function archiveAccount(
 
     setters.setShowToast(
       {
-        message: `Address ${account.address} archived`,
+        message: await t('toasts.addressArchived', { address: account.address }),
         type: 'success',
         icon: 'archived',
       },
@@ -288,12 +334,12 @@ export async function archiveAccount(
       async () => {
         await ext.runtime.sendMessage({ type: 'unarchiveInbox', inboxId: account.id });
         await setters.loadInboxes(true);
-        setters.setShowToast('Archive undone');
+        setters.setShowToast(await t('toasts.archiveUndone'));
       }
     );
   } catch (e) {
     logError('archiveAccount error:', undefined, e instanceof Error ? e : new Error(String(e)));
-    setters.setShowToast({ message: 'Failed to archive', type: 'error' });
+    setters.setShowToast({ message: await t('toasts.archiveFailed'), type: 'error' });
   }
 }
 
@@ -357,7 +403,9 @@ export function canUnarchive(account: Account): boolean {
   const canUnarchiveRule = config.ui?.canUnarchive;
 
   if (canUnarchiveRule === 'ifNotExpired') {
-    return account.status !== 'expired';
+    const isExpired = account.expiresAt > 0 && account.expiresAt <= Date.now();
+    const currentStatus = account.status || account.accountStatus;
+    return currentStatus !== 'expired' && !isExpired;
   } else if (canUnarchiveRule) {
     return true;
   }
@@ -378,11 +426,11 @@ async function canRenew(providerId: string): Promise<boolean> {
 export async function extendAccount(ext: Browser, account: Account, setters: ManagementSetters) {
   try {
     if (!(await canRenew(account.provider))) {
-      setters.setShowToast('Extend functionality is not available for this provider', 'error');
+      setters.setShowToast(await t('toasts.extendNotAvailable'), 'error');
       return;
     }
 
-    setters.setShowToast('Extending email expiry...');
+    setters.setShowToast(await t('toasts.extendingExpiry'));
 
     const result = await ext.runtime.sendMessage({
       type: 'renewInbox',
@@ -391,13 +439,14 @@ export async function extendAccount(ext: Browser, account: Account, setters: Man
 
     if (result.success) {
       await setters.loadInboxes();
-      const iconType = detectIconFromMessage('Email expiry extended successfully');
-      setters.setShowToast('Email expiry extended successfully', iconType);
+      const successMsg = await t('toasts.expiryExtended');
+      const iconType = detectIconFromMessage(successMsg);
+      setters.setShowToast(successMsg, iconType);
     } else {
-      setters.setShowToast('Failed to extend email expiry', 'error');
+      setters.setShowToast(await t('toasts.expiryExtendFailed'), 'error');
     }
   } catch (e) {
     logError('extendAccount error:', undefined, e instanceof Error ? e : new Error(String(e)));
-    setters.setShowToast('Failed to extend email expiry', 'error');
+    setters.setShowToast(await t('toasts.expiryExtendFailed'), 'error');
   }
 }

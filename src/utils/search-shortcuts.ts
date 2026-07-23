@@ -12,6 +12,8 @@ export interface ParsedSearchQuery {
   senderDomain: string;
   /** Sender email filter */
   senderEmail: string;
+  /** Recipient address filter */
+  recipient: string;
   /** Subject filter */
   subject: string;
   /** Highlight terms for UI */
@@ -36,6 +38,7 @@ export function parseSearchShortcuts(query: string): ParsedSearchQuery {
     otpOnly: false,
     senderDomain: '',
     senderEmail: '',
+    recipient: '',
     subject: '',
     highlightTerms: [],
   };
@@ -74,7 +77,7 @@ export function parseSearchShortcuts(query: string): ParsedSearchQuery {
     // Parse to:address
     const toMatch = token.match(/^to:(.+)$/i);
     if (toMatch) {
-      // Could be used for recipient filtering in the future
+      result.recipient = toMatch[1].toLowerCase();
       result.highlightTerms.push(token);
       continue;
     }
@@ -111,11 +114,22 @@ function tokenizeQuery(query: string): string[] {
   for (let i = 0; i < query.length; i++) {
     const char = query[i];
 
+    // Backslash escape inside a quoted string: \" or \' or \\
+    if (char === '\\' && inQuotes && i + 1 < query.length) {
+      const next = query[i + 1];
+      if (next === quoteChar || next === '\\') {
+        currentToken += next;
+        i++;
+        continue;
+      }
+    }
+
     if ((char === '"' || char === "'") && !inQuotes) {
       inQuotes = true;
       quoteChar = char;
     } else if (char === quoteChar && inQuotes) {
       inQuotes = false;
+      quoteChar = '';
     } else if (char === ' ' && !inQuotes) {
       if (currentToken.trim()) {
         tokens.push(currentToken.trim());
@@ -143,31 +157,45 @@ function tokenizeQuery(query: string): string[] {
 export function highlightMatches(
   text: string,
   terms: string[],
-  highlightClass: string = 'bg-yellow-200 dark:bg-yellow-800'
+  highlightClass: string = 'bg-md-primary-container text-md-on-primary-container rounded px-0.5'
 ): string {
-  if (!text || !terms.length) {
-    return text.replace(
-      /[&<>"']/g,
-      (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[m] || m
-    );
-  }
+  if (!text) return '';
 
+  // Escape HTML characters first
   let result = text.replace(
     /[&<>"']/g,
     (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[m] || m
   );
-  const uniqueTerms = [...new Set(terms.map((t) => t.toLowerCase()))];
 
-  for (const term of uniqueTerms) {
-    // Skip shortcut syntax in highlighting
-    if (term.includes(':')) continue;
+  if (!terms?.length) {
+    return result;
+  }
 
-    const escapedTermHtml = term.replace(
-      /[&<>"']/g,
-      (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[m] || m
-    );
-    const regex = new RegExp(`(${escapeRegex(escapedTermHtml)})`, 'gi');
+  // Filter, sanitize, and sort terms by length descending so longer terms match first
+  const validTerms = terms
+    .map((t) => t.trim().toLowerCase())
+    .filter((t) => t.length > 0 && t.length <= 100 && !t.includes(':'));
+
+  if (validTerms.length === 0) {
+    return result;
+  }
+
+  const uniqueTerms = [...new Set(validTerms)].sort((a, b) => b.length - a.length);
+
+  try {
+    const escapedTerms = uniqueTerms.map((term) => {
+      const escapedTermHtml = term.replace(
+        /[&<>"']/g,
+        (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[m] || m
+      );
+      return escapeRegex(escapedTermHtml);
+    });
+
+    const pattern = `(${escapedTerms.join('|')})`;
+    const regex = new RegExp(pattern, 'gi');
     result = result.replace(regex, `<mark class="${highlightClass}">$1</mark>`);
+  } catch {
+    // Ignore compilation errors
   }
 
   return result;

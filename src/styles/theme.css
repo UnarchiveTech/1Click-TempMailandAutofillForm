@@ -1,3 +1,9 @@
+/**
+ * MD3 color theme tokens (light/dark × contrast).
+ * GENERATED/overwritten by: bun scripts/generate-theme.ts
+ * Do not put app layout utilities here — use src/styles.css.
+ */
+
 :root[data-theme="light-standard"] {
   color-scheme: light;
   --md-primary: #4c662b;

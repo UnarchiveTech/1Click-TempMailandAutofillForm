@@ -7,4 +7,5 @@ const api =
 (window as { browser?: unknown; chrome?: unknown }).browser = api;
 (window as { browser?: unknown; chrome?: unknown }).chrome = api;
 
-mount(App, { target: document.getElementById('app')! });
+const target = document.getElementById('app');
+if (target) mount(App, { target });

@@ -20,7 +20,10 @@ export function randomIntBetween(minInclusive: number, maxInclusive: number): nu
 export function randomChance(probability: number): boolean {
   if (probability <= 0) return false;
   if (probability >= 1) return true;
-  return randomInt(1_000_000) < probability * 1_000_000;
+  // Use a large power-of-two bucket count to avoid floating-point rounding skew.
+  // UINT32_RANGE (2^32) is evenly divisible by itself, so every bucket is equal-sized.
+  const bucket = randomInt(0x10000); // 65536 equal buckets - enough precision for any UI probability
+  return bucket < Math.round(probability * 0x10000);
 }
 
 export function randomItem<T>(items: readonly T[]): T | undefined {

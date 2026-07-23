@@ -54,6 +54,18 @@ export function getRootDomain(domain: string): string {
     'police.uk',
     'mod.uk',
     'sch.uk',
+    'com.br',
+    'co.jp',
+    'com.cn',
+    'co.in',
+    'com.in',
+    'com.sg',
+    'com.hk',
+    'com.tw',
+    'com.mx',
+    'com.tr',
+    'com.pe',
+    'com.pk',
   ];
   const tld = parts.slice(-2).join('.');
 
@@ -74,7 +86,7 @@ export function getRootDomain(domain: string): string {
         'shop',
         'store',
       ];
-      if (commonSubdomains.includes(firstPart) || firstPart.includes('-')) {
+      if (commonSubdomains.includes(firstPart)) {
         return parts.slice(-2).join('.');
       }
       return domain;
@@ -211,9 +223,9 @@ async function storeCache<T>(key: string, data: T): Promise<void> {
 
     if (!canWrite) {
       if (shouldPromptPermission) {
-        logDebug('favicon: storage near/at limit — permission prompt needed');
+        logDebug('favicon: storage near/at limit - permission prompt needed');
       }
-      logDebug('favicon: skipping browser.storage.local write — storage full');
+      logDebug('favicon: skipping browser.storage.local write - storage full');
       return;
     }
 
@@ -284,35 +296,39 @@ export async function setFaviconCacheError(domain: string): Promise<void> {
   await storeCache(FAVICON_ERROR_CACHE_KEY, errorCache);
 }
 
+/**
+ * Return cached favicon URL if present.
+ * Stale entries (older than CACHE_DURATION) are still returned - caller may
+ * revalidate in the background. We never drop a good icon just because it aged.
+ */
 export async function getCachedFaviconUrl(domain: string): Promise<string | null> {
-  let cache = await getFaviconCache();
-  cache = cleanExpiredEntries(cache);
-  const entry = cache[domain];
-  if (!entry) {
-    // Persist cleaned cache if anything expired
-    const newCache = await getFaviconCache();
-    if (Object.keys(cache).length !== Object.keys(newCache).length) {
-      await storeCache(FAVICON_CACHE_KEY, cache);
-    }
-    return null;
-  }
-  return entry.webpDataUrl || entry.url || null;
+  const raw = await getFaviconCache();
+  const entry = raw[domain];
+  return entry ? entry.webpDataUrl || entry.url || null : null;
+}
+
+/** True when cache entry is missing or older than CACHE_DURATION (needs revalidate). */
+export async function isFaviconCacheStale(domain: string): Promise<boolean> {
+  const raw = await getFaviconCache();
+  const entry = raw[domain];
+  if (!entry) return true;
+  return Date.now() - entry.timestamp > CACHE_DURATION;
 }
 
 export async function hasRecentFaviconError(domain: string): Promise<boolean> {
-  let cache = await getFaviconErrorCache();
-  cache = cleanExpiredEntries(cache);
-  const entry = cache[domain];
-  if (!entry) {
-    const newCache = await getFaviconErrorCache();
-    if (Object.keys(cache).length !== Object.keys(newCache).length) {
-      await storeCache(FAVICON_ERROR_CACHE_KEY, cache);
-    }
-    return false;
+  const raw = await getFaviconErrorCache();
+  const cleaned = cleanExpiredEntries(raw);
+  // Only prune error entries - success cache is kept (stale-while-revalidate)
+  if (Object.keys(cleaned).length !== Object.keys(raw).length) {
+    await storeCache(FAVICON_ERROR_CACHE_KEY, cleaned);
   }
-  return true;
+  return domain in cleaned;
 }
 
+/**
+ * Only clear a domain from success cache when explicitly requested
+ * (e.g. user wipe). Failed revalidations must NOT call this.
+ */
 export async function clearFaviconCache(domain: string): Promise<void> {
   const cache = await getFaviconCache();
   if (!(domain in cache)) return;

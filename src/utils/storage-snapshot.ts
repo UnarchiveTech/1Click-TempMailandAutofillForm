@@ -35,12 +35,16 @@ export async function restoreStorageSnapshot(
     'inboxes',
     'storedEmails',
     'archivedEmails',
+    'readEmails',
+    'starredEmails',
     'seenEmailIds',
     'lastMessageTimestamps',
   ])) as {
     inboxes?: Account[];
     storedEmails?: Record<string, Email[]>;
     archivedEmails?: Record<string, Email[]>;
+    readEmails?: Record<string, boolean>;
+    starredEmails?: string[];
     seenEmailIds?: Record<string, string[]>;
     lastMessageTimestamps?: Record<string, number>;
   };
@@ -72,12 +76,17 @@ export async function restoreStorageSnapshot(
     }
   }
 
+  const readEmails = { ...(current.readEmails || {}), ...(snapshot.readEmails || {}) };
+  const starredEmails = Array.from(
+    new Set([...(current.starredEmails || []), ...(snapshot.starredEmails || [])])
+  );
+
   await ext.storage.local.set({
     inboxes: restoredInboxes,
     storedEmails,
     archivedEmails,
-    readEmails: snapshot.readEmails || {},
-    starredEmails: snapshot.starredEmails || [],
+    readEmails,
+    starredEmails,
     seenEmailIds,
     lastMessageTimestamps,
   });

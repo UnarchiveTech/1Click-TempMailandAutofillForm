@@ -3,7 +3,6 @@ import { onMount } from 'svelte';
 import { t } from 'svelte-i18n';
 import { browser } from 'wxt/browser';
 import Icon from '@/components/icons/Icon.svelte';
-import SettingsSubNav from '@/components/ui/SettingsSubNav.svelte';
 import { STORAGE_LIMIT, STORAGE_WARNING_THRESHOLD } from '@/utils/constants.js';
 import { clearAllFaviconCache, getFaviconCacheStats } from '@/utils/favicon.js';
 import { logError } from '@/utils/logger.js';
@@ -65,12 +64,17 @@ const retentionOptions = [
   { value: 365, labelKey: 'storagePerformance.year1' },
 ];
 
-onMount(async () => {
-  storageUsageBytes = await getStorageUsage();
-  hasUnlimitedStorage = await hasUnlimitedStoragePermission();
-  _isFirefox = isFirefox();
-  await updateFaviconCacheCount();
-  loadStorageUsage();
+onMount(() => {
+  const init = async () => {
+    storageUsageBytes = await getStorageUsage();
+    hasUnlimitedStorage = await hasUnlimitedStoragePermission();
+    _isFirefox = isFirefox();
+    await updateFaviconCacheCount();
+    await loadStorageUsage();
+  };
+  init().catch((err) => {
+    logError('Failed to initialize storage view', undefined, err);
+  });
 });
 
 async function updateFaviconCacheCount() {
@@ -157,7 +161,7 @@ $effect(() => {
 
 <div class="flex flex-col h-full">
   <!-- Header -->
-  <div class="flex items-center gap-3 px-4 py-4 border-b border-md-secondary-container">
+  <div class="flex items-center gap-3 px-4 py-4 border-b border-md-outline-variant/30">
     <button
       class="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-md-secondary-container transition-colors"
       onclick={onBack}
@@ -171,7 +175,7 @@ $effect(() => {
     </div>
   </div>
 
-  <div class="flex-1 overflow-y-auto px-4 py-4 space-y-4">
+  <div class="flex-1 overflow-y-auto px-2 py-3 space-y-4">
 
     <!-- Favicon Caching Mode -->
     <section class="space-y-2">
@@ -194,13 +198,13 @@ $effect(() => {
             </button>
             {#if faviconCachingDropdownOpen}
               <button class="fixed inset-0 z-40 bg-transparent cursor-default" aria-label={$t('storagePerformance.closeDropdown')} onclick={() => faviconCachingDropdownOpen = false}></button>
-              <div class="absolute top-full right-0 mt-1 bg-md-primary-container rounded-xl shadow-lg border border-md-secondary-container z-50 min-w-[130px] overflow-hidden">
+              <div class="absolute top-full end-0 mt-1 bg-md-primary-container rounded-xl shadow-lg border border-md-secondary-container z-50 min-w-[130px] overflow-hidden">
                 <button
-                  class="w-full px-4 py-2 text-sm text-left hover:bg-md-secondary-container {faviconCaching === 'direct' ? 'font-semibold text-md-primary' : 'text-md-on-surface'}"
+                  class="w-full px-4 py-2 text-sm text-start hover:bg-md-secondary-container {faviconCaching === 'direct' ? 'font-semibold text-md-primary' : 'text-md-on-surface'}"
                   onclick={() => { onSetFaviconCaching?.('direct'); onSaveSettings(); faviconCachingDropdownOpen = false; }}
                 >{$t('storagePerformance.direct')}</button>
                 <button
-                  class="w-full px-4 py-2 text-sm text-left hover:bg-md-secondary-container {faviconCaching === 'local' ? 'font-semibold text-md-primary' : 'text-md-on-surface'}"
+                  class="w-full px-4 py-2 text-sm text-start hover:bg-md-secondary-container {faviconCaching === 'local' ? 'font-semibold text-md-primary' : 'text-md-on-surface'}"
                   onclick={() => { onSetFaviconCaching?.('local'); onSaveSettings(); faviconCachingDropdownOpen = false; }}
                 >{$t('storagePerformance.local')}</button>
               </div>
@@ -221,7 +225,7 @@ $effect(() => {
           </div>
           <div class="w-full bg-md-secondary-container rounded-full h-1.5 overflow-hidden">
             <div
-              class="h-full rounded-full transition-all duration-300 w-[var(--progress)] {storageUsageBytes >= STORAGE_WARNING_THRESHOLD ? 'bg-amber-500' : 'bg-md-primary'}"
+              class="h-full rounded-full transition-all duration-300 w-[var(--progress)] {storageUsageBytes >= STORAGE_WARNING_THRESHOLD ? 'bg-md-warning' : 'bg-md-primary'}"
               style="--progress: {Math.min((storageUsageBytes / STORAGE_LIMIT) * 100, 100)}%"
             ></div>
           </div>
@@ -229,7 +233,7 @@ $effect(() => {
 
         {#if !hasUnlimitedStorage && !_isFirefox && storageUsageBytes >= STORAGE_WARNING_THRESHOLD}
           <button
-            class="w-full py-1.5 px-3 rounded-lg text-xs font-medium bg-amber-500 text-white hover:bg-amber-600 disabled:opacity-50 transition-colors"
+            class="w-full py-1.5 px-3 rounded-lg text-xs font-medium bg-md-warning text-md-on-warning hover:opacity-90 disabled:opacity-50 transition-colors"
             onclick={handleRequestUnlimitedStorage}
             disabled={requestingPermission}
           >
@@ -237,10 +241,10 @@ $effect(() => {
           </button>
         {/if}
         {#if hasUnlimitedStorage}
-          <div class="text-xs text-green-600 dark:text-green-400">✓ {$t('settings.unlimitedStorageGranted')}</div>
+          <div class="text-xs text-md-success">✓ {$t('settings.unlimitedStorageGranted')}</div>
         {/if}
         {#if _isFirefox && storageUsageBytes >= STORAGE_WARNING_THRESHOLD}
-          <div class="text-xs text-amber-600">{$t('storagePerformance.firefoxLimit')}</div>
+          <div class="text-xs text-md-warning">{$t('storagePerformance.firefoxLimit')}</div>
         {/if}
 
         <div class="flex items-center justify-between">
@@ -278,10 +282,10 @@ $effect(() => {
             </button>
             {#if retentionDropdownOpen}
               <button class="fixed inset-0 z-40 bg-transparent cursor-default" aria-label={$t('storagePerformance.closeDropdown')} onclick={() => retentionDropdownOpen = false}></button>
-              <div class="absolute top-full right-0 mt-1 bg-md-primary-container rounded-xl shadow-lg border border-md-secondary-container z-50 min-w-[130px] overflow-hidden">
+              <div class="absolute top-full end-0 mt-1 bg-md-primary-container rounded-xl shadow-lg border border-md-secondary-container z-50 min-w-[130px] overflow-hidden">
                 {#each retentionOptions as option}
                   <button
-                    class="w-full px-4 py-2 text-sm text-left hover:bg-md-secondary-container {option.value === emailRetentionDays ? 'font-semibold text-md-primary' : 'text-md-on-surface'}"
+                    class="w-full px-4 py-2 text-sm text-start hover:bg-md-secondary-container {option.value === emailRetentionDays ? 'font-semibold text-md-primary' : 'text-md-on-surface'}"
                     onclick={() => {
                       onSetEmailRetentionDays?.(option.value);
                       onSaveSettings();
@@ -317,21 +321,21 @@ $effect(() => {
               style="--progress: {Math.min((storageUsage.totalMB / 10) * 100, 100)}%"
             ></div>
           </div>
-          <div class="text-[10px] text-md-on-surface/40 mb-3">{$t('storagePerformance.chromeLimit')}</div>
+          <div class="text-xs text-md-on-surface/40 mb-3">{$t('storagePerformance.chromeLimit')}</div>
           <div class="space-y-2 mb-3">
-            <div class="flex items-center justify-between text-[10px]">
+            <div class="flex items-center justify-between text-xs">
               <span class="text-md-on-surface/60">{$t('storagePerformance.emails')}</span>
               <span class="text-md-on-surface">{storageUsage.categories.emails.toFixed(2)} MB</span>
             </div>
-            <div class="flex items-center justify-between text-[10px]">
+            <div class="flex items-center justify-between text-xs">
               <span class="text-md-on-surface/60">{$t('storagePerformance.settings')}</span>
               <span class="text-md-on-surface">{storageUsage.categories.settings.toFixed(2)} MB</span>
             </div>
-            <div class="flex items-center justify-between text-[10px]">
+            <div class="flex items-center justify-between text-xs">
               <span class="text-md-on-surface/60">{$t('storagePerformance.cachedData')}</span>
               <span class="text-md-on-surface">{storageUsage.categories.cached.toFixed(2)} MB</span>
             </div>
-            <div class="flex items-center justify-between text-[10px]">
+            <div class="flex items-center justify-between text-xs">
               <span class="text-md-on-surface/60">{$t('storagePerformance.other')}</span>
               <span class="text-md-on-surface">{storageUsage.categories.other.toFixed(2)} MB</span>
             </div>
@@ -351,8 +355,4 @@ $effect(() => {
 
   </div>
 
-  <!-- ── Settings Sub-Navigation Bar ── -->
-  <div class="px-0 pb-1 mt-4">
-    <SettingsSubNav currentSubPage="storagePerformance" {onNavigateTo} />
-  </div>
 </div>

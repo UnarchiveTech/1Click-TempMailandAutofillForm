@@ -4,6 +4,7 @@
 
 import { browser } from 'wxt/browser';
 import { addActivityEvent } from '@/utils/activity-tracker.js';
+import { FORCE_NEW_SESSIONS_AUTO_CLEAR_MS } from '@/utils/constants.js';
 import { fetchEmails } from '@/utils/dsl/email-fetcher.js';
 import { EmailService, loadProviderConfig } from '@/utils/email-service.js';
 import {
@@ -13,10 +14,14 @@ import {
   InboxSessionConflictError,
   ProviderUnsupportedError,
 } from '@/utils/errors.js';
-import { getProviderInstances } from '@/utils/instance-manager.js';
+import { getProviderInstancesWithCustom } from '@/utils/instance-manager.js';
 import { log, logError } from '@/utils/logger.js';
+import { withInboxLock } from '@/utils/mutex.js';
+import { deriveInboxTiming } from '@/utils/provider-expiry.js';
 import { randomItem } from '@/utils/secure-random.js';
 import { getInboxes, getSelectedProvider } from '@/utils/storage-keys.js';
+import { safeStorageSet } from '@/utils/storageMonitor.js';
+import { timeAgo } from '@/utils/time.js';
 import type {
   Account,
   Email,
@@ -25,7 +30,7 @@ import type {
   ProviderInstance,
 } from '@/utils/types.js';
 import { incrementAnalytic } from './analytics.js';
-import { clearStoredEmails, getStoredEmails } from './email-storage.js';
+import { clearStoredEmails, filterMessages, getStoredEmails } from './email-storage.js';
 
 export interface DeleteInboxResult {
   success: boolean;
@@ -42,7 +47,7 @@ export interface DeleteInboxResult {
  * @throws ProviderUnsupportedError if the provider is not supported
  * @throws ApiError for other API-related errors
  */
-let createInboxQueue = Promise.resolve();
+let createInboxQueue: Promise<unknown> = Promise.resolve();
 
 export function createInbox(
   provider?: MailProvider,
@@ -51,10 +56,14 @@ export function createInbox(
 ): Promise<Account> {
   return new Promise((resolve, reject) => {
     createInboxQueue = createInboxQueue
+      .catch(() => {}) // Recover queue state if previous task rejected
       .then(() => _createInbox(provider, instanceId, emailUser))
-      .then(resolve)
-      .catch(reject);
+      .then(resolve, reject);
   });
+}
+
+function addressLocalPart(address: string): string {
+  return (address.split('@')[0] || '').toLowerCase();
 }
 
 async function _createInbox(
@@ -68,6 +77,66 @@ async function _createInbox(
     throw new ProviderUnsupportedError('No provider selected');
   }
 
+  /** Throw if local-part or full address already exists in storage. */
+  function throwIfDuplicateUsername(
+    existingList: Account[],
+    wantLocal: string,
+    fullAddress?: string
+  ) {
+    const want = wantLocal.trim().toLowerCase();
+    if (!want) return;
+    const matches = existingList.filter((i) => {
+      const addr = (i.address || '').toLowerCase();
+      if (fullAddress && addr === fullAddress.toLowerCase()) return true;
+      return addressLocalPart(i.address || '') === want;
+    });
+    if (matches.length === 0) return;
+
+    const live = matches.find(
+      (i) =>
+        i.accountStatus !== 'archived' &&
+        i.accountStatus !== 'deleted' &&
+        !(i.expiresAt > 0 && i.expiresAt <= Date.now())
+    );
+    if (live) {
+      throw new InboxSessionConflictError({
+        address: live.address,
+        reason: 'duplicate_live',
+        inboxId: live.id,
+      });
+    }
+    const archived = matches.find((i) => i.accountStatus === 'archived');
+    const expired = matches.find(
+      (i) => (i.expiresAt > 0 && i.expiresAt <= Date.now()) || i.status === 'expired'
+    );
+    const pick = archived || expired || matches[0];
+    throw new InboxSessionConflictError({
+      address: pick.address,
+      reason: 'duplicate_inactive',
+      inboxId: pick.id,
+      canUnarchive: !!archived,
+      canRenew: !!expired && isProviderRenewableSafe(pick.provider),
+      archivedInboxId: archived?.id,
+      expiredInboxId: expired?.id,
+    });
+  }
+
+  function isProviderRenewableSafe(provider: string): boolean {
+    try {
+      return !!loadProviderConfig(provider).expiry?.renewable;
+    } catch {
+      return false;
+    }
+  }
+
+  // Pre-check custom username before hitting provider API
+  if (emailUser?.trim()) {
+    const { inboxes: existingList = [] } = (await browser.storage.local.get(['inboxes'])) as {
+      inboxes?: Account[];
+    };
+    throwIfDuplicateUsername(existingList, emailUser);
+  }
+
   // If instanceId is provided, use that provider
   let activeProvider: MailProvider;
   if (instanceId) {
@@ -76,9 +145,8 @@ async function _createInbox(
     activeProvider = (provider || selectedProvider) as MailProvider;
   }
 
+  const createStarted = Date.now();
   try {
-    let inbox: Account;
-
     const config = loadProviderConfig(activeProvider);
     let instanceUrl: string | undefined;
     let selectedInstance: ProviderInstance | null = null;
@@ -86,11 +154,11 @@ async function _createInbox(
     // Handle multi-instance providers
     if (config.multiInstance?.enabled) {
       if (instanceId) {
-        const instances = await getProviderInstances(activeProvider);
+        const instances = await getProviderInstancesWithCustom(activeProvider);
         selectedInstance = instances.find((i) => i.id === instanceId) || null;
       } else {
         // Random instance selection for multi-instance providers
-        const instances = await getProviderInstances(activeProvider);
+        const instances = await getProviderInstancesWithCustom(activeProvider);
         if (instances.length === 0) {
           throw new InboxCreationError(activeProvider, {
             reason: `No instances available for ${activeProvider}. Please add instances in settings.`,
@@ -117,6 +185,7 @@ async function _createInbox(
     log('Create inbox result:', JSON.stringify(result));
 
     let { address, id, token } = result;
+    let timingSource = result;
 
     // If custom username is provided and provider supports setEmailUser, use it
     if (emailUser && config.operations?.setEmailUser) {
@@ -130,9 +199,10 @@ async function _createInbox(
       });
 
       if (setEmailResult) {
-        address = setEmailResult.email_addr || customAddress;
-        id = setEmailResult.email_addr || customAddress;
+        address = setEmailResult.address || customAddress;
+        id = setEmailResult.address || customAddress;
         token = setEmailResult.token || token;
+        timingSource = setEmailResult;
         log('Custom email address set successfully:', address);
       }
     }
@@ -151,14 +221,16 @@ async function _createInbox(
       );
     }
 
-    inbox = {
+    const timing = deriveInboxTiming(timingSource, config);
+
+    const inbox: Account = {
       id: inboxId,
       address: address as string,
       token: token as string,
       sidToken: token as string,
       provider: activeProvider,
-      createdAt: Date.now(),
-      expiresAt: Date.now() + (config.expiry?.duration || 3600000),
+      createdAt: timing.createdAt,
+      expiresAt: timing.expiresAt,
       expiryNotified: false,
       autoExtend: false,
       ...(instanceUrl && { instanceUrl }),
@@ -169,82 +241,60 @@ async function _createInbox(
       'seenEmailIds',
     ])) as { inboxes?: Account[]; seenEmailIds?: Record<string, string[]> };
 
-    const existingInbox = inboxes.find((e) => e.address === inbox.address);
+    // Final guard: block any same local-part or exact address already stored
+    // (covers random API reuse and post-setEmailUser collisions)
+    throwIfDuplicateUsername(inboxes, addressLocalPart(inbox.address), inbox.address);
 
-    if (existingInbox) {
-      if (config.expiry?.renewable) {
-        const now = Date.now();
-        const isExpired = existingInbox.expiresAt && now > existingInbox.expiresAt;
-
-        if (!isExpired && existingInbox.accountStatus !== 'archived') {
-          // Reuse existing valid inbox, update its sidToken
-          const inboxIndex = inboxes.findIndex((i: Account) => i.address === existingInbox.address);
-          if (inboxIndex !== -1 && inbox.sidToken) {
-            inboxes[inboxIndex].sidToken = inbox.sidToken;
-            await browser.storage.local.set({ inboxes });
-          }
-          return inboxes[inboxIndex] || existingInbox;
-        } else {
-          // Expired/archived: call forget_me if provider supports it and get fresh address
-          try {
-            const config = loadProviderConfig(activeProvider);
-            if (config.operations?.forgetMe) {
-              await service.executeOperation('forgetMe', {
-                auth: { token: inbox.sidToken as string },
-                variables: { email_addr: inbox.address },
-              });
-            }
-            const freshData = await service.executeOperation('createInbox', {
-              forceNewSession: true,
-            });
-            if (freshData.address && freshData.address !== inbox.address) {
-              inbox.address = freshData.address as string;
-              inbox.id = freshData.address as string;
-              inbox.sidToken = freshData.token as string;
-              const timestamp = freshData.timestamp as number;
-              inbox.expiresAt =
-                ((timestamp || 0) + (config.expiry?.duration || 3600000) / 1000) * 1000;
-
-              const stillDuplicate = inboxes.find(
-                (i: Account) => i.address === inbox.address && i.accountStatus !== 'archived'
-              );
-              if (stillDuplicate) {
-                throw new InboxSessionConflictError({ address: inbox.address });
-              }
-              const cleaned = inboxes.filter((i: Account) => i.address !== existingInbox.address);
-              cleaned.push(inbox);
-              await browser.storage.local.set({ inboxes: cleaned });
-              log('Created fresh inbox after forgetting expired one');
-              return inbox;
-            }
-          } catch (error: unknown) {
-            logError('Error during forget_me and fresh inbox creation:', error);
-            throw new InboxCreationError(activeProvider, {
-              reason: 'Failed to create fresh inbox',
-            });
-            // Continue with new inbox even if forget_me fails
-          }
-        }
-      } else {
-        // Provider doesn't support renewal - throw error if inbox already exists
-        throw new InboxSessionConflictError({ address: inbox.address });
-      }
+    // Provider reliability graph — successful create
+    try {
+      const { recordProviderCreate } = await import('@/features/intelligence/provider-health.js');
+      await recordProviderCreate(activeProvider, true, Date.now() - createStarted);
+    } catch {
+      /* ignore */
     }
 
     inboxes.push(inbox);
     seenEmailIds[inbox.address] = [];
 
     await incrementAnalytic('accountsCreated');
-    await browser.storage.local.set({ inboxes, seenEmailIds });
+    // Always select the newly created mailbox (context menu + UI share this path)
+    await safeStorageSet(browser, {
+      inboxes,
+      seenEmailIds,
+      activeInboxId: inbox.id,
+      onboardingComplete: true,
+    });
 
     // Track account creation activity
     await addActivityEvent('account_created', {
       inboxAddress: inbox.address,
     });
 
+    // Rescan forms on every open tab so Autofill All appears without a second create
+    try {
+      const { ensureTabAutofillReady } = await import('../tab-autofill.js');
+      const tabs = await browser.tabs.query({});
+      for (const tab of tabs) {
+        if (tab.id == null) continue;
+        void ensureTabAutofillReady(tab.id).catch(() => {});
+      }
+    } catch {
+      /* optional */
+    }
+
     return inbox;
   } catch (error: unknown) {
+    // Preserve structured duplicate/conflict errors for UI (warn + unarchive/renew)
+    if (error instanceof InboxSessionConflictError) {
+      throw error;
+    }
     const errorMessage = error instanceof Error ? error.message : String(error);
+    try {
+      const { recordProviderCreate } = await import('@/features/intelligence/provider-health.js');
+      await recordProviderCreate(activeProvider, false, Date.now() - createStarted, errorMessage);
+    } catch {
+      /* ignore */
+    }
     logError(
       'Error creating inbox:',
       { provider: activeProvider },
@@ -267,68 +317,72 @@ export async function deleteInbox(
   inboxId: string,
   preserveEmails: boolean = false
 ): Promise<DeleteInboxResult> {
-  try {
-    const inboxes: Account[] = await getInboxes();
-    const inbox = inboxes.find((i) => i.id === inboxId);
+  return withInboxLock(async () => {
+    try {
+      const inboxes: Account[] = await getInboxes();
+      const inbox = inboxes.find((i) => i.id === inboxId);
 
-    if (!inbox) {
-      return { success: false, error: `Inbox with ID ${inboxId} not found` };
-    }
-
-    const config = loadProviderConfig(inbox.provider);
-
-    // Call forget_me if provider supports it
-    if (config.operations?.forgetMe) {
-      try {
-        const service = new EmailService(config, browser);
-        await service.executeOperation('forgetMe', {
-          auth: { token: inbox.sidToken as string },
-          variables: { email_addr: inbox.address },
-        });
-        await service.executeOperation('createInbox', { forceNewSession: true });
-      } catch (error: unknown) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        logError(
-          'Error during forget_me:',
-          { inboxId: inbox.id, inboxAddress: inbox.address, error: errorMessage },
-          error instanceof Error ? error : new Error(errorMessage)
-        );
-        // Continue with deletion even if forget_me fails
+      if (!inbox) {
+        return { success: false, error: `Inbox with ID ${inboxId} not found` };
       }
-    }
 
-    const updatedInboxes = inboxes.filter((i: Account) => i.id !== inboxId);
+      const config = loadProviderConfig(inbox.provider);
 
-    const {
-      seenEmailIds = {},
-      lastMessageTimestamps = {},
-      storedEmails = {},
-      archivedEmails = {},
-      readEmails = {},
-      starredEmails = [],
-    } = (await browser.storage.local.get([
-      'seenEmailIds',
-      'lastMessageTimestamps',
-      'storedEmails',
-      'archivedEmails',
-      'readEmails',
-      'starredEmails',
-    ])) as {
-      seenEmailIds?: Record<string, string[]>;
-      lastMessageTimestamps?: Record<string, number>;
-      storedEmails?: Record<string, Email[]>;
-      archivedEmails?: Record<string, Email[]>;
-      readEmails?: Record<string, boolean>;
-      starredEmails?: string[];
-    };
-    if (inbox) {
+      // Call forget_me if provider supports it
+      if (config.operations?.forgetMe) {
+        try {
+          const service = new EmailService(config, browser);
+          await service.executeOperation('forgetMe', {
+            auth: { token: inbox.sidToken as string },
+            variables: { email_addr: inbox.address },
+          });
+          await service.executeOperation('createInbox', { forceNewSession: true });
+        } catch (error: unknown) {
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          logError(
+            'Error during forget_me:',
+            { inboxId: inbox.id, inboxAddress: inbox.address, error: errorMessage },
+            error instanceof Error ? error : new Error(errorMessage)
+          );
+          // Continue with deletion even if forget_me fails
+        }
+      }
+
+      const updatedInboxes = inboxes.filter((i: Account) => i.id !== inboxId);
+
+      const {
+        seenEmailIds = {},
+        lastMessageTimestamps = {},
+        storedEmails = {},
+        archivedEmails = {},
+        readEmails = {},
+        starredEmails = [],
+      } = (await browser.storage.local.get([
+        'seenEmailIds',
+        'lastMessageTimestamps',
+        'storedEmails',
+        'archivedEmails',
+        'readEmails',
+        'starredEmails',
+      ])) as {
+        seenEmailIds?: Record<string, string[]>;
+        lastMessageTimestamps?: Record<string, number>;
+        storedEmails?: Record<string, Email[]>;
+        archivedEmails?: Record<string, Email[]>;
+        readEmails?: Record<string, boolean>;
+        starredEmails?: string[];
+      };
+
       delete seenEmailIds[inbox.address];
       delete lastMessageTimestamps[inboxId];
       let deletedEmailIds = new Set<string>();
 
+      // Update latestOtp if it was from this deleted inbox address
+      await updateLatestOtpAfterDeletion(inbox.address, storedEmails);
+
       if (preserveEmails) {
         await clearStoredEmails(inbox.address);
-        await browser.storage.local.set({
+        await safeStorageSet(browser, {
           inboxes: updatedInboxes,
           seenEmailIds,
           lastMessageTimestamps,
@@ -347,7 +401,7 @@ export async function deleteInbox(
           delete readEmails[emailId];
         }
 
-        await browser.storage.local.set({
+        await safeStorageSet(browser, {
           inboxes: updatedInboxes,
           seenEmailIds,
           lastMessageTimestamps,
@@ -358,18 +412,16 @@ export async function deleteInbox(
         });
       }
       return { success: true };
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logError(
+        'Error deleting inbox:',
+        { inboxId },
+        error instanceof Error ? error : new Error(errorMessage)
+      );
+      return { success: false, error: errorMessage };
     }
-
-    return { success: false, error: `Inbox with ID ${inboxId} not found` };
-  } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    logError(
-      'Error deleting inbox:',
-      { inboxId },
-      error instanceof Error ? error : new Error(errorMessage)
-    );
-    return { success: false, error: errorMessage };
-  }
+  });
 }
 
 /**
@@ -394,11 +446,9 @@ export async function checkNewEmails(
     }
 
     // If inbox is archived, expired, or deleted, load emails from both archivedEmails and storedEmails storage and mark as local-only
-    if (
-      inbox.accountStatus === 'archived' ||
-      inbox.accountStatus === 'deleted' ||
-      Date.now() > (inbox.expiresAt || 0)
-    ) {
+    // expiresAt <= 0 means no expiry (treat as live)
+    const isExpired = (inbox.expiresAt ?? 0) > 0 && Date.now() > inbox.expiresAt;
+    if (inbox.accountStatus === 'archived' || inbox.accountStatus === 'deleted' || isExpired) {
       const { archivedEmails = {}, storedEmails = {} } = (await browser.storage.local.get([
         'archivedEmails',
         'storedEmails',
@@ -410,9 +460,12 @@ export async function checkNewEmails(
       const stored = storedEmails[inbox.address] || [];
 
       // Combine archived and stored emails, mark all as local-only
+      const sinceFallback = isExpired && (inbox.expiresAt ?? 0) > 0 ? inbox.expiresAt : Date.now();
       const allLocalEmails = [...archived, ...stored].map((email) => ({
         ...email,
         local_only: true,
+        local_only_since:
+          email.local_only_since || email.local_deleted_at || email.stored_at || sinceFallback,
       }));
 
       // Apply filters to local emails
@@ -437,12 +490,50 @@ export async function checkNewEmails(
     let apiMessages: Email[] = [];
     const config = loadProviderConfig(inbox.provider);
     const service = new EmailService(config, browser);
-    apiMessages = await fetchEmails(
-      config,
-      inbox,
-      (operationName, context) => service.executeOperation(operationName, context),
-      filters
-    );
+    const fetchStarted = Date.now();
+
+    // Read and respect forceNewSessions flag
+    const { lastHardReset, forceNewSessions } = (await browser.storage.local.get([
+      'lastHardReset',
+      'forceNewSessions',
+    ])) as { lastHardReset?: number; forceNewSessions?: boolean };
+    let isForceActive = !!forceNewSessions;
+    if (
+      isForceActive &&
+      lastHardReset &&
+      Date.now() - lastHardReset > FORCE_NEW_SESSIONS_AUTO_CLEAR_MS
+    ) {
+      isForceActive = false;
+      await browser.storage.local.remove('forceNewSessions').catch(() => {});
+    }
+
+    try {
+      apiMessages = await fetchEmails(
+        config,
+        inbox,
+        (operationName, context) =>
+          service.executeOperation(operationName, {
+            ...context,
+            forceNewSession: isForceActive || context?.forceNewSession,
+          }),
+        {} // Fetch all emails from the API, bypassing UI filters during fetch
+      );
+      try {
+        const { recordProviderFetch } = await import('@/features/intelligence/provider-health.js');
+        await recordProviderFetch(inbox.provider, true, Date.now() - fetchStarted);
+      } catch {
+        /* ignore */
+      }
+    } catch (fetchError: unknown) {
+      try {
+        const { recordProviderFetch } = await import('@/features/intelligence/provider-health.js');
+        const msg = fetchError instanceof Error ? fetchError.message : String(fetchError);
+        await recordProviderFetch(inbox.provider, false, Date.now() - fetchStarted, msg);
+      } catch {
+        /* ignore */
+      }
+      throw fetchError;
+    }
 
     // Merge with stored emails to ensure we have all emails including those stored by periodic checks
     const storedEmails = await getStoredEmails(inbox.address);
@@ -451,15 +542,34 @@ export async function checkNewEmails(
     // Collect API email IDs for comparison
     const apiEmailIds = new Set(apiMessages.map((e) => e.id));
 
-    // Add stored emails first, marking local-only ones
+    const addrLower = inbox.address.toLowerCase();
+
+    // Add stored emails first - only this address bag, mark local-only vs API
     for (const email of storedEmails) {
+      const own = (email.original_inbox || inbox.address).toLowerCase();
+      // Skip stored copies clearly belonging to another inbox
+      if (own && own !== addrLower) continue;
       const isLocalOnly = !apiEmailIds.has(email.id);
-      mergedMessages.set(email.id, { ...email, local_only: isLocalOnly });
+      mergedMessages.set(email.id, {
+        ...email,
+        local_only: isLocalOnly,
+        // Preserve first-seen local_only_since; set now when newly missing from server
+        local_only_since: isLocalOnly
+          ? email.local_only_since || email.local_deleted_at || Date.now()
+          : undefined,
+        original_inbox: inbox.address,
+      });
     }
 
-    // Add API emails, overwriting stored ones if same ID (they're not local-only)
+    // API results for THIS inbox session - force stamp to this address
+    // (prevents cross-bag bleed when ids collide across accounts)
     for (const email of apiMessages) {
-      mergedMessages.set(email.id, { ...email, local_only: false });
+      mergedMessages.set(email.id, {
+        ...email,
+        local_only: false,
+        local_only_since: undefined,
+        original_inbox: inbox.address,
+      });
     }
 
     // Convert back to array and sort by received_at descending
@@ -467,7 +577,39 @@ export async function checkNewEmails(
       (a, b) => b.received_at - a.received_at
     );
 
-    return allMessages;
+    // Persist local_only / local_only_since onto the stored bag so badges & tooltips survive reloads
+    try {
+      const { storedEmails = {} } = (await browser.storage.local.get(['storedEmails'])) as {
+        storedEmails?: Record<string, Email[]>;
+      };
+      const bag = storedEmails[inbox.address] || [];
+      if (bag.length > 0) {
+        let changed = false;
+        const nextBag = bag.map((e) => {
+          const m = mergedMessages.get(e.id);
+          if (!m) return e;
+          const since = m.local_only
+            ? m.local_only_since || e.local_only_since || e.local_deleted_at || Date.now()
+            : undefined;
+          if (e.local_only === m.local_only && e.local_only_since === since) return e;
+          changed = true;
+          return {
+            ...e,
+            local_only: m.local_only,
+            local_only_since: since,
+          };
+        });
+        if (changed) {
+          await browser.storage.local.set({
+            storedEmails: { ...storedEmails, [inbox.address]: nextBag },
+          });
+        }
+      }
+    } catch {
+      /* non-critical */
+    }
+
+    return filterMessages(allMessages, filters);
   } catch (error: unknown) {
     if (error instanceof InboxNotFoundError || error instanceof ApiError) {
       throw error;
@@ -488,3 +630,46 @@ export async function checkNewEmails(
 // Re-export functions from split modules for backward compatibility
 export { checkInboxExpiry, setupInboxExpiryCheck } from './expiry-manager.js';
 export { setupPeriodicEmailCheck } from './periodic-checks.js';
+
+async function updateLatestOtpAfterDeletion(
+  deletedAddress: string,
+  remainingStored: Record<string, Email[]>
+) {
+  try {
+    const currentLatestOtp = (
+      (await browser.storage.local.get('latestOtp')) as {
+        latestOtp?: { sender: string; received_at: number };
+      }
+    ).latestOtp;
+    if (currentLatestOtp?.sender.toLowerCase().includes(deletedAddress.toLowerCase())) {
+      let maxOtpMsg: Email | null = null;
+      for (const [addr, inboxEmails] of Object.entries(remainingStored)) {
+        if (addr.toLowerCase() === deletedAddress.toLowerCase()) continue;
+        for (const m of inboxEmails) {
+          if (m.otp) {
+            if (!maxOtpMsg || m.received_at > maxOtpMsg.received_at) {
+              maxOtpMsg = m;
+            }
+          }
+        }
+      }
+      if (maxOtpMsg) {
+        const time = typeof timeAgo === 'function' ? timeAgo(maxOtpMsg.received_at) : '';
+        const otpResult = {
+          otp: maxOtpMsg.otp,
+          sender: maxOtpMsg.from || '',
+          senderName: maxOtpMsg.from_name || '',
+          context: [maxOtpMsg.from_name ? `From: ${maxOtpMsg.from_name}` : '', time]
+            .filter(Boolean)
+            .join(' | '),
+          received_at: maxOtpMsg.received_at,
+        };
+        await safeStorageSet(browser, { latestOtp: otpResult });
+      } else {
+        await browser.storage.local.remove('latestOtp');
+      }
+    }
+  } catch (error: unknown) {
+    logError('Error updating latest OTP after inbox deletion:', error);
+  }
+}

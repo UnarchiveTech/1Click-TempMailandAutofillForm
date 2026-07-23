@@ -64,7 +64,7 @@ $effect(() => {
 
 {#if shown && !dismissed}
   <div
-    class="absolute -top-7 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1.5 bg-md-primary text-md-on-primary text-[10px] font-medium px-2 py-1 rounded-full shadow-md whitespace-nowrap pointer-events-auto"
+    class="absolute -top-7 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1.5 bg-md-inverse-surface text-md-inverse-on-surface text-xs font-medium px-2 py-1 rounded-full shadow-md whitespace-nowrap pointer-events-auto"
     role="tooltip"
   >
     <svg
@@ -77,9 +77,9 @@ $effect(() => {
     >
       <path stroke-linecap="round" stroke-linejoin="round" d="M8 9l4-4 4 4M8 15l4 4 4-4" />
     </svg>
-    <span>{text}</span>
+    {text}
     <button
-      class="ml-1 text-md-on-primary/70 hover:text-md-on-primary"
+      class="ms-1 text-md-inverse-on-surface/70 hover:text-md-inverse-on-surface"
       onclick={(e) => {
         e.stopPropagation();
         void persistDismiss();

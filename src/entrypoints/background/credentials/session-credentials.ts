@@ -21,7 +21,7 @@ export interface MessageSender {
 export async function handleUpdateSessionCredentials(
   message: UpdateCredentialsMessage,
   sender: MessageSender
-): Promise<{ success: boolean }> {
+): Promise<{ success: boolean; clipboardWritten?: boolean }> {
   if (!sender.tab?.id) {
     throw new ValidationError('Credentials can only be updated from a valid browser tab', {
       tabId: sender.tab?.id,
@@ -38,12 +38,13 @@ export async function handleUpdateSessionCredentials(
   const updatedCredentials = { ...sessionCredentials, ...message.credentials };
   await browser.storage.session.set({ sessionCredentials: updatedCredentials });
 
+  let clipboardWritten: boolean | undefined;
   if (autoCopy) {
     const clipboardText = buildCredentialsString(updatedCredentials);
-    await writeToClipboard(sender.tab.id, clipboardText);
+    clipboardWritten = await writeToClipboard(sender.tab.id, clipboardText);
   }
 
-  return { success: true };
+  return { success: true, ...(clipboardWritten !== undefined && { clipboardWritten }) };
 }
 
 export function buildCredentialsString(credentials: SessionCredentials): string {
@@ -73,19 +74,30 @@ export function buildCredentialsString(credentials: SessionCredentials): string 
     .join('\n');
 }
 
-export async function writeToClipboard(tabId: number, text: string): Promise<void> {
-  if (!text) return;
+export async function writeToClipboard(tabId: number, text: string): Promise<boolean> {
+  if (!text) return false;
   try {
     await browser.scripting.executeScript({
       target: { tabId },
-      func: (textToCopy: string) => navigator.clipboard.writeText(textToCopy),
-      args: [text],
+      func: (textToCopy: string, durationMs: number) => {
+        navigator.clipboard.writeText(textToCopy);
+        setTimeout(async () => {
+          try {
+            await navigator.clipboard.writeText('');
+          } catch {
+            // Ignore failures (e.g. document not focused)
+          }
+        }, durationMs);
+      },
+      args: [text, 30000],
     });
+    return true;
   } catch (error: unknown) {
     logError(
       'Failed to copy credentials to clipboard:',
       undefined,
       error instanceof Error ? error : new Error(String(error))
     );
+    return false;
   }
 }

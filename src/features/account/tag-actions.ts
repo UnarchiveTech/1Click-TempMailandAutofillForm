@@ -29,3 +29,26 @@ export async function updateInboxTag(
     logError('Failed to update tag:', undefined, e instanceof Error ? e : new Error(String(e)));
   }
 }
+
+/** Replace full multi-tag list on an address */
+export async function updateInboxTags(
+  accountId: string,
+  tags: Array<{ name: string; color: string }>,
+  ext: typeof browser,
+  setters: TagSetters
+): Promise<void> {
+  try {
+    const response = await ext.runtime.sendMessage({
+      type: 'updateInboxTag',
+      inboxId: accountId,
+      tags,
+      tag: tags[0]?.name || '',
+      color: tags[0]?.color,
+    });
+    if (response && (response as { success: boolean }).success) {
+      await setters.onReloadAccounts();
+    }
+  } catch (e) {
+    logError('Failed to update tags:', undefined, e instanceof Error ? e : new Error(String(e)));
+  }
+}

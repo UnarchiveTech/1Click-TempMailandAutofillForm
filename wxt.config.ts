@@ -16,7 +16,7 @@ const pkg = JSON.parse(readFileSync(join(__dirname, 'package.json'), 'utf8')) as
 // Version precedence:
 //   1. VERSION_OVERRIDE env var (used by `workflow_dispatch` in release.yml
 //      to rebuild a specific published version without re-tagging).
-//   2. package.json (single source of truth — bump with `bun pm pkg set
+//   2. package.json (single source of truth - bump with `bun pm pkg set
 //      version=X.Y.Z` or `bun run bump-version`).
 //   3. Hard-coded fallback for local dev if package.json is unreadable.
 const rawVersion = process.env.VERSION_OVERRIDE?.replace(/^v/, '') || pkg.version || '0.0.0-dev';
@@ -86,7 +86,8 @@ export default defineConfig({
       },
     },
     build: {
-      chunkSizeWarningLimit: 600,
+      // Popup UI + Material styles + locales live in one shell chunk; 800 was noisy.
+      chunkSizeWarningLimit: 1200,
     },
   }),
   manifestVersion: 3,
@@ -101,6 +102,11 @@ export default defineConfig({
     action: {
       default_popup: 'popup.html',
       default_icon: 'icons/icon128.png',
+      default_title: '1Click: Temp Mail & Autofill Form',
+    },
+    // Address-bar keyword (type "1c" then space) — credential / site suggestions
+    omnibox: {
+      keyword: '1c',
     },
     icons: {
       '16': 'icons/icon16.png',
@@ -112,22 +118,35 @@ export default defineConfig({
     browser_specific_settings: {
       gecko: {
         id: '1click-temp-mail@unarchive.tech',
+        // Firefox desktop / Android MV3
+        strict_min_version: '115.0',
       },
     },
     content_security_policy: {
       extension_pages:
-        "script-src 'self'; object-src 'none'; base-uri 'self'; img-src 'self' https: data:;",
+        "default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; img-src 'self' https: data:; style-src 'self' 'unsafe-inline'; connect-src 'self' https:;",
     },
     permissions: [
       'storage',
+      // Must be required (not optional) — Chrome omits unlimitedStorage from optional_permissions
+      'unlimitedStorage',
       'alarms',
       'notifications',
       'clipboardWrite',
+      'clipboardRead',
       'scripting',
       'cookies',
       'contextMenus',
+      'activeTab',
+      'declarativeNetRequest',
     ],
-    host_permissions: ['<all_urls>'],
+    host_permissions: [
+      'https://api.guerrillamail.com/*',
+      'https://alphac.qzz.io/*',
+      'https://raceco.dpdns.org/*',
+      'https://burner.kiwi/*',
+    ],
+    optional_host_permissions: ['<all_urls>'],
     commands: {
       'autofill-form': {
         suggested_key: {
@@ -135,6 +154,9 @@ export default defineConfig({
           mac: 'Alt+Shift+F',
         },
         description: 'Autofill the signup form on the current page',
+      },
+      'open-autofill-manager': {
+        description: 'Open Autofill manager (Profiles & Credentials)',
       },
     },
   },

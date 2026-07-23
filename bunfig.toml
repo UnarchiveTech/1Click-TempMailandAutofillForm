@@ -1,0 +1,2 @@
+# Bun configuration — unit tests live under tests/ (mirrors src/)
+# Path aliases from tsconfig (@/* → ./src/*) are honored automatically.

@@ -6,6 +6,7 @@
  *   (await browser.storage.local.get(['key'])) as { key?: T }
  */
 
+import { decrypt, encrypt } from '@/utils/crypto.js';
 import { DEFAULT_PROVIDER } from '@/utils/email-service.js';
 import type { Account, Analytics, Email, ProviderInstance } from '@/utils/types.js';
 
@@ -115,18 +116,52 @@ export function isBooleanRecord(value: unknown): value is Record<string, boolean
 }
 
 // ---------------------------------------------------------------------------
-// Common typed helpers — eliminate repeated cast boilerplate across the codebase
+// Common typed helpers - eliminate repeated cast boilerplate across the codebase
 // ---------------------------------------------------------------------------
 
 /** Returns the stored inboxes array (defaults to []). */
 export async function getInboxes(): Promise<Account[]> {
   const result = await browser.storage.local.get(['inboxes']);
-  return Array.isArray(result.inboxes) ? (result.inboxes as Account[]) : [];
+  const inboxes = Array.isArray(result.inboxes) ? (result.inboxes as Account[]) : [];
+
+  const decryptedInboxes: Account[] = [];
+  for (const inbox of inboxes) {
+    const item = { ...inbox };
+    if (item.token?.startsWith('_enc_:')) {
+      try {
+        item.token = await decrypt(item.token.slice(6));
+      } catch {
+        // Keep as-is if decryption fails (e.g. vault locked)
+      }
+    }
+    if (item.sidToken?.startsWith('_enc_:')) {
+      try {
+        item.sidToken = await decrypt(item.sidToken.slice(6));
+      } catch {
+        // Keep as-is if decryption fails (e.g. vault locked)
+      }
+    }
+    decryptedInboxes.push(item);
+  }
+  return decryptedInboxes;
 }
 
 /** Persists the inboxes array. */
 export async function setInboxes(inboxes: Account[]): Promise<void> {
-  await browser.storage.local.set({ inboxes });
+  const encryptedInboxes: Account[] = [];
+  for (const inbox of inboxes) {
+    const item = { ...inbox };
+    if (item.token && !item.token.startsWith('_enc_:')) {
+      const encrypted = await encrypt(item.token);
+      item.token = `_enc_:${encrypted}`;
+    }
+    if (item.sidToken && !item.sidToken.startsWith('_enc_:')) {
+      const encrypted = await encrypt(item.sidToken);
+      item.sidToken = `_enc_:${encrypted}`;
+    }
+    encryptedInboxes.push(item);
+  }
+  await browser.storage.local.set({ inboxes: encryptedInboxes });
 }
 
 /** Returns the currently selected provider (defaults to DEFAULT_PROVIDER). */
@@ -180,6 +215,9 @@ export const DEFAULT_ANALYTICS: Analytics = {
   emailsReceived: 0,
   otpsDetected: 0,
   notificationsSent: 0,
+  extensionOpens: 0,
+  emailsRead: 0,
+  pageVisits: {},
   performance: {
     emailFetchTimes: [],
     providerLatency: {},

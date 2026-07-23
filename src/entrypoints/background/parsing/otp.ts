@@ -395,31 +395,83 @@ function normalizeBody(body: string | undefined): string {
   return normalized;
 }
 
+// Mask dates, phone numbers, and timestamps so they are not collapsed into false OTP candidates
+function maskNonOtpNumericPatterns(text: string): string {
+  if (!text) return '';
+  return (
+    text
+      // Mask ISO dates (e.g. 2026-07-04 or 2026/07/04)
+      .replace(/\b\d{4}[-/.]\d{1,2}[-/.]\d{1,2}\b/g, ' ')
+      // Mask standard dates (e.g. 07/04/2026 or 07-04-2026)
+      .replace(/\b\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}\b/g, ' ')
+      // Mask phone numbers (10+ digits with dashes/spaces/parens/plus)
+      .replace(/(?:\+?\d{1,3}[- .]?)?\(?\d{3}\)?[- .]?\d{3}[- .]?\d{4}/g, ' ')
+      // Mask timestamps (e.g. 14:30:15)
+      .replace(/\b\d{1,2}:\d{2}(?::\d{2})?\b/g, ' ')
+  );
+}
+
 // Collapse dashes/spaces between digits so that "Code: 123-456" matches as
 // "Code: 123456". This only affects digit-boundary punctuation, leaving
 // "Item 12-34" alone (the dash there is between letters).
 function collapseDigitSeparators(text: string): string {
-  return text.replace(/(\d)[- ]+(?=\d)/g, '$1');
+  const masked = maskNonOtpNumericPatterns(text);
+  return masked.replace(/(\d)[- ]+(?=\d)/g, '$1');
 }
 
-export function extractOTP(subject: string | undefined, body: string | undefined): string | null {
+/** User-selectable OTP detection strictness (settings). */
+export type OtpDetectionMode = 'numeric' | 'alphanumeric' | 'balanced';
+
+/** Module default; background may set from storage before parse runs. */
+let activeOtpMode: OtpDetectionMode = 'balanced';
+
+export function setOtpDetectionMode(mode: OtpDetectionMode): void {
+  activeOtpMode = mode === 'numeric' || mode === 'alphanumeric' ? mode : 'balanced';
+}
+
+export function getOtpDetectionMode(): OtpDetectionMode {
+  return activeOtpMode;
+}
+
+function passesModeFilter(otp: string, mode: OtpDetectionMode): boolean {
+  if (!otp) return false;
+  const digitsOnly = /^\d+$/.test(otp);
+  if (mode === 'numeric') return digitsOnly;
+  if (mode === 'alphanumeric') {
+    // Prefer mixed or non-dictionary-like codes; still allow pure digits
+    if (digitsOnly) return true;
+    // Reject pure letter runs that look like words (no digit)
+    if (/^[a-zA-Z]+$/.test(otp)) return false;
+    return /[a-zA-Z]/.test(otp) && /[0-9]/.test(otp);
+  }
+  // balanced: current behavior — digits or mixed codes
+  if (digitsOnly) return true;
+  if (/^[a-zA-Z]+$/.test(otp)) return false;
+  return true;
+}
+
+export function extractOTP(
+  subject: string | undefined,
+  body: string | undefined,
+  mode: OtpDetectionMode = activeOtpMode
+): string | null {
   // 1. Block-level HTML detection. Runs on raw body before any normalization
   //    so the structural signal is preserved. High-confidence shortcut.
   if (body) {
     const blockOtp = extractFromBlockTags(body);
-    if (blockOtp) return blockOtp;
+    if (blockOtp && passesModeFilter(blockOtp, mode)) return blockOtp;
   }
 
   // 2. Subject-first keyword patterns on normalized subject.
   const normalizedSubject = collapseDigitSeparators(normalizeSubject(subject));
   let otp = findOtpInText(normalizedSubject, true);
-  if (otp) return otp;
+  if (otp && passesModeFilter(otp, mode)) return otp;
 
   // 3. Body keyword patterns on normalized body.
   if (body) {
     const normalizedBody = collapseDigitSeparators(normalizeBody(body));
     otp = findOtpInText(normalizedBody, false);
-    if (otp) return otp;
+    if (otp && passesModeFilter(otp, mode)) return otp;
   }
 
   return null;

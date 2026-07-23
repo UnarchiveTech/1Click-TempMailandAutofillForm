@@ -4,8 +4,6 @@
  */
 
 import {
-  MAX_CUSTOM_INSTANCE_NAME_LENGTH,
-  MAX_CUSTOM_INSTANCE_URL_LENGTH,
   OTP_LENGTH_MAX,
   OTP_LENGTH_MIN,
   PASSWORD_MAX_LENGTH,
@@ -33,75 +31,41 @@ export function sanitizeHTML(input: string): string {
 }
 
 /**
+ * Validate and sanitize a CSS color value for safe use in DOM style attributes.
+ *
+ * Prevents HTML/CSS injection when a user-controlled color string (e.g. the
+ * `customColor` setting) is interpolated into an inline `style="…"` attribute
+ * or assigned to `element.style.cssText`. Only hex (#rgb / #rrggbb /
+ * #rrggbbaa / #rgba) and rgb()/rgba()/hsl()/hsla() functional notation are
+ * accepted. Any string containing characters that could break out of an
+ * attribute or style context (<, >, ", ', backtick, {, }, ;) is rejected.
+ *
+ * @returns the validated color string, or `null` if the input is not a safe color.
+ */
+export function sanitizeColor(color: string): string | null {
+  if (!color) return null;
+  const trimmed = color.trim();
+  // Reject anything that could break out of a style attribute / HTML context
+  if (/[<>"`'{};]/.test(trimmed)) return null;
+  // Allow hex (#rgb, #rgba, #rrggbb, #rrggbbaa)
+  const hexRe = /^#([0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
+  // Allow strict rgb()/rgba()/hsl()/hsla() functional notation with numeric/percentage args only
+  const rgbRe =
+    /^rgba?\(\s*\d{1,3}%?\s*,\s*\d{1,3}%?\s*,\s*\d{1,3}%?\s*(,\s*(0|1|0?\.\d+|\d+%)\s*)?\)$/i;
+  const hslRe =
+    /^hsla?\(\s*\d{1,3}(deg|rad|turn)?\s*,\s*\d{1,3}%\s*,\s*\d{1,3}%\s*(,\s*(0|1|0?\.\d+|\d+%)\s*)?\)$/i;
+  if (hexRe.test(trimmed) || rgbRe.test(trimmed) || hslRe.test(trimmed)) {
+    return trimmed;
+  }
+  return null;
+}
+
+/**
  * Validate and sanitize email address
  */
 export function validateEmail(email: string): boolean {
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   return emailRegex.test(email);
-}
-
-/**
- * Validate custom instance name
- */
-export function validateCustomInstanceName(name: string): void {
-  if (!name || name.trim().length === 0) {
-    throw new ValidationError('Instance name cannot be empty', { field: 'instanceName' });
-  }
-  if (name.length > MAX_CUSTOM_INSTANCE_NAME_LENGTH) {
-    throw new ValidationError(
-      `Instance name must be less than ${MAX_CUSTOM_INSTANCE_NAME_LENGTH} characters`,
-      { field: 'instanceName', maxLength: MAX_CUSTOM_INSTANCE_NAME_LENGTH }
-    );
-  }
-  // Check for potentially dangerous characters
-  if (/[<>"'&]/.test(name)) {
-    throw new ValidationError('Instance name contains invalid characters', {
-      field: 'instanceName',
-    });
-  }
-}
-
-/**
- * Validate custom instance URL
- */
-export function validateCustomInstanceUrl(url: string): void {
-  if (!url || url.trim().length === 0) {
-    throw new ValidationError('Instance URL cannot be empty', { field: 'instanceUrl' });
-  }
-  if (url.length > MAX_CUSTOM_INSTANCE_URL_LENGTH) {
-    throw new ValidationError(
-      `Instance URL must be less than ${MAX_CUSTOM_INSTANCE_URL_LENGTH} characters`,
-      { field: 'instanceUrl', maxLength: MAX_CUSTOM_INSTANCE_URL_LENGTH }
-    );
-  }
-  try {
-    const parsedUrl = new URL(url);
-    if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
-      throw new ValidationError('Instance URL must use HTTP or HTTPS protocol', {
-        field: 'instanceUrl',
-      });
-    }
-    const hostname = parsedUrl.hostname.toLowerCase();
-    if (
-      hostname === 'localhost' ||
-      hostname.startsWith('127.') ||
-      hostname.startsWith('192.168.') ||
-      hostname.startsWith('10.') ||
-      /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(hostname) ||
-      // IPv6 loopback and private ranges (URL.hostname strips brackets)
-      hostname === '::1' ||
-      hostname.startsWith('fc') ||
-      hostname.startsWith('fd') ||
-      hostname.startsWith('fe80')
-    ) {
-      throw new ValidationError('Instance URL cannot point to internal/private networks', {
-        field: 'instanceUrl',
-      });
-    }
-  } catch (error) {
-    if (error instanceof ValidationError) throw error;
-    throw new ValidationError('Instance URL is not a valid URL', { field: 'instanceUrl' });
-  }
 }
 
 /**
@@ -205,13 +169,21 @@ export function validateTextInput(
     return '';
   }
   const trimmed = input.trim();
-  if (trimmed.length > maxLength) {
+  // Strip control characters (C0: U+0000–U+001F, DEL/C1: U+007F–U+009F - includes
+  // \n, \r, \t) and collapse any resulting whitespace runs into a single space.
+  // \p{Cc} is the Unicode "Control" category and avoids embedding literal
+  // control chars in the regex (which Biome's noControlCharactersInRegex bans).
+  const cleaned = trimmed
+    .replace(/\p{Cc}/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (cleaned.length > maxLength) {
     throw new ValidationError(`${fieldName} must be less than ${maxLength} characters`, {
       field: fieldName,
       maxLength,
     });
   }
-  return sanitizeHTML(trimmed);
+  return sanitizeHTML(cleaned);
 }
 
 /**

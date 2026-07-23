@@ -18,16 +18,16 @@ export interface QRSetters {
   setShowToast: (message: string, type?: 'success' | 'error' | 'warning') => void;
 }
 
-export async function openQrDialog(
+export function openQrDialog(
   _selectedEmail: string,
   state: QRState,
   setters: QRSetters,
   setupFocusTrap: (element: HTMLElement) => void
-) {
+): ReturnType<typeof setTimeout> {
   setters.setPreviousFocusElement(document.activeElement as HTMLElement);
   setters.setQrDialogOpen(true);
   // QR generation is now handled within QrDialog component using $effect
-  setTimeout(() => {
+  return setTimeout(() => {
     if (state.qrDialogElement) {
       state.qrDialogElement.focus();
       setupFocusTrap(state.qrDialogElement);
@@ -38,8 +38,12 @@ export async function openQrDialog(
 export function closeQrDialog(
   focusTrapCleanup: (() => void) | null,
   state: QRState,
-  setters: QRSetters
+  setters: QRSetters,
+  openTimerId?: ReturnType<typeof setTimeout> | null
 ) {
+  if (openTimerId != null) {
+    clearTimeout(openTimerId);
+  }
   focusTrapCleanup?.();
   setters.setQrDialogOpen(false);
   if (state.previousFocusElement) {
@@ -103,13 +107,13 @@ export async function copyQrImage(
 ) {
   if (!qrCanvas) return;
   try {
-    qrCanvas.toBlob(async (blob) => {
-      if (blob) {
-        const item = new ClipboardItem({ 'image/png': blob });
-        await navigator.clipboard.write([item]);
-        showToast(await t('toasts.qrCodeCopiedToClipboard'));
-      }
-    });
+    const blob = await new Promise<Blob | null>((resolve) => qrCanvas.toBlob(resolve, 'image/png'));
+    if (!blob) {
+      throw new Error('Failed to generate image blob from canvas');
+    }
+    const item = new ClipboardItem({ 'image/png': blob });
+    await navigator.clipboard.write([item]);
+    showToast(await t('toasts.qrCodeCopiedToClipboard'));
   } catch (e) {
     logError('Failed to copy QR code:', e);
     showToast(await t('toasts.qrCodeCopyFailed'), 'error');

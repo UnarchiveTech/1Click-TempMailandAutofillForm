@@ -23,8 +23,8 @@
     "noImplicitThis": true,
     "alwaysStrict": true,
     "forceConsistentCasingInFileNames": true,
-    "types": ["chrome"]
+    "types": ["chrome", "bun-types"]
   },
-  "include": ["src/**/*"],
-  "exclude": ["node_modules", ".output", "**/*.test.ts", "**/*.spec.ts", "e2e"]
+  "include": ["src/**/*", "tests/**/*"],
+  "exclude": ["node_modules", ".output"]
 }

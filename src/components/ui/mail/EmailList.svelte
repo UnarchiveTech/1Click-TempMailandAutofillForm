@@ -1,13 +1,25 @@
 <script lang="ts">
 import { onDestroy, onMount } from 'svelte';
+import { t } from 'svelte-i18n';
 import { browser } from 'wxt/browser';
 import Icon from '@/components/icons/Icon.svelte';
 import EmptyState from '@/components/ui/EmptyState.svelte';
 import FaviconImage from '@/components/ui/FaviconImage.svelte';
 import Skeleton from '@/components/ui/Skeleton.svelte';
+import { avatarColor, MD3_AVATAR_MUTED } from '@/utils/avatar-color.js';
+import { isEmailStarred, starKeyForEmail, toggleStarInSet } from '@/utils/email-star-key.js';
 import type { EmailThread } from '@/utils/email-threads.js';
 import { logDebug, logError } from '@/utils/logger.js';
+import {
+  collectIntersectingIds,
+  isInteractiveTarget,
+  MARQUEE_THRESHOLD,
+  normalizeMarquee,
+} from '@/utils/marquee-selection.js';
+import { isMarqueeSelectionEnabled } from '@/utils/marquee-settings.js';
+import { htmlToPlainText } from '@/utils/sanitize-html.js';
 import { highlightMatches, parseSearchShortcuts } from '@/utils/search-shortcuts.js';
+import { timeAgo } from '@/utils/time.js';
 import type { Email } from '@/utils/types.js';
 
 let {
@@ -17,6 +29,8 @@ let {
   loading = false,
   searchQuery = '',
   otpOnly = false,
+  /** Active mailbox address - scopes star state so ids never bleed across inboxes */
+  mailboxAddress = '',
   onOpenMessageDetail = () => {},
   onClearFilters = () => {},
   onRefreshInbox = () => {},
@@ -28,10 +42,37 @@ let {
   expandedThreadIds = new Set<string>(),
   onToggleThread = (_id: string) => {},
   emailPreviewEnabled = true,
+  showFavicons = true,
+  hideLabels = false,
+  hideOtpLabels = false,
   emailListTab = 'inbox',
   onArchiveEmails = (_emails: Email[]) => {},
   onDeleteEmails = (_emails: Email[]) => {},
   onRestoreEmails = (_emails: Email[]) => {},
+  /** When true, parent renders the selection strip (InboxView bottom strips). */
+  externalSelectionBar = false,
+  onSelectionChange = (_state: {
+    mode: boolean;
+    count: number;
+    canArchive: boolean;
+    canDelete: boolean;
+    canRestore: boolean;
+  }) => {},
+  onFilterByLabel = (_label: string) => {},
+  /** Scroll direction for parent FABs (hide on down, show on up) */
+  onScrollDirection = (_dir: 'up' | 'down') => {},
+  selectionApi = $bindable({
+    cancel: () => {},
+    archive: () => {},
+    delete: () => {},
+    restore: () => {},
+    star: () => {},
+    label: () => {},
+    selectAll: () => {},
+    deselectAll: () => {},
+  }),
+  /** Disable long-press / hold multi-select gestures */
+  gesturesEnabled = true,
 } = $props<{
   displayedEmails?: Email[];
   filteredEmails?: Email[];
@@ -39,7 +80,8 @@ let {
   loading?: boolean;
   searchQuery?: string;
   otpOnly?: boolean;
-  onOpenMessageDetail?: (email: Email) => void;
+  mailboxAddress?: string;
+  onOpenMessageDetail?: (thread: Email[]) => void;
   onClearFilters?: () => void;
   onRefreshInbox?: () => Promise<void>;
   onCopyOtpFromMessage?: (otp: string) => void;
@@ -50,10 +92,35 @@ let {
   expandedThreadIds?: Set<string>;
   onToggleThread?: (id: string) => void;
   emailPreviewEnabled?: boolean;
+  showFavicons?: boolean;
+  hideLabels?: boolean;
+  /** Hide OTP badges on list rows (independent of custom labels) */
+  hideOtpLabels?: boolean;
   emailListTab?: 'inbox' | 'all' | 'archived' | 'deleted';
   onArchiveEmails?: (emails: Email[]) => void | Promise<void>;
   onDeleteEmails?: (emails: Email[]) => void | Promise<void>;
   onRestoreEmails?: (emails: Email[]) => void | Promise<void>;
+  externalSelectionBar?: boolean;
+  onSelectionChange?: (state: {
+    mode: boolean;
+    count: number;
+    canArchive: boolean;
+    canDelete: boolean;
+    canRestore: boolean;
+  }) => void;
+  onFilterByLabel?: (label: string) => void;
+  onScrollDirection?: (dir: 'up' | 'down') => void;
+  selectionApi?: {
+    cancel: () => void;
+    archive: () => void;
+    delete: () => void;
+    restore: () => void;
+    star: () => void;
+    label: () => void;
+    selectAll: () => void;
+    deselectAll: () => void;
+  };
+  gesturesEnabled?: boolean;
 }>();
 
 // Pull-to-refresh state
@@ -61,7 +128,10 @@ let pullToRefresh = $state(false);
 let pullDistance = $state(0);
 let startY = $state(0);
 let isPulling = $state(false);
-let refreshRotation = $derived(pullDistance * 4.5); // Rotate icon based on pull distance
+let pullRefreshing = $state(false);
+let refreshRotation = $derived(Math.min(pullDistance * 4.5, 360));
+let lastScrollTop = 0;
+let scrollRaf = 0;
 
 // Long-press context menu state
 let longPressTimer: ReturnType<typeof setTimeout> | null = null;
@@ -75,23 +145,136 @@ let swipeDistance = $state(0);
 let swipeDirection = $state<'left' | 'right' | null>(null);
 let swipingEmail = $state<Email | null>(null);
 let swipeActionTriggered = $state(false);
+/** Rows animating out after swipe archive/delete */
+let exitingEmailIds = $state<Set<string>>(new Set());
+/** Brief star pop animation target */
+let starPopId = $state<string | null>(null);
+let prefersReducedMotion = $state(false);
 
 // Multi-select state
 let selectionMode = $state(false);
 let selectedEmailIds = $state<Set<string>>(new Set());
+/** After long-press/marquee select, ignore the click that would toggle/deselect */
+let suppressClickUntil = 0;
+let marqueeDidSelect = false;
 
-// Starred emails
-let starredEmailIds = $state<Set<string>>(new Set());
+// Marquee rubber-band selection
+let listRootEl = $state<HTMLElement | null>(null);
+let marqueeActive = $state(false);
+let marqueeStart = $state<{ x: number; y: number } | null>(null);
+let marqueeRect = $state<{ left: number; top: number; right: number; bottom: number } | null>(null);
+let marqueePrefEnabled = $state(true);
 
-// Sort starred emails to the top
-let sortedDisplayedEmails = $derived.by(() => {
-  if (starredEmailIds.size === 0) return displayedEmails;
-  const starred: Email[] = [];
-  const rest: Email[] = [];
-  for (const email of displayedEmails) {
-    (starredEmailIds.has(email.id) ? starred : rest).push(email);
+onMount(() => {
+  void isMarqueeSelectionEnabled().then((v) => {
+    marqueePrefEnabled = v;
+  });
+  const onStorage = (changes: Record<string, { newValue?: unknown }>, area: string) => {
+    if (area !== 'local' || !changes.marqueeSelectionEnabled) return;
+    marqueePrefEnabled = changes.marqueeSelectionEnabled.newValue !== false;
+  };
+  try {
+    browser.storage.onChanged.addListener(onStorage);
+    return () => browser.storage.onChanged.removeListener(onStorage);
+  } catch {
+    return;
   }
-  return [...starred, ...rest];
+});
+
+function onMarqueePointerDown(e: PointerEvent) {
+  if (!gesturesEnabled || !marqueePrefEnabled || e.button !== 0) return;
+  // No items in current tab → disable marquee
+  if ((displayedEmails?.length || 0) === 0) return;
+  if (isInteractiveTarget(e.target)) return;
+  marqueeStart = { x: e.clientX, y: e.clientY };
+  marqueeActive = false;
+  marqueeRect = null;
+  const onMove = (ev: PointerEvent) => {
+    if (!marqueeStart) return;
+    const dx = Math.abs(ev.clientX - marqueeStart.x);
+    const dy = Math.abs(ev.clientY - marqueeStart.y);
+    if (!marqueeActive && dx < MARQUEE_THRESHOLD && dy < MARQUEE_THRESHOLD) return;
+    marqueeActive = true;
+    marqueeRect = normalizeMarquee(marqueeStart, { x: ev.clientX, y: ev.clientY });
+    if (listRootEl) {
+      const ids = collectIntersectingIds(listRootEl, '[data-marquee-id]', marqueeRect);
+      selectionMode = ids.length > 0;
+      selectedEmailIds = new Set(ids);
+      emitSelectionChange();
+    }
+  };
+  const onUp = () => {
+    window.removeEventListener('pointermove', onMove);
+    window.removeEventListener('pointerup', onUp);
+    if (marqueeActive) {
+      marqueeDidSelect = true;
+      suppressClickUntil = Date.now() + 500;
+    }
+    marqueeStart = null;
+    marqueeActive = false;
+    marqueeRect = null;
+  };
+  window.addEventListener('pointermove', onMove);
+  window.addEventListener('pointerup', onUp);
+}
+
+// Clear multi-select only when mailbox *address* changes (not on selection updates).
+// Plain let — NOT $state: read+write of $state in one $effect → effect_update_depth_exceeded.
+let lastMailboxForSelection: string | null = null;
+$effect(() => {
+  const addr = mailboxAddress || '';
+  if (lastMailboxForSelection === null) {
+    lastMailboxForSelection = addr;
+    return;
+  }
+  if (lastMailboxForSelection !== addr) {
+    lastMailboxForSelection = addr;
+    selectionMode = false;
+    selectedEmailIds = new Set();
+    contextMenuOpen = false;
+    longPressEmail = null;
+    emitSelectionChange();
+  }
+});
+
+// Starred emails (keys are address_id - see email-star-key.ts)
+let starredEmailIds = $state<Set<string>>(new Set());
+/** Which row's label overflow menu is open */
+let rowLabelMenuId = $state<string | null>(null);
+
+function isStarredMail(email: Email): boolean {
+  return isEmailStarred(starredEmailIds, email.id, email.original_inbox || mailboxAddress);
+}
+
+// Windowed rendering for large inboxes (expand via sentinel / Load more)
+let renderLimit = $state(50);
+let renderedEmails = $derived(displayedEmails.slice(0, renderLimit));
+let listSentinelEl = $state<HTMLElement | null>(null);
+
+function expandRenderWindow() {
+  if (renderLimit >= displayedEmails.length) return;
+  renderLimit = Math.min(displayedEmails.length, renderLimit + 50);
+}
+
+$effect(() => {
+  const el = listSentinelEl;
+  if (!el || typeof IntersectionObserver === 'undefined') return;
+  const io = new IntersectionObserver(
+    (entries) => {
+      if (entries.some((e) => e.isIntersecting)) expandRenderWindow();
+    },
+    { root: null, rootMargin: '200px', threshold: 0 }
+  );
+  io.observe(el);
+  return () => io.disconnect();
+});
+
+// Reset window when the underlying list shrinks / filter changes
+$effect(() => {
+  void displayedEmails.length;
+  if (renderLimit > displayedEmails.length + 50) {
+    renderLimit = Math.max(50, displayedEmails.length);
+  }
 });
 
 // Email-level custom tags
@@ -117,47 +300,79 @@ async function saveEmailTagsToStorage() {
   await browser.storage.local.set({ emailTags: emailTagsMap });
 }
 
+/** When set, tag dialog applies to many selected emails instead of one. */
+let tagDialogMultiIds = $state<string[] | null>(null);
+
 function openTagDialog(emailId: string) {
   tagDialogEmailId = emailId;
+  tagDialogMultiIds = null;
   const tags = emailTagsMap[emailId];
   tagDialogInput = (Array.isArray(tags) ? tags : []).join(', ');
+  tagDialogOpen = true;
+}
+
+function openTagDialogForSelected() {
+  // Snapshot IDs so clearing selection later does not lose targets
+  const ids = Array.from(selectedEmailIds);
+  if (ids.length === 0) return;
+  tagDialogEmailId = ids[0] ?? null;
+  tagDialogMultiIds = [...ids];
+  // Prefill empty for “add label”; user types new label(s)
+  tagDialogInput = '';
   tagDialogOpen = true;
 }
 
 function closeTagDialog() {
   tagDialogOpen = false;
   tagDialogEmailId = null;
+  tagDialogMultiIds = null;
   tagDialogInput = '';
 }
 
 async function saveEmailTags() {
-  if (!tagDialogEmailId) return;
   const tags = tagDialogInput
     .split(',')
     .map((t) => t.trim())
     .filter(Boolean);
-  if (tags.length === 0) {
-    const next = { ...emailTagsMap };
-    delete next[tagDialogEmailId];
-    emailTagsMap = next;
-  } else {
-    emailTagsMap = { ...emailTagsMap, [tagDialogEmailId]: tags };
+  const ids = tagDialogMultiIds?.length
+    ? [...tagDialogMultiIds]
+    : tagDialogEmailId
+      ? [tagDialogEmailId]
+      : [];
+  if (ids.length === 0) return;
+  // Nothing to apply
+  if (tags.length === 0 && tagDialogMultiIds?.length) {
+    closeTagDialog();
+    return;
   }
+
+  const next: Record<string, string[]> = { ...emailTagsMap };
+  for (const id of ids) {
+    if (tags.length === 0) {
+      delete next[id];
+    } else if (tagDialogMultiIds?.length) {
+      // Multi-select from strip: merge / add labels onto existing
+      const existing = Array.isArray(next[id]) ? next[id] : [];
+      next[id] = [...new Set([...existing, ...tags])];
+    } else {
+      // Single-email editor: replace with typed list
+      next[id] = tags;
+    }
+  }
+  emailTagsMap = next;
   await saveEmailTagsToStorage();
+  // Refresh parent label chips
+  try {
+    await browser.storage.local.set({ emailTags: next });
+  } catch {
+    /* ignore */
+  }
   closeTagDialog();
+  if (selectionMode) closeContextMenuOnly();
 }
 
-async function removeEmailTag(emailId: string, tag: string) {
-  const current = emailTagsMap[emailId] || [];
-  const next = current.filter((t) => t !== tag);
-  if (next.length === 0) {
-    const map = { ...emailTagsMap };
-    delete map[emailId];
-    emailTagsMap = map;
-  } else {
-    emailTagsMap = { ...emailTagsMap, [emailId]: next };
-  }
-  await saveEmailTagsToStorage();
+function filterByLabel(tag: string) {
+  onFilterByLabel(tag);
 }
 
 // All unique tags across all emails for autocomplete
@@ -184,20 +399,59 @@ async function loadStarredEmails() {
   starredEmailIds = new Set(result.starredEmails || []);
 }
 
-async function toggleStar(emailId: string) {
-  const updated = new Set(starredEmailIds);
-  if (updated.has(emailId)) {
-    updated.delete(emailId);
-  } else {
-    updated.add(emailId);
+let starToggleBusy = $state(false);
+
+async function toggleStar(email: Email | string) {
+  const mail = typeof email === 'string' ? ({ id: email } as Email) : email;
+  if (!mail?.id || starToggleBusy) return;
+  starToggleBusy = true;
+  try {
+    const result = (await browser.storage.local.get(['starredEmails'])) as {
+      starredEmails?: string[];
+    };
+    const addr = mail.original_inbox || mailboxAddress;
+    const updated = toggleStarInSet(result.starredEmails || [], mail.id, addr);
+    starredEmailIds = updated;
+    if (!prefersReducedMotion) {
+      starPopId = mail.id;
+      setTimeout(() => {
+        if (starPopId === mail.id) starPopId = null;
+      }, 180);
+    }
+    await browser.storage.local.set({ starredEmails: Array.from(updated) });
+  } catch (e) {
+    logError('toggleStar failed', e);
+    await loadStarredEmails();
+  } finally {
+    starToggleBusy = false;
   }
-  starredEmailIds = updated;
-  await browser.storage.local.set({ starredEmails: Array.from(updated) });
 }
+
+function handleListScroll(e: Event) {
+  const el = e.currentTarget as HTMLElement | null;
+  if (!el) return;
+  const top = el.scrollTop;
+  const delta = top - lastScrollTop;
+  if (Math.abs(delta) > 8) {
+    onScrollDirection(delta > 0 && top > 24 ? 'down' : 'up');
+    lastScrollTop = top;
+  }
+}
+
+let motionMqCleanup: (() => void) | null = null;
 
 onMount(() => {
   loadEmailTags();
   loadStarredEmails();
+  if (typeof window !== 'undefined' && window.matchMedia) {
+    const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+    prefersReducedMotion = mq.matches;
+    const onMq = () => {
+      prefersReducedMotion = mq.matches;
+    };
+    mq.addEventListener?.('change', onMq);
+    motionMqCleanup = () => mq.removeEventListener?.('change', onMq);
+  }
 
   const handleStorageChange = (
     changes: Record<string, { oldValue?: unknown; newValue?: unknown }>,
@@ -209,11 +463,16 @@ onMount(() => {
   };
 
   browser.storage.onChanged.addListener(handleStorageChange);
-  onDestroy(() => {
+  return () => {
     browser.storage.onChanged.removeListener(handleStorageChange);
-    if (hoverTimer) clearTimeout(hoverTimer);
-    if (longPressTimer) clearTimeout(longPressTimer);
-  });
+    motionMqCleanup?.();
+  };
+});
+
+onDestroy(() => {
+  if (hoverTimer) clearTimeout(hoverTimer);
+  if (longPressTimer) clearTimeout(longPressTimer);
+  if (scrollRaf) cancelAnimationFrame(scrollRaf);
 });
 
 function handleSwipeStart(email: Email, e: TouchEvent | MouseEvent) {
@@ -253,7 +512,21 @@ function handleSwipeEnd() {
   }
 }
 
+function selectAllVisible() {
+  selectionMode = true;
+  const ids = new Set<string>((displayedEmails || []).map((m: Email) => m.id));
+  selectedEmailIds = ids;
+  emitSelectionChange();
+}
+
+function deselectAll() {
+  selectedEmailIds = new Set();
+  selectionMode = false;
+  emitSelectionChange();
+}
+
 function handleLongPressStart(email: Email, e: TouchEvent | MouseEvent) {
+  if (!gesturesEnabled) return;
   if (longPressTimer) clearTimeout(longPressTimer);
   longPressTimer = setTimeout(() => {
     longPressEmail = email;
@@ -266,9 +539,17 @@ function handleLongPressStart(email: Email, e: TouchEvent | MouseEvent) {
     } else {
       selectedEmailIds = new Set([email.id]);
     }
-    contextMenuOpen = true;
-    const touch = 'touches' in e ? e.touches[0] : e;
-    contextMenuPosition = { x: touch.clientX, y: touch.clientY };
+    // Block the mouseup/click that follows a hold so selection is not toggled off
+    suppressClickUntil = Date.now() + 500;
+    // Parent hosts selection strip — don't open floating context menu (it steals focus)
+    if (!externalSelectionBar) {
+      contextMenuOpen = true;
+      const touch = 'touches' in e ? e.touches[0] : e;
+      contextMenuPosition = { x: touch.clientX, y: touch.clientY };
+    } else {
+      contextMenuOpen = false;
+    }
+    emitSelectionChange();
   }, 500);
 }
 
@@ -279,11 +560,30 @@ function handleLongPressEnd() {
   }
 }
 
+/** Close floating menu only — keeps multi-select / strip selection intact */
+function closeContextMenuOnly() {
+  contextMenuOpen = false;
+  longPressEmail = null;
+}
+
+/** Cancel multi-select entirely (deselect strip / Escape) */
 function closeContextMenu() {
   contextMenuOpen = false;
   longPressEmail = null;
   selectionMode = false;
   selectedEmailIds = new Set();
+  emitSelectionChange();
+}
+
+function emitSelectionChange() {
+  const count = selectedEmailIds.size;
+  onSelectionChange({
+    mode: selectionMode && count > 0,
+    count,
+    canArchive: emailListTab === 'inbox' || emailListTab === 'all',
+    canDelete: emailListTab !== 'deleted',
+    canRestore: emailListTab === 'archived' || emailListTab === 'deleted',
+  });
 }
 
 function toggleEmailSelection(id: string) {
@@ -298,6 +598,7 @@ function toggleEmailSelection(id: string) {
     selectionMode = false;
     contextMenuOpen = false;
   }
+  emitSelectionChange();
 }
 
 function resolveSelectedEmails(): Email[] {
@@ -325,21 +626,96 @@ function performRestore() {
   closeContextMenu();
 }
 
-function performSwipeAction(direction: 'left' | 'right', email: Email) {
-  if (emailListTab === 'archived' || emailListTab === 'deleted') {
-    void onRestoreEmails([email]);
-  } else if (direction === 'left') {
-    void onDeleteEmails([email]);
-  } else {
-    void onArchiveEmails([email]);
+async function performStarSelected() {
+  const targets = displayedEmails.filter((e: Email) => selectedEmailIds.has(e.id));
+  if (targets.length === 0) return;
+  const anyUnstarred = targets.some((e: Email) => !isStarredMail(e));
+  const updated = new Set(starredEmailIds);
+  for (const e of targets) {
+    const addr = e.original_inbox || mailboxAddress;
+    const key = starKeyForEmail(e, addr);
+    updated.delete(e.id); // drop legacy bare id
+    if (anyUnstarred) updated.add(key);
+    else updated.delete(key);
   }
+  starredEmailIds = updated;
+  await browser.storage.local.set({ starredEmails: Array.from(updated) });
+}
+
+function performLabelSelected() {
+  openTagDialogForSelected();
+}
+
+// Wire parent action handles once. Methods call component functions that read
+// current $state at invoke time — do NOT reassign inside $effect (mutating the
+// bindable $state object with new function refs every run causes
+// effect_update_depth_exceeded).
+function wireSelectionApi() {
+  selectionApi.cancel = () => closeContextMenu();
+  selectionApi.selectAll = () => selectAllVisible();
+  selectionApi.deselectAll = () => deselectAll();
+  selectionApi.archive = () => performArchive();
+  selectionApi.delete = () => performDelete();
+  selectionApi.restore = () => performRestore();
+  selectionApi.star = () => {
+    void performStarSelected();
+  };
+  selectionApi.label = () => {
+    performLabelSelected();
+  };
+}
+onMount(() => {
+  wireSelectionApi();
+});
+
+function isDocumentRtl(): boolean {
+  if (typeof document === 'undefined') return false;
+  return (
+    document.documentElement.dir === 'rtl' ||
+    getComputedStyle(document.documentElement).direction === 'rtl'
+  );
+}
+
+/**
+ * Map physical swipe direction to action. In RTL, mirror so
+ * "swipe toward start" archives and "toward end" deletes (matches LTR muscle memory).
+ * Rows collapse briefly so the action feels intentional before the list updates.
+ */
+function performSwipeAction(direction: 'left' | 'right', email: Email) {
+  const run = () => {
+    if (emailListTab === 'archived' || emailListTab === 'deleted') {
+      void onRestoreEmails([email]);
+      return;
+    }
+    const rtl = isDocumentRtl();
+    // LTR: left=delete, right=archive. RTL: physical left=archive, physical right=delete.
+    const isDelete = (!rtl && direction === 'left') || (rtl && direction === 'right');
+    if (isDelete) {
+      void onDeleteEmails([email]);
+    } else {
+      void onArchiveEmails([email]);
+    }
+  };
+
   swipeActionTriggered = true;
+  const delay = prefersReducedMotion ? 0 : 240;
+  if (!prefersReducedMotion) {
+    const next = new Set(exitingEmailIds);
+    next.add(email.id);
+    exitingEmailIds = next;
+  }
   setTimeout(() => {
+    run();
     swipeDistance = 0;
     swipeDirection = null;
     swipingEmail = null;
     swipeActionTriggered = false;
-  }, 300);
+    if (exitingEmailIds.has(email.id)) {
+      const cleared = new Set(exitingEmailIds);
+      cleared.delete(email.id);
+      exitingEmailIds = cleared;
+    }
+  }, delay);
 }
 
 // Track per-email favicon loaded state for container styling
@@ -352,7 +728,7 @@ let highlightTerms = $derived.by(() => {
 });
 
 // Extract display name from email address
-function getDisplayName(email: string, name?: string): string {
+function getDisplayName(email: string, name: string | undefined = undefined): string {
   // Prioritize name over email
   if (name?.trim()) {
     // If name looks like an email address, extract the local part
@@ -372,26 +748,9 @@ function getDisplayName(email: string, name?: string): string {
   return email;
 }
 
-const AVATAR_COLORS = [
-  'bg-teal-600',
-  'bg-emerald-700',
-  'bg-pink-600',
-  'bg-indigo-600',
-  'bg-violet-600',
-  'bg-orange-600',
-  'bg-cyan-700',
-  'bg-rose-600',
-];
-
-function avatarColor(email: string): string {
-  let hash = 0;
-  for (let i = 0; i < email.length; i++) hash = (hash * 31 + email.charCodeAt(i)) & 0xffff;
-  return AVATAR_COLORS[hash % AVATAR_COLORS.length];
-}
-
 function handleMouseEnter(email: Email, e: MouseEvent) {
   if (hoverTimer) clearTimeout(hoverTimer);
-  // Capture rect synchronously — currentTarget becomes null after the event returns
+  // Capture rect synchronously - currentTarget becomes null after the event returns
   const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
   hoverTimer = setTimeout(() => {
     const previewHeight = 240;
@@ -413,33 +772,46 @@ function handleMouseLeave() {
   }
   hoveredEmail = null;
 }
-
-function stripHtml(html: string): string {
-  return new DOMParser().parseFromString(html, 'text/html').body.textContent || '';
-}
 </script>
 
 <svelte:window bind:innerWidth={windowWidth} bind:innerHeight={windowHeight} />
 
 <div class="relative flex flex-col flex-1 min-h-0">
-  <!-- Pull-to-refresh overlay (outside scrollable area) -->
-  {#if pullDistance > 0}
+  <!-- Pull-to-refresh overlay (rubber-band + ready check) -->
+  {#if pullDistance > 0 || pullRefreshing}
+    {@const ready = pullDistance > 60 || pullRefreshing}
     <div
-      class="absolute top-0 left-0 right-0 flex items-center justify-center py-2 z-10 pointer-events-none"
-      style="opacity: {Math.min(pullDistance / 60, 1)}; transform: translateY({Math.min(pullDistance - 10, 50)}px); transition: opacity 0.1s;"
+      class="pull-refresh-band absolute top-0 inset-x-0 flex items-center justify-center py-2 z-10 pointer-events-none"
+      style="opacity: {pullRefreshing ? 1 : Math.min(pullDistance / 60, 1)}; transform: translateY({pullRefreshing ? 28 : Math.min(pullDistance * 0.55, 48)}px);"
     >
-      <span style="transform: rotate({refreshRotation}deg); display: inline-block;">
-        <Icon name="refresh" class="w-5 h-5 text-md-primary" />
+      <span
+        class="pull-refresh-icon {ready && !pullRefreshing ? 'is-ready' : ''} {pullRefreshing ? 'animate-spin' : ''}"
+        style={pullRefreshing ? '' : `transform: rotate(${refreshRotation}deg);`}
+      >
+        {#if ready && !pullRefreshing}
+          <Icon name="checkCircle" class="w-5 h-5 text-md-success" />
+        {:else}
+          <Icon name="refresh" class="w-5 h-5 text-md-primary" />
+        {/if}
       </span>
-      <span class="text-xs text-md-primary ml-2 font-semibold">
-        {pullDistance > 60 ? 'Release to refresh' : 'Pull to refresh'}
+      <span class="text-xs font-semibold ms-2 {ready ? 'text-md-success' : 'text-md-primary'}">
+        {pullRefreshing
+          ? ($t('common.loading') || 'Refreshing…')
+          : ready
+            ? ($t('emailList.releaseToRefresh') || 'Release to refresh')
+            : ($t('emailList.pullToRefresh') || 'Pull to refresh')}
       </span>
     </div>
   {/if}
 
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <div
-  class="flex-1 px-1 border-t border-md-secondary-container overflow-y-auto pb-[120px] relative"
+  bind:this={listRootEl}
+  class="flex-1 min-h-0 px-0 border-t border-md-outline-variant/30 relative flex flex-col
+    {displayedEmails.length === 0 && !loading
+      ? 'overflow-hidden'
+      : 'overflow-y-auto pb-2'}"
+  onpointerdown={onMarqueePointerDown}
   role="region"
   aria-label="Email list"
   ontouchstart={(e) => {
@@ -448,21 +820,29 @@ function stripHtml(html: string): string {
     pullDistance = 0;
   }}
   ontouchmove={(e) => {
-    if (!isPulling) return;
-    const container = e.currentTarget as HTMLElement;
-    if (container.scrollTop > 0) return;
+    if (!isPulling || pullRefreshing) return;
+    const container = e.currentTarget as HTMLElement | null;
+    if (!container || container.scrollTop > 0) return;
     const currentY = e.touches[0].clientY;
-    const dist = currentY - startY;
+    // Rubber-band: dampen distance so pull feels elastic
+    const raw = Math.max(0, currentY - startY);
+    const dist = Math.min(raw * 0.55, 88);
     if (dist > 0) {
-      pullDistance = Math.min(dist, 80);
+      pullDistance = dist;
       pullToRefresh = pullDistance > 60;
       e.preventDefault();
     }
   }}
   ontouchend={async (e) => {
-    const container = e.currentTarget as HTMLElement;
-    if (pullToRefresh && container.scrollTop === 0) {
-      await onRefreshInbox();
+    const container = e.currentTarget as HTMLElement | null;
+    const atTop = !container || container.scrollTop === 0;
+    if (pullToRefresh && atTop) {
+      pullRefreshing = true;
+      try {
+        await onRefreshInbox();
+      } finally {
+        pullRefreshing = false;
+      }
     }
     pullToRefresh = false;
     pullDistance = 0;
@@ -470,26 +850,33 @@ function stripHtml(html: string): string {
     startY = 0;
   }}
   onmousedown={(e) => {
+    // Touch-first: only arm pull when at top and not a text-select drag intent
     startY = e.clientY;
     isPulling = true;
     pullDistance = 0;
   }}
   onmousemove={(e) => {
-    if (!isPulling || e.buttons !== 1) return;
-    const container = e.currentTarget as HTMLElement;
-    if (container.scrollTop > 0) return;
-    const currentY = e.clientY;
-    const dist = currentY - startY;
-    if (dist > 0) {
-      pullDistance = Math.min(dist, 80);
+    if (!isPulling || e.buttons !== 1 || pullRefreshing) return;
+    const container = e.currentTarget as HTMLElement | null;
+    if (!container || container.scrollTop > 0) return;
+    const raw = Math.max(0, e.clientY - startY);
+    const dist = Math.min(raw * 0.55, 88);
+    if (dist > 12) {
+      pullDistance = dist;
       pullToRefresh = pullDistance > 60;
       e.preventDefault();
     }
   }}
   onmouseup={async (e) => {
-    const container = e.currentTarget as HTMLElement;
-    if (pullToRefresh && container.scrollTop === 0) {
-      await onRefreshInbox();
+    const container = e.currentTarget as HTMLElement | null;
+    const atTop = !container || container.scrollTop === 0;
+    if (pullToRefresh && atTop) {
+      pullRefreshing = true;
+      try {
+        await onRefreshInbox();
+      } finally {
+        pullRefreshing = false;
+      }
     }
     pullToRefresh = false;
     pullDistance = 0;
@@ -497,23 +884,27 @@ function stripHtml(html: string): string {
     startY = 0;
   }}
   onmouseleave={() => {
+    if (pullRefreshing) return;
     pullToRefresh = false;
     pullDistance = 0;
     isPulling = false;
     startY = 0;
   }}
   onscroll={(e) => {
-    const container = e.currentTarget as HTMLElement;
+    const container = e.currentTarget as HTMLElement | null;
+    if (!container) return;
     const scrollBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
     if (scrollBottom < 100 && displayedEmailCount < filteredEmails.length) {
       loadMoreEmails();
     }
+    if (scrollRaf) cancelAnimationFrame(scrollRaf);
+    scrollRaf = requestAnimationFrame(() => handleListScroll(e));
   }}
 >
-  {#if loading}
+  {#if loading && displayedEmails.length === 0}
     <div class="py-2 space-y-2">
       {#each [1, 2, 3] as _}
-        <div class="py-2 border-b border-md-secondary-container px-1">
+        <div class="py-2 border-b border-md-outline-variant/30 px-1">
           <div class="flex justify-between mb-1">
             <Skeleton width="6rem" height="0.75rem" />
             <Skeleton width="3rem" height="0.75rem" />
@@ -524,34 +915,50 @@ function stripHtml(html: string): string {
     </div>
   {:else if displayedEmails.length === 0}
     <EmptyState
-      icon={emailListTab === 'archived'
-        ? "<svg xmlns='http://www.w3.org/2000/svg' class='w-8 h-8 text-md-on-surface/40' fill='none' viewBox='0 0 24 24' stroke='currentColor' stroke-width='2'><path stroke-linecap='round' stroke-linejoin='round' d='M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5M10 11.25h4M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z'/></svg>"
+      iconName={emailListTab === 'archived'
+        ? 'archive'
         : emailListTab === 'deleted'
-          ? "<svg xmlns='http://www.w3.org/2000/svg' class='w-8 h-8 text-md-on-surface/40' fill='none' viewBox='0 0 24 24' stroke='currentColor' stroke-width='2'><path stroke-linecap='round' stroke-linejoin='round' d='M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0'/></svg>"
-          : "<svg xmlns='http://www.w3.org/2000/svg' class='w-8 h-8 text-md-on-surface/40' fill='none' viewBox='0 0 24 24' stroke='currentColor' stroke-width='2'><path stroke-linecap='round' stroke-linejoin='round' d='M21.75 6.75v10.5a2.25 2.25 0 01-2.25 2.25h-15a2.25 2.25 0 01-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25m19.5 0v.243a2.25 2.25 0 01-1.07 1.916l-7.5 4.615a2.25 2.25 0 01-2.36 0L3.32 8.91a2.25 2.25 0 01-1.07-1.916V6.75'/></svg>"}
-      title={emailListTab === 'archived' ? "No archived emails" : emailListTab === 'deleted' ? "No deleted emails" : emailListTab === 'inbox' ? "Inbox is empty" : "No emails found"}
+          ? 'trash'
+          : 'mail'}
+      title={emailListTab === 'archived'
+        ? $t('emailList.noArchived')
+        : emailListTab === 'deleted'
+          ? $t('emailList.noDeleted')
+          : emailListTab === 'inbox'
+            ? $t('emailList.inboxEmpty')
+            : $t('emailList.noEmailsFound')}
       description={emailListTab === 'archived'
-        ? "Swipe right on an email to archive it."
+        ? $t('emailList.swipeArchiveHint')
         : emailListTab === 'deleted'
-          ? "Swipe left on an email to delete it. Deleted emails can be restored here."
-          : searchQuery || otpOnly ? "Try adjusting your filters or search terms" : emailListTab === 'inbox' ? "Your inbox is empty. Archived or deleted emails won't show here." : "Your inbox is empty. Emails will appear here when they arrive."}
-      actionLabel={(emailListTab === 'inbox' || emailListTab === 'all') && !searchQuery && !otpOnly ? "Refresh Inbox" : (emailListTab === 'inbox' || emailListTab === 'all') ? "Clear Filters" : ""}
-      onAction={(emailListTab === 'inbox' || emailListTab === 'all') && !searchQuery && !otpOnly
-        ? () => onRefreshInbox()
-        : (emailListTab === 'inbox' || emailListTab === 'all') ? onClearFilters : () => {}}
+          ? $t('emailList.swipeDeleteHint')
+          : searchQuery || otpOnly
+            ? $t('emailList.adjustFiltersHint')
+            : emailListTab === 'inbox'
+              ? $t('emailList.emptyInboxHint')
+              : $t('emailList.emptyInboxAllHint')}
+      actionLabel={
+        (emailListTab === 'inbox' || emailListTab === 'all') && (searchQuery || otpOnly)
+          ? $t('emailList.clearFilters')
+          : ''
+      }
+      onAction={
+        (emailListTab === 'inbox' || emailListTab === 'all') && (searchQuery || otpOnly)
+          ? onClearFilters
+          : undefined
+      }
     />
   {:else}
-    {#each sortedDisplayedEmails as mail, index}
+    {#each renderedEmails as mail, index (mail.id)}
       <!-- Thread header: show before the latestEmail of a multi-email thread -->
       {#if threadGrouping}
         {@const thread = emailThreads.find((t: EmailThread) => t.latestEmail.id === mail.id)}
         {#if thread && thread.emails.length > 1}
           <div class="flex items-center justify-between px-2 py-1 bg-md-secondary-container/40 border-b border-md-outline-variant/30">
-            <span class="text-[10px] font-semibold text-md-primary/80 uppercase tracking-wider truncate max-w-[65%]">
+            <span class="text-xs font-semibold text-md-primary/80 uppercase tracking-wider truncate max-w-[65%]">
               {thread.normalizedSubject || '(no subject)'}
             </span>
             <button
-              class="flex items-center gap-1 text-[10px] text-md-on-surface/60 hover:text-md-primary transition-colors flex-shrink-0"
+              class="flex items-center gap-1 text-xs text-md-on-surface/60 hover:text-md-primary transition-colors flex-shrink-0"
               onclick={(e) => { e.stopPropagation(); onToggleThread(thread.id); }}
               aria-label="Toggle thread"
             >
@@ -565,38 +972,70 @@ function stripHtml(html: string): string {
           </div>
         {/if}
       {/if}
-      <div class="relative overflow-hidden border-b border-md-outline-variant/50 {threadGrouping && emailThreads.find((t: EmailThread) => t.latestEmail.id !== mail.id && t.emails.some((e: Email) => e.id === mail.id)) ? 'pl-3 bg-md-surface-variant/20' : ''}" id="email-item-{mail.id}">
-        <!-- Swipe action background (delete/archive/restore) -->
+      <div
+        class="relative overflow-hidden border-b border-md-outline-variant/50 density-row {exitingEmailIds.has(mail.id) ? 'email-row-exit' : ''} {threadGrouping && emailThreads.find((t: EmailThread) => t.latestEmail.id !== mail.id && t.emails.some((e: Email) => e.id === mail.id)) ? 'ps-3 bg-md-surface-variant/20' : ''}"
+        id="email-item-{mail.id}"
+        style={exitingEmailIds.has(mail.id) ? 'max-height: 120px;' : undefined}
+      >
+        <!-- Swipe action background (icons/text match tab + direction) -->
         {#if swipingEmail === mail && swipeDirection}
+          {@const isRestoreTab = emailListTab === 'archived' || emailListTab === 'deleted'}
+          {@const rtl = isDocumentRtl()}
+          {@const isDeleteSwipe =
+            !isRestoreTab &&
+            ((!rtl && swipeDirection === 'left') || (rtl && swipeDirection === 'right'))}
+          {@const isArchiveSwipe = !isRestoreTab && !isDeleteSwipe}
           <div
-            class="absolute inset-0 flex items-center justify-end gap-2 px-4 transition-colors duration-200"
-            class:bg-red-500={swipeDirection === 'left' && emailListTab === 'all'}
-            class:bg-blue-500={swipeDirection === 'right' && emailListTab === 'all'}
-            class:bg-md-primary={emailListTab !== 'all'}
+            class="absolute inset-0 flex items-center gap-2 px-4 transition-colors duration-200
+              {isDeleteSwipe ? 'justify-end bg-md-error' : ''}
+              {isArchiveSwipe ? 'justify-start bg-md-tertiary' : ''}
+              {isRestoreTab ? (swipeDirection === 'left' ? 'justify-end' : 'justify-start') + ' bg-md-primary' : ''}"
             style="opacity: {Math.abs(swipeDistance) / 120};"
           >
-            {#if emailListTab === 'all'}
-              {#if swipeDirection === 'left'}
-                <Icon name="trash" class="w-6 h-6 text-white" />
-                <span class="text-white font-medium">Delete</span>
-              {:else}
-                <Icon name="archive" class="w-6 h-6 text-white" />
-                <span class="text-white font-medium">Archive</span>
-              {/if}
-            {:else}
+            {#if isRestoreTab}
               <Icon name="refresh" class="w-6 h-6 text-white" />
-              <span class="text-white font-medium">Restore</span>
+              <span class="text-white font-medium text-sm">{$t('inbox.emailActions.restore')}</span>
+            {:else if isDeleteSwipe}
+              <Icon name="trash" class="w-6 h-6 text-white" />
+              <span class="text-white font-medium text-sm">{$t('inbox.emailActions.delete')}</span>
+            {:else}
+              <Icon name="archive" class="w-6 h-6 text-white" />
+              <span class="text-white font-medium text-sm">{$t('inbox.emailActions.archive')}</span>
             {/if}
           </div>
         {/if}
 
-        <!-- Email item -->
-        <button
+        <!-- Email item row: outer div so star is not nested inside a button -->
+        <div
           id="email-button-{mail.id}"
-          class="w-full text-left border-0 focus:outline-none hover:bg-md-surface-variant/40 duration-150 {mail.id === highlightedEmailId ? 'bg-md-primary/5' : ''} {mail.unread ? 'bg-md-primary/5' : 'bg-transparent'} py-1 px-1"
+          data-marquee-id={mail.id}
+          role="button"
+          class="w-full text-start border-0 focus:outline-none hover:bg-md-surface-variant/40 duration-150 {mail.id === highlightedEmailId ? 'bg-md-primary/5' : ''} {mail.unread ? 'bg-md-primary/5' : 'bg-transparent'} py-0.5 px-0 flex items-center gap-1 {selectedEmailIds.has(mail.id) ? 'ring-2 ring-md-secondary rounded-lg' : ''}"
           style="transform: translateX({swipingEmail === mail ? swipeDistance : 0}px); transition: {swipeActionTriggered ? 'transform 0.3s' : 'none'}; user-select: none;"
           onmouseenter={(e) => handleMouseEnter(mail, e)}
-          onclick={(e) => { e.stopPropagation(); if (Math.abs(swipeDistance) > 5) { e.preventDefault(); return; } if (selectionMode) { toggleEmailSelection(mail.id); } else { onOpenMessageDetail(mail); } }}
+          onclick={(e) => {
+            // Ignore clicks that originated on the star control
+            if ((e.target as HTMLElement)?.closest?.('[data-star-btn]')) return;
+            // Skip open if this was a marquee drag or long-press select release
+            if (marqueeActive || marqueeDidSelect) {
+              marqueeDidSelect = false;
+              return;
+            }
+            if (Date.now() < suppressClickUntil) return;
+            e.stopPropagation();
+            if (Math.abs(swipeDistance) > 5) {
+              e.preventDefault();
+              return;
+            }
+            if (selectionMode) {
+              toggleEmailSelection(mail.id);
+            } else {
+              const thread = threadGrouping
+                ? emailThreads.find((t: EmailThread) => t.emails.some((e: Email) => e.id === mail.id))
+                : null;
+              onOpenMessageDetail(thread ? thread.emails : [mail]);
+            }
+          }}
           ontouchstart={(e) => {
             handleLongPressStart(mail, e);
             handleSwipeStart(mail, e);
@@ -610,6 +1049,7 @@ function stripHtml(html: string): string {
             handleSwipeMove(e);
           }}
           onmousedown={(e) => {
+            if ((e.target as HTMLElement)?.closest?.('[data-star-btn]')) return;
             handleLongPressStart(mail, e);
             handleSwipeStart(mail, e);
           }}
@@ -625,258 +1065,450 @@ function stripHtml(html: string): string {
             handleLongPressEnd();
             handleSwipeEnd();
           }}
-          oncontextmenu={(e) => { e.preventDefault(); }}
+          draggable={selectionMode || selectedEmailIds.has(mail.id)}
+          ondragstart={(e) => {
+            if (!selectionMode && !selectedEmailIds.has(mail.id)) {
+              e.preventDefault();
+              return;
+            }
+            if (e.dataTransfer) {
+              // Shared gesture machine: always 'move' (matches strip dropEffect)
+              e.dataTransfer.effectAllowed = 'move';
+              e.dataTransfer.setData('text/plain', mail.id);
+              // Compact drag chip: first subject only; multi-select shows "+N"
+              try {
+                const selectedIds = selectedEmailIds.has(mail.id)
+                  ? Array.from(selectedEmailIds)
+                  : [mail.id];
+                const firstSubject = mail.subject || $t('emailList.noSubject');
+                const extra = Math.max(0, selectedIds.length - 1);
+                const label =
+                  extra > 0 ? `${firstSubject} +${extra}` : firstSubject;
+                const preview = document.createElement('div');
+                preview.className = 'drag-mail-preview';
+                preview.style.cssText =
+                  'position:fixed;top:-9999px;left:-9999px;max-width:220px;padding:6px 10px;border-radius:10px;background:var(--md-surface-container-high,#2b2930);color:var(--md-on-surface,#e6e1e5);font:12px/1.3 system-ui,sans-serif;font-weight:600;box-shadow:0 6px 16px rgba(0,0,0,.25);pointer-events:none;z-index:99999;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+                preview.textContent = label;
+                document.body.appendChild(preview);
+                e.dataTransfer.setDragImage(preview, 16, 12);
+                setTimeout(() => preview.remove(), 0);
+              } catch {
+                /* ignore drag image failures */
+              }
+            }
+          }}
+          oncontextmenu={(e) => {
+            e.preventDefault();
+            // Right-click = select item and show selection strip
+            selectionMode = true;
+            const next = new Set(selectedEmailIds);
+            next.add(mail.id);
+            selectedEmailIds = next;
+            emitSelectionChange();
+          }}
           onkeydown={(e) => {
-            if (e.key === 'ArrowDown') { e.preventDefault(); (e.currentTarget.nextElementSibling as HTMLElement)?.focus(); }
-            else if (e.key === 'ArrowUp') { e.preventDefault(); (e.currentTarget.previousElementSibling as HTMLElement)?.focus(); }
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              if (selectionMode) toggleEmailSelection(mail.id);
+              else {
+                const thread = threadGrouping
+                  ? emailThreads.find((t: EmailThread) => t.emails.some((em: Email) => em.id === mail.id))
+                  : null;
+                onOpenMessageDetail(thread ? thread.emails : [mail]);
+              }
+            } else if (e.key === 'ArrowDown') {
+              e.preventDefault();
+              (e.currentTarget.nextElementSibling as HTMLElement)?.focus();
+            } else if (e.key === 'ArrowUp') {
+              e.preventDefault();
+              (e.currentTarget.previousElementSibling as HTMLElement)?.focus();
+            }
           }}
           aria-label={`Email from ${mail.from}: ${mail.subject}`}
           tabindex="0"
         >
-        <div class="flex items-center gap-2 px-0 py-0.5 ">
+        <div class="flex items-center gap-2 px-0 py-0.5 flex-1 min-w-0">
 
-          <!-- Avatar: letter shown until favicon loads, then replaced -->
+          <!-- Avatar: letter always visible; favicon overlays only after load -->
           {#if mail.from}
             {@const isLoaded = !!faviconLoaded[mail.id]}
-            <div class="flex-shrink-0 w-[35px] h-[35px] rounded-lg {selectedEmailIds.has(mail.id) ? 'bg-md-primary' : (isLoaded ? 'bg-md-surface-container-low' : (mail.unread ? avatarColor(mail.from) : 'bg-gray-400'))} overflow-hidden flex items-center justify-center relative">
-              {#if selectedEmailIds.has(mail.id)}
-                <!-- Tick icon when selected -->
-                <Icon name="check" class="w-6 h-6 text-white" stroke-width="3" />
-              {:else}
+            {@const isSelected = selectedEmailIds.has(mail.id)}
+            {@const letter = (mail.from_name || mail.from || '?').trim().charAt(0).toUpperCase() || '?'}
+            {@const letterBg = mail.unread ? avatarColor(mail.from) : MD3_AVATAR_MUTED}
+            <div class="flex-shrink-0 w-[35px] h-[35px] rounded-lg {isSelected ? 'ring-2 ring-md-primary' : ''} {letterBg} overflow-hidden flex items-center justify-center relative">
+              <!-- Initial letter always under favicon -->
+              <span
+                class="absolute inset-0 z-[1] flex items-center justify-center text-sm font-bold text-white select-none pointer-events-none"
+                aria-hidden="true"
+              >{letter}</span>
+              {#if showFavicons || isSelected}
                 <FaviconImage
                   email={mail.from}
                   size={32}
-                  class="absolute inset-0 w-full h-full object-cover {isLoaded ? 'opacity-100' : 'opacity-0'}"
-                  fallbackLetter={(mail.from_name || mail.from || '?')[0].toUpperCase()}
-                  fallbackColor={mail.unread ? avatarColor(mail.from) : 'bg-gray-400'}
+                  enabled={showFavicons || isSelected}
+                  class="absolute inset-0 z-[2] w-full h-full {isLoaded ? 'opacity-100' : 'opacity-0'}"
+                  fallbackLetter={letter}
+                  fallbackColor={letterBg}
                   onLoad={() => faviconLoaded[mail.id] = true}
                   onError={() => faviconLoaded[mail.id] = false}
                 />
               {/if}
+              {#if isSelected}
+                <span class="absolute bottom-0 end-0 z-[3] w-3.5 h-3.5 rounded-full bg-md-primary text-md-on-primary flex items-center justify-center">
+                  <Icon name="check" class="w-2.5 h-2.5" />
+                </span>
+              {/if}
             </div>
-          {/if}          <!-- Text -->
+          {/if}
+          <!-- Text -->
           <div class="flex flex-col flex-1 min-w-0">
             <div class="flex items-center justify-between gap-2">
               <span class="text-sm font-bold {mail.unread ? 'text-md-on-surface' : 'text-md-on-surface/70'} truncate leading-tight">{@html highlightMatches(getDisplayName(mail.from, mail.from_name), highlightTerms)}</span>
-              <span class="text-[10px] font-medium {mail.unread ? 'text-md-on-surface/60' : 'text-md-on-surface/40'} flex-shrink-0">{mail.time}</span>
+              <span class="text-xs font-medium {mail.unread ? 'text-md-on-surface/60' : 'text-md-on-surface/40'} flex-shrink-0">{mail.time}</span>
             </div>
             <div class="flex items-start gap-1">
               <!-- col1: subject + body/OTP -->
               <div class="flex flex-col flex-1 min-w-0">
                 <p class="text-xs {mail.unread ? 'font-semibold text-md-on-surface' : 'text-md-on-surface/50'} truncate leading-tight">{@html highlightMatches(mail.subject || '(no subject)', highlightTerms)}</p>
-                <div class="flex items-center gap-1 mt-1 flex-wrap">
-                  {#if mail.local_only}
-                    <span id="local-badge-{mail.id}" class="px-2 py-0.5 text-xs rounded-full bg-amber-500/20 text-amber-600 flex-shrink-0">Local</span>
+                <!-- Single line: truncated body + OTP / label pills at the end -->
+                {#if true}
+                  {@const bodyPreview = (mail.body_plain || (mail.body_html || mail.body || '').replace(/<[^>]*>/g, '') || '').replace(/\s+/g, ' ').trim()}
+                  {@const showOtpPill = !hideOtpLabels && mail.isOtp && !!mail.otp}
+                  {@const showMagicPill = !!(mail.hasMagicLink || (mail.magicLinks && mail.magicLinks.length > 0))}
+                  {@const showLocalPill = !!mail.local_only}
+                  {@const tagList = !hideLabels ? (emailTagsMap[mail.id] || []) : []}
+                  {@const maxRowTags = 1}
+                  {@const visibleTags = tagList.slice(0, maxRowTags)}
+                  {@const overflowTags = tagList.slice(maxRowTags)}
+                  {@const hasPills = showOtpPill || showMagicPill || showLocalPill || tagList.length > 0}
+                  {#if bodyPreview || hasPills}
+                    <div class="flex items-center gap-1 mt-0.5 min-w-0 w-full">
+                      {#if bodyPreview}
+                        <p class="text-xs text-md-on-surface/60 truncate leading-tight min-w-0 flex-1">{bodyPreview}</p>
+                      {/if}
+                      {#if hasPills}
+                        <div class="flex items-center gap-0.5 shrink-0 max-w-[48%] min-w-0">
+                          {#if showLocalPill}
+                            {@const deletedWhen = (() => {
+                              const ts =
+                                (mail as Email & { local_only_since?: number }).local_only_since ||
+                                mail.local_deleted_at ||
+                                mail.stored_at ||
+                                (mail.received_at ? mail.received_at * 1000 : 0);
+                              return ts ? timeAgo(ts) : '';
+                            })()}
+                            <span
+                              id="local-badge-{mail.id}"
+                              class="px-1.5 py-0 text-xs rounded-full bg-md-tertiary-container text-md-on-tertiary-container shrink-0 cursor-help"
+                              title={deletedWhen
+                                ? $t('inbox.deletedFromServerAgo', { values: { when: deletedWhen } })
+                                : $t('inbox.localOnlyTooltip')}
+                            >{$t('inbox.localOnlyBadge')}</span>
+                          {/if}
+                          {#if showOtpPill}
+                            <span
+                              id="otp-badge-{mail.id}"
+                              role="button"
+                              tabindex="0"
+                              class="px-1.5 py-0 text-xs rounded-full bg-md-primary/20 text-md-primary cursor-pointer hover:bg-md-primary/30 transition-colors shrink-0 max-w-[5.5rem] truncate"
+                              onmousedown={(e) => { e.stopPropagation(); e.preventDefault(); onCopyOtpFromMessage(mail.otp); }}
+                              onmouseup={(e) => { e.stopPropagation(); }}
+                              onclick={(e) => { e.stopPropagation(); e.preventDefault(); onCopyOtpFromMessage(mail.otp); }}
+                              onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); e.preventDefault(); onCopyOtpFromMessage(mail.otp); } }}
+                              aria-label={$t('inbox.copyOtpAria')}
+                              title={`OTP: ${mail.otp}`}
+                            >OTP: {mail.otp}</span>
+                          {/if}
+                          {#if showMagicPill}
+                            <span
+                              id="magic-link-badge-{mail.id}"
+                              class="px-1.5 py-0 text-xs rounded-full bg-md-tertiary/20 text-md-tertiary shrink-0 max-w-[4rem] truncate"
+                              title={mail.magicLinks?.[0]?.host || mail.magicLinks?.[0]?.url || $t('inbox.magicLinkDetected')}
+                            >{$t('inbox.magicLinkPill')}</span>
+                          {/if}
+                          {#each visibleTags as tag (tag)}
+                            <span
+                              class="px-1.5 py-0 text-xs rounded-full bg-md-primary/20 text-md-primary cursor-pointer hover:bg-md-primary/30 transition-colors shrink-0 max-w-[4rem] truncate"
+                              onmousedown={(e) => { e.stopPropagation(); e.preventDefault(); }}
+                              onclick={(e) => { e.stopPropagation(); filterByLabel(tag); }}
+                              title={$t('inbox.filterByLabel', { values: { label: tag } })}
+                              role="button"
+                              tabindex="0"
+                              onkeydown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); filterByLabel(tag); } }}
+                              aria-label={$t('inbox.filterByLabel', { values: { label: tag } })}
+                            >{tag}</span>
+                          {/each}
+                          {#if overflowTags.length > 0}
+                            <div class="relative shrink-0">
+                              <button
+                                type="button"
+                                class="px-1.5 py-0 text-xs rounded-full bg-md-surface-variant text-md-on-surface/70 font-semibold hover:bg-md-primary/15 hover:text-md-primary transition-colors"
+                                aria-label={$t('inbox.moreLabels', { values: { n: overflowTags.length } })}
+                                title={overflowTags.join(', ')}
+                                onmousedown={(e) => { e.stopPropagation(); e.preventDefault(); }}
+                                onclick={(e) => {
+                                  e.stopPropagation();
+                                  e.preventDefault();
+                                  rowLabelMenuId = rowLabelMenuId === mail.id ? null : mail.id;
+                                }}
+                              >+{overflowTags.length}</button>
+                              {#if rowLabelMenuId === mail.id}
+                                <button
+                                  type="button"
+                                  class="fixed inset-0 z-[400] bg-transparent cursor-default"
+                                  aria-label={$t('common.close')}
+                                  onmousedown={(e) => e.stopPropagation()}
+                                  onclick={(e) => { e.stopPropagation(); rowLabelMenuId = null; }}
+                                ></button>
+                                <div
+                                  class="absolute end-0 top-full mt-1 z-[410] min-w-[100px] max-w-[160px] max-h-36 overflow-y-auto rounded-lg border border-md-outline-variant bg-md-surface shadow-xl p-1"
+                                  role="menu"
+                                >
+                                  {#each overflowTags as tag (tag)}
+                                    <button
+                                      type="button"
+                                      role="menuitem"
+                                      class="w-full text-start px-2 py-1 text-xs rounded-md truncate text-md-on-surface hover:bg-md-primary/10 hover:text-md-primary"
+                                      onmousedown={(e) => e.stopPropagation()}
+                                      onclick={(e) => {
+                                        e.stopPropagation();
+                                        filterByLabel(tag);
+                                        rowLabelMenuId = null;
+                                      }}
+                                    >{tag}</button>
+                                  {/each}
+                                </div>
+                              {/if}
+                            </div>
+                          {/if}
+                        </div>
+                      {/if}
+                    </div>
                   {/if}
-                  {#if mail.isOtp}
-                    <span
-                      id="otp-badge-{mail.id}"
-                      role="button"
-                      tabindex="0"
-                      class="px-2 py-0.5 text-xs rounded-full bg-md-primary/20 text-md-primary cursor-pointer hover:bg-md-primary/30 transition-colors flex-shrink-0"
-                      onmousedown={(e) => { e.stopPropagation(); e.preventDefault(); onCopyOtpFromMessage(mail.otp); }}
-                      onmouseup={(e) => { e.stopPropagation(); }}
-                      onclick={(e) => { e.stopPropagation(); e.preventDefault(); onCopyOtpFromMessage(mail.otp); }}
-                      onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); e.preventDefault(); onCopyOtpFromMessage(mail.otp); } }}
-                      aria-label={`Copy OTP code ${mail.otp}`}
-                    >OTP: {mail.otp}</span>
-                  {/if}
-                  {#if emailTagsMap[mail.id]?.length}
-                    {#each emailTagsMap[mail.id] as tag}
-                      <span
-                        class="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[9px] font-semibold rounded-full bg-md-primary/15 text-md-primary cursor-pointer hover:bg-md-primary/25 transition-colors flex-shrink-0"
-                        onmousedown={(e) => { e.stopPropagation(); e.preventDefault(); }}
-                        onclick={(e) => { e.stopPropagation(); removeEmailTag(mail.id, tag); }}
-                        title="Remove tag '{tag}'"
-                        role="button"
-                        tabindex="0"
-                        onkeydown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); removeEmailTag(mail.id, tag); } }}
-                        aria-label="Remove tag {tag}"
-                      >{tag} ×</span>
-                    {/each}
-                  {/if}
-                </div>
-                {#if !mail.isOtp && (mail.body_plain || mail.body)}
-                  <p class="text-xs text-md-on-surface/60 truncate leading-tight">{(mail.body_plain || (mail.body_html || '').replace(/<[^>]*>/g, '')) || ''}</p>
                 {/if}
-              </div>
-              <!-- col2: star (div to avoid nested button, intercepts via mousedown) -->
-              <div
-                id="star-button-{mail.id}"
-                role="button"
-                tabindex="0"
-                class="flex-shrink-0 self-center p-0.5 rounded transition-colors hover:bg-md-surface-variant/40 cursor-pointer {starredEmailIds.has(mail.id) ? 'text-amber-400' : 'text-md-on-surface/25'}"
-                onmousedown={(e) => { e.stopPropagation(); e.preventDefault(); toggleStar(mail.id); }}
-                onclick={(e) => { e.stopPropagation(); e.preventDefault(); }}
-                onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); e.preventDefault(); toggleStar(mail.id); } }}
-                aria-label={starredEmailIds.has(mail.id) ? 'Unstar email' : 'Star email'}
-              >
-                <Icon name="star" class="w-5 h-5" viewBox="0 0 24 24" fill={starredEmailIds.has(mail.id) ? 'currentColor' : 'none'} />
               </div>
             </div>
           </div>
-
         </div>
-      </button>
+
+          <!-- Star sibling of content (not nested in invalid button) -->
+          <button
+            type="button"
+            data-star-btn
+            id="star-button-{mail.id}"
+            class="flex-shrink-0 self-center p-1 me-0.5 rounded transition-colors hover:bg-md-surface-variant/40 cursor-pointer border-0 bg-transparent {isStarredMail(mail) ? 'text-md-tertiary' : 'text-md-on-surface/25'} {starPopId === mail.id ? 'star-pop' : ''}"
+            onclick={(e) => {
+              e.stopPropagation();
+              e.preventDefault();
+              void toggleStar(mail);
+            }}
+            onpointerdown={(e) => {
+              e.stopPropagation();
+              e.preventDefault();
+            }}
+            onmousedown={(e) => {
+              e.stopPropagation();
+              e.preventDefault();
+            }}
+            onmouseup={(e) => e.stopPropagation()}
+            aria-pressed={isStarredMail(mail)}
+            aria-label={$t('inbox.emailActions.star')}
+            title={$t('inbox.emailActions.star')}
+          >
+            <Icon
+              name="star"
+              class="w-5 h-5 transition-colors duration-150 pointer-events-none"
+              filled={isStarredMail(mail)}
+            />
+          </button>
+        </div>
       </div>
     {/each}
-    {#if displayedEmailCount < filteredEmails.length}
-      <div class="text-center py-2 text-xs text-md-on-surface/50">
-        <span class="loading loading-spinner loading-xs"></span>
-        Loading more emails...
+    {#if renderLimit < displayedEmails.length}
+      <div bind:this={listSentinelEl} class="h-8" aria-hidden="true"></div>
+      <div class="py-3 text-center">
+        <button
+          type="button"
+          class="px-4 py-1.5 bg-md-surface-variant text-md-on-surface-variant text-xs font-medium rounded-full hover:bg-md-primary hover:text-md-on-primary transition-colors shadow-sm"
+          onclick={() => expandRenderWindow()}
+        >
+          {$t('emailList.loadMore') || 'Load more'} ({displayedEmails.length - renderLimit})
+        </button>
+      </div>
+    {:else if displayedEmailCount < filteredEmails.length}
+      <div class="py-3 text-center">
+        <button
+          type="button"
+          class="px-4 py-1.5 bg-md-surface-variant text-md-on-surface-variant text-xs font-medium rounded-full hover:bg-md-primary hover:text-md-on-primary transition-colors shadow-sm"
+          onclick={() => loadMoreEmails()}
+        >
+          {$t('emailList.loadMore') || 'Load more'} ({filteredEmails.length - displayedEmailCount})
+        </button>
       </div>
     {/if}
   {/if}
 </div>
+
+{#if marqueeActive && marqueeRect}
+  <div
+    class="fixed pointer-events-none z-[500] border border-md-primary/70 bg-md-primary/15 rounded-sm"
+    style="left:{marqueeRect.left}px;top:{marqueeRect.top}px;width:{marqueeRect.right - marqueeRect.left}px;height:{marqueeRect.bottom - marqueeRect.top}px;"
+    aria-hidden="true"
+  ></div>
+{/if}
 </div>
 
-<!-- Selection action pill - fixed bottom -->
-{#if selectionMode}
+<!-- Fallback selection bar when parent does not host the strip (e.g. non-inbox embeds) -->
+{#if selectionMode && !externalSelectionBar}
   <div
-    class="fixed bottom-20 left-4 right-4 bg-md-surface rounded-full shadow-2xl border border-md-outline-variant overflow-hidden flex items-center gap-1 px-2 py-2 z-50"
+    class="fixed bottom-20 start-4 end-4 bg-md-surface rounded-full shadow-2xl border border-md-outline-variant overflow-hidden flex items-center gap-1 px-2 py-2 z-50"
     role="toolbar"
     aria-label="Selection actions"
     tabindex="0"
     onkeydown={(e) => { if (e.key === 'Escape') closeContextMenu(); }}
   >
-    <!-- Close / count -->
     <button
-      class="flex items-center justify-center w-8 h-8 rounded-full hover:bg-md-surface-variant transition-colors flex-shrink-0"
-      aria-label="Cancel selection"
+      type="button"
+      class="flex items-center justify-center px-2 h-8 rounded-full hover:bg-md-surface-variant transition-colors flex-shrink-0 text-label-sm font-bold"
+      aria-label={$t('inbox.emailActions.deselectAll')}
       onclick={(e) => { e.stopPropagation(); closeContextMenu(); }}
     >
-      <Icon name="x" class="w-4 h-4 text-md-on-surface/60" />
+      {$t('inbox.emailActions.deselectAll')} ({selectedEmailIds.size})
     </button>
-    <span class="text-xs font-semibold text-md-on-surface/70 px-1 flex-shrink-0">{selectedEmailIds.size} selected</span>
     <div class="flex-1"></div>
+    <button
+      class="flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium text-md-tertiary hover:bg-md-tertiary/10 rounded-full transition-colors"
+      aria-label={$t('inbox.emailActions.starSelected')}
+      onclick={(e) => { e.stopPropagation(); void performStarSelected(); }}
+    >
+      <Icon name="star" class="w-4 h-4" />
+      <span class="action-strip-btn">{$t('inbox.emailActions.star')} ({selectedEmailIds.size})</span>
+    </button>
+    <button
+      class="flex items-center justify-center gap-1.5 px-2 py-2 text-md-primary hover:bg-md-primary/10 rounded-full transition-colors min-w-0"
+      aria-label={$t('inbox.emailActions.labelSelected')}
+      onclick={(e) => { e.stopPropagation(); performLabelSelected(); }}
+    >
+      <Icon name="tag" class="w-4 h-4 shrink-0" />
+      <span class="action-strip-btn">{$t('inbox.emailActions.label')}</span>
+    </button>
     {#if emailListTab === 'archived' || emailListTab === 'deleted'}
       <button
-        class="flex items-center justify-center gap-1.5 px-4 py-2 text-sm font-medium text-md-primary hover:bg-md-primary/10 rounded-full transition-colors"
-        aria-label="Restore selected"
+        class="flex items-center justify-center gap-1.5 px-2 py-2 text-md-primary hover:bg-md-primary/10 rounded-full transition-colors min-w-0"
+        aria-label={$t('inbox.emailActions.restoreSelected')}
         onclick={(e) => { e.stopPropagation(); performRestore(); }}
       >
-        <Icon name="refresh" class="w-4 h-4" />
-        <span>Restore</span>
+        <Icon name="refresh" class="w-4 h-4 shrink-0" />
+        <span class="action-strip-btn">{$t('inbox.emailActions.restore')} ({selectedEmailIds.size})</span>
       </button>
-      <div class="w-px h-6 bg-md-outline-variant/50"></div>
     {/if}
     {#if emailListTab !== 'deleted'}
       <button
-        class="flex items-center justify-center gap-1.5 px-4 py-2 text-sm font-medium text-md-error hover:bg-md-error/10 rounded-full transition-colors"
-        aria-label="Delete selected"
+        class="flex items-center justify-center gap-1.5 px-2 py-2 text-md-error hover:bg-md-error/10 rounded-full transition-colors min-w-0"
+        aria-label={$t('inbox.emailActions.deleteSelected')}
         onclick={(e) => { e.stopPropagation(); performDelete(); }}
       >
-        <Icon name="trash" class="w-4 h-4" />
-        <span>Delete</span>
+        <Icon name="trash" class="w-4 h-4 shrink-0" />
+        <span class="action-strip-btn">{$t('inbox.emailActions.delete')} ({selectedEmailIds.size})</span>
       </button>
-      <div class="w-px h-6 bg-md-outline-variant/50"></div>
     {/if}
     {#if emailListTab === 'inbox' || emailListTab === 'all'}
       <button
-        class="flex items-center justify-center gap-1.5 px-4 py-2 text-sm font-medium text-md-primary hover:bg-md-primary/10 rounded-full transition-colors"
-        aria-label="Archive selected"
+        class="flex items-center justify-center gap-1.5 px-2 py-2 text-md-primary hover:bg-md-primary/10 rounded-full transition-colors min-w-0"
+        aria-label={$t('inbox.emailActions.archiveSelected')}
         onclick={(e) => { e.stopPropagation(); performArchive(); }}
       >
-        <Icon name="archive" class="w-4 h-4" />
-        <span>Archive</span>
+        <Icon name="archive" class="w-4 h-4 shrink-0" />
+        <span class="action-strip-btn">{$t('inbox.emailActions.archive')} ({selectedEmailIds.size})</span>
       </button>
-      <div class="w-px h-6 bg-md-outline-variant/50"></div>
     {/if}
-    <button
-      class="flex items-center justify-center gap-1.5 px-4 py-2 text-sm font-medium text-md-on-surface/70 hover:bg-md-surface-variant/30 rounded-full transition-colors"
-      aria-label="Tag selected"
-      onclick={(e) => {
-        e.stopPropagation();
-        const id = selectedEmailIds.size === 1 ? Array.from(selectedEmailIds)[0] : (longPressEmail?.id ?? null);
-        closeContextMenu();
-        if (id) openTagDialog(id);
-      }}
-    >
-      <Icon name="tag" class="w-4 h-4" />
-      <span>Tag</span>
-    </button>
   </div>
 {/if}
 
-<!-- Email Tag Dialog -->
+<!-- Label dialog: absolute so it stays inside mainview (not over sidebar) -->
 {#if tagDialogOpen}
-  <div class="fixed inset-0 z-[1000] flex items-center justify-center">
-    <div class="absolute inset-0 bg-black/30 backdrop-blur-sm" role="button" tabindex="-1" onclick={(e) => { e.stopPropagation(); closeTagDialog(); }} onkeydown={(e) => e.key === 'Escape' && closeTagDialog()}></div>
-    <div class="relative bg-md-surface rounded-2xl shadow-2xl p-4 w-72 z-10">
+  <div class="absolute inset-0 z-[9999] flex items-center justify-center p-4" role="dialog" aria-modal="true">
+    <div class="absolute inset-0 bg-black/40 backdrop-blur-sm" role="button" tabindex="-1" onclick={(e) => { e.stopPropagation(); closeTagDialog(); }} onkeydown={(e) => e.key === 'Escape' && closeTagDialog()}></div>
+    <div class="relative bg-md-surface rounded-2xl shadow-2xl p-4 w-72 z-10 border border-md-outline-variant/30">
       <div class="flex items-center justify-between mb-3">
-        <h3 class="text-sm font-bold text-md-on-surface">Tag Email</h3>
-        <button class="w-7 h-7 flex items-center justify-center rounded-full hover:bg-md-surface-variant transition-colors" onclick={(e) => { e.stopPropagation(); closeTagDialog(); }} aria-label="Close">
+        <h3 class="text-sm font-bold text-md-on-surface">
+          {tagDialogMultiIds?.length
+            ? $t('inbox.emailActions.labelSelected')
+            : $t('inbox.emailActions.tag')}
+          {#if tagDialogMultiIds?.length}
+            <span class="text-md-on-surface/50 font-medium">({tagDialogMultiIds.length})</span>
+          {/if}
+        </h3>
+        <button class="w-7 h-7 flex items-center justify-center rounded-full hover:bg-md-surface-variant transition-colors" onclick={(e) => { e.stopPropagation(); closeTagDialog(); }} aria-label={$t('common.close')}>
           <Icon name="x" class="w-4 h-4 text-md-on-surface/60" />
         </button>
       </div>
-      <p class="text-xs text-md-on-surface/60 mb-2">Enter comma-separated tags (e.g. Banking, Shopping)</p>
+      <p class="text-xs text-md-on-surface/60 mb-2">{$t('inbox.labelDialogHint')}</p>
       <input
         type="text"
         class="w-full px-3 py-2 text-sm rounded-lg border border-md-outline-variant bg-md-surface-container-low focus:outline-none focus:border-md-primary focus:ring-1 focus:ring-md-primary"
-        placeholder="e.g. Banking, Shopping"
+        placeholder={$t('inbox.labelDialogPlaceholder')}
         bind:value={tagDialogInput}
-        onkeydown={(e) => { if (e.key === 'Enter') saveEmailTags(); else if (e.key === 'Escape') closeTagDialog(); }}
+        onkeydown={(e) => { if (e.key === 'Enter') void saveEmailTags(); else if (e.key === 'Escape') closeTagDialog(); }}
       />
       {#if allEmailTags.length > 0}
         <div class="flex flex-wrap gap-1.5 mt-2">
-          {#each allEmailTags as t}
+          {#each allEmailTags as existingTag (existingTag)}
             <button
-              class="px-2 py-0.5 text-[10px] rounded-full bg-md-primary/10 text-md-primary hover:bg-md-primary/20 transition-colors"
-              onclick={(e) => { e.stopPropagation(); tagDialogInput = tagDialogInput ? `${tagDialogInput}, ${t}` : t; }}
-            >{t}</button>
+              type="button"
+              class="px-2 py-0.5 text-xs rounded-full bg-md-primary/20 text-md-primary hover:bg-md-primary/30 transition-colors"
+              onclick={(e) => {
+                e.stopPropagation();
+                const parts = tagDialogInput.split(',').map((s) => s.trim()).filter(Boolean);
+                if (!parts.includes(existingTag)) {
+                  tagDialogInput = parts.length ? `${parts.join(', ')}, ${existingTag}` : existingTag;
+                }
+              }}
+            >{existingTag}</button>
           {/each}
         </div>
       {/if}
       <div class="flex gap-2 mt-3">
-        <button class="flex-1 py-1.5 text-sm rounded-xl bg-md-secondary-container text-md-on-secondary-container hover:bg-md-secondary-container/80 transition-colors" onclick={(e) => { e.stopPropagation(); closeTagDialog(); }}>Cancel</button>
-        <button class="flex-1 py-1.5 text-sm rounded-xl bg-md-primary text-md-on-primary hover:bg-md-primary/90 transition-colors" onclick={(e) => { e.stopPropagation(); saveEmailTags(); }}>Save</button>
+        <button type="button" class="flex-1 py-1.5 text-sm rounded-xl bg-md-secondary-container text-md-on-secondary-container hover:bg-md-secondary-container/80 transition-colors" onclick={(e) => { e.stopPropagation(); closeTagDialog(); }}>{$t('common.cancel')}</button>
+        <button type="button" class="flex-1 py-1.5 text-sm rounded-xl bg-md-primary text-md-on-primary hover:bg-md-primary/90 transition-colors" onclick={(e) => { e.stopPropagation(); void saveEmailTags(); }}>{$t('common.save')}</button>
       </div>
     </div>
   </div>
 {/if}
 
-<!-- Email Preview Popup -->
+<!-- Email Preview Popup — subject + body only (no sender) -->
 {#if hoveredEmail && emailPreviewEnabled}
   <div
-    class="fixed bg-md-surface border border-md-outline-variant rounded-xl shadow-2xl z-[999] w-72 max-h-60 overflow-y-auto pointer-events-none"
+    class="fixed bg-md-surface-container border border-md-outline-variant rounded-xl shadow-2xl z-[999] w-72 max-h-60 overflow-y-auto pointer-events-none"
     style="left: {previewPosition.x}px; top: {previewPosition.y}px;"
     role="tooltip"
-    aria-label="Email preview"
+    aria-label={$t('emailList.previewAria')}
   >
     <div class="p-3 space-y-2">
-      <!-- Header -->
       <div class="border-b border-md-outline-variant/30 pb-2">
-        <div class="flex items-center justify-between gap-2 mb-0.5">
-          <span class="text-xs font-bold text-md-on-surface truncate">
-            {hoveredEmail.from_name || hoveredEmail.from || 'Unknown'}
-          </span>
-          <span class="text-[10px] text-md-on-surface/50 flex-shrink-0">{hoveredEmail.time}</span>
+        <div class="flex items-start justify-between gap-2">
+          <div class="text-xs font-semibold text-md-on-surface line-clamp-2 min-w-0">
+            {hoveredEmail.subject || $t('emailList.noSubject')}
+          </div>
+          <span class="text-xs text-md-on-surface/50 flex-shrink-0">{hoveredEmail.time}</span>
         </div>
-        <div class="text-xs text-md-primary/80 font-medium truncate">{hoveredEmail.subject || '(no subject)'}</div>
-        {#if hoveredEmail.from_name && hoveredEmail.from}
-          <div class="text-[10px] text-md-on-surface/40 truncate">{hoveredEmail.from}</div>
-        {/if}
       </div>
-      
-      <!-- OTP badge if present -->
+
       {#if hoveredEmail.isOtp}
-        <span class="inline-flex px-2 py-0.5 text-[10px] rounded-full bg-md-primary/20 text-md-primary font-medium">
+        <span class="inline-flex px-2 py-0.5 text-xs rounded-full bg-md-primary/20 text-md-primary font-medium">
           OTP: {hoveredEmail.otp}
         </span>
       {/if}
 
-      <!-- Body preview -->
-      <div class="text-[11px] text-md-on-surface/70 leading-relaxed line-clamp-5">
+      <div class="text-label-sm text-md-on-surface-variant leading-relaxed text-justify line-clamp-6">
         {#if hoveredEmail.body_plain}
           {hoveredEmail.body_plain.trim().slice(0, 400)}
         {:else if hoveredEmail.body_html}
           {hoveredEmail.body_html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 400)}
         {:else}
-          <span class="italic opacity-50">No preview available</span>
+          <span class="italic opacity-50">{$t('emailList.noPreview')}</span>
         {/if}
       </div>
     </div>
   </div>
 {/if}
-
-

@@ -1,5 +1,5 @@
 // =============================================================================
-// Mail Provider DSL — configuration-driven backend registry.
+// Mail Provider DSL - configuration-driven backend registry.
 //
 // This file declares every mail provider the extension integrates with. New
 // providers are added by appending an entry; no TypeScript changes are
@@ -12,21 +12,22 @@
 //   - First entry is the default provider (DEFAULT_PROVIDER constant).
 //
 // Per-provider template variables used in params / URLs:
-//   {auth.token}         — the session/header token returned by createInbox
-//   {email_id}          — single message ID (single_step providers may not need)
-//   {seq}               — sequence number for incremental fetching
-//   {timestamp}         — ms since epoch (forceNewSession cache busting)
-//   {random}            — Math.random-style nonce (forceNewSession)
-//   {instanceUrl}       — multi-instance base URL (Burner)
-//   {inboxId}           — server-side inbox ID
-//   {emailUser}         — custom username for setEmailUser operations
+//   {auth.token}         - the session/header token returned by createInbox
+//   {email_id}          - single message ID (single_step providers may not need)
+//   {seq}               - sequence number for incremental fetching
+//   {timestamp}         - ms since epoch (forceNewSession cache busting)
+//   {random}            - Math.random-style nonce (forceNewSession)
+//   {instanceUrl}       - multi-instance base URL (Burner)
+//   {inboxId}           - server-side inbox ID
+//   {emailUser}         - custom username for setEmailUser operations
 // =============================================================================
 
 [
   {
     // ─── Guerrilla Mail ────────────────────────────────────────────────────
     // Free disposable email service, 1h auto-renewable inboxes, 11 domains,
-    // custom-username support. Auth via sid_token query parameter.
+    // custom-username support. Auth via PHPSESSID cookie; sid_token is stored
+    // because live responses mirror the PHP session value.
     // Docs: https://docs.guerrillamail.com/
     "id": "guerrilla",
     "name": "Guerrilla Mail",
@@ -34,9 +35,9 @@
     "apiUrl": "https://api.guerrillamail.com/ajax.php",
     "websiteUrl": "https://guerrillamail.com",
     "auth": {
-      "type": "query_parameter",
-      "paramName": "sid_token",
-      "description": "Session token returned by get_email_address, must be included in all subsequent requests"
+      "type": "cookie",
+      "cookieName": "PHPSESSID",
+      "description": "Session cookie returned by get_email_address. sid_token mirrors the PHPSESSID value in tested responses."
     },
     "retry": {
       "maxAttempts": 3,
@@ -48,8 +49,9 @@
         "method": "GET",
         "function": "get_email_address",
         "requiredParams": {
-          "ip": "127.0.0.1",
-          "agent": "1ClickExt"
+          "lang": "en",
+          "ip": "{clientIp}",
+          "agent": "{userAgent}"
         },
         "optionalParams": {
           "_t": "{timestamp}",
@@ -57,7 +59,7 @@
           "_fresh": "1"
         },
         "response": {
-          // `!error` means "field is absent" — Guerrilla returns 200 with an
+          // `!error` means "field is absent" - Guerrilla returns 200 with an
           // error object on failure rather than using HTTP status codes.
           "successPath": "!error",
           "dataPath": null,
@@ -77,7 +79,8 @@
         "method": "GET",
         "function": "check_email",
         "requiredParams": {
-          "sid_token": "{auth.token}"
+          "ip": "{clientIp}",
+          "agent": "{userAgent}"
         },
         "optionalParams": {
           "seq": "{seq}"
@@ -96,7 +99,8 @@
         "method": "GET",
         "function": "fetch_email",
         "requiredParams": {
-          "sid_token": "{auth.token}",
+          "ip": "{clientIp}",
+          "agent": "{userAgent}",
           "email_id": "{email_id}"
         },
         "optionalParams": {},
@@ -114,7 +118,29 @@
         "method": "GET",
         "function": "forget_me",
         "requiredParams": {
-          "sid_token": "{auth.token}"
+          "ip": "{clientIp}",
+          "agent": "{userAgent}",
+          "email_addr": "{email_addr}"
+        },
+        "optionalParams": {},
+        "response": {
+          "successPath": "!error",
+          "dataPath": null,
+          "fields": {}
+        },
+        "errorHandling": {
+          "errorPath": "error",
+          "errorMessagePath": "error"
+        },
+        "responseType": "boolean"
+      },
+      "deleteEmail": {
+        "method": "POST",
+        "function": "del_email",
+        "requiredParams": {
+          "ip": "{clientIp}",
+          "agent": "{userAgent}",
+          "email_ids[]": "{email_id}"
         },
         "optionalParams": {},
         "response": {
@@ -133,7 +159,9 @@
         "method": "POST",
         "function": "set_email_user",
         "requiredParams": {
-          "sid_token": "{auth.token}",
+          "lang": "en",
+          "ip": "{clientIp}",
+          "agent": "{userAgent}",
           "email_user": "{emailUser}"
         },
         "optionalParams": {},
@@ -142,6 +170,7 @@
           "dataPath": null,
           "fields": {
             "address": "email_addr",
+            "token": "sid_token",
             "timestamp": "email_timestamp"
           }
         },
@@ -160,17 +189,18 @@
       "detailOperation": "fetchEmail",
       "detailItemIdParam": "email_id",
       "detailResponseMapping": {
-        "id": "mail_id",
+        "id": { "path": "mail_id", "transform": "parseInt" },
         "from": "mail_from",
-        "from_name": "mail_from",
-        "subject": "mail_subject",
+        "subject": { "path": "mail_subject", "transform": "htmlEntityDecode" },
         "body_html": "mail_body",
-        "body_plain": "mail_excerpt",
-        "timestamp_field": "mail_timestamp",
-        "date_field": "mail_date",
-        "fallback_timestamp_field": "ts"
+        "body_plain": { "path": "mail_excerpt", "transform": ["htmlEntityDecode", "trim"] },
+        "timestamp_field": { "path": "mail_timestamp", "transform": "parseInt" },
+        "date_field": { "path": "mail_date", "transform": "parseDate" },
+        "fallback_timestamp_field": { "path": "ts", "transform": "parseInt" }
       },
       "responseMapping": null,
+      "selectMailboxOperation": "setEmailUser",
+      "selectMailboxVariable": "emailUser",
       // Sequence tracking enables incremental polling: the client stores the
       // highest seen `mail_id` and only fetches messages after that.
       "sequenceTracking": {
@@ -178,6 +208,16 @@
         "sequenceField": "lastSequence",
         "listSequenceField": "mail_id",
         "sequenceOperation": "max"
+      },
+      "attachmentMapping": {
+        "enabled": true,
+        "path": "att_info",
+        "fields": {
+          "filename": "f",
+          "mimeType": "t",
+          "partNumber": "p",
+          "downloadUrl": null
+        }
       }
     },
     "expiry": {
@@ -226,7 +266,7 @@
         "Expires": "0",
         "X-Requested-With": "XMLHttpRequest"
       },
-      "credentials": "omit",
+      "credentials": "include",
       "cache": "no-cache"
     },
     "headers": {
@@ -260,7 +300,7 @@
     "auth": {
       "type": "header",
       "headerName": "X-Burner-Key",
-      "description": "Bearer token returned by createInbox, must be included in all subsequent requests"
+      "description": "Opaque API token returned by createInbox, sent as-is in the X-Burner-Key header for all subsequent requests"
     },
     "retry": {
       "maxAttempts": 3,
@@ -279,7 +319,29 @@
           "fields": {
             "address": "email.address",
             "id": "email.id",
-            "token": "token"
+            "token": "token",
+            "createdAt": "email.created_at",
+            "ttl": "email.ttl"
+          }
+        },
+        "errorHandling": {
+          "errorPath": "errors",
+          "errorMessagePath": "errors.msg"
+        }
+      },
+      "getInbox": {
+        "method": "GET",
+        "function": "/inbox/{inboxId}",
+        "requiredParams": {},
+        "optionalParams": {},
+        "response": {
+          "successPath": "success",
+          "dataPath": "result",
+          "fields": {
+            "address": "address",
+            "id": "id",
+            "createdAt": "created_at",
+            "ttl": "ttl"
           }
         },
         "errorHandling": {

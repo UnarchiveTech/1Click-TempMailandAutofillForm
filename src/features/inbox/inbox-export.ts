@@ -1,5 +1,7 @@
 import type { Browser } from 'wxt/browser';
+import { t } from '@/utils/i18n-utils.js';
 import { logError } from '@/utils/logger.js';
+import { toMs } from '@/utils/time.js';
 import type { Account, Email } from '@/utils/types.js';
 
 export interface ExportState {
@@ -32,7 +34,7 @@ export async function exportAccountEmails(ext: Browser, account: Account, setter
 
     await exportEmailsWithFormat(account, msgs, format);
   } catch (_e) {
-    setters.setShowToast('Export failed', 'error');
+    setters.setShowToast(await t('toasts.exportFailed'), 'error');
   }
 }
 
@@ -200,7 +202,7 @@ export async function exportEmailsWithFormat(account: Account, msgs: Email[], fo
 export function generateSingleEMLContent(account: Account, message: Email): string {
   const fromEmail = message.from_name || 'unknown@example.com';
   const subject = message.subject || 'No Subject';
-  const date = new Date((message.received_at || Date.now() / 1000) * 1000).toUTCString();
+  const date = new Date(toMs(message.received_at || Date.now() / 1000)).toUTCString();
   const body = message.body_html || message.body_plain || 'No content';
 
   let emlContent = '';
@@ -231,19 +233,28 @@ export function generateSingleEMLContent(account: Account, message: Email): stri
 export function generateMBOXContent(account: Account, messages: Email[]): string {
   let mboxContent = '';
   messages.forEach((message, index) => {
-    const fromEmail = (message.from_name || 'unknown@example.com').replace(/[\r\n]/g, ' ');
+    const fromEmail = (message.from || 'unknown@example.com').replace(/[\r\n]/g, ' ');
+    const fromName = message.from_name
+      ? `"${message.from_name.replace(/"/g, '\\"')}" <${fromEmail}>`
+      : fromEmail;
     const subject = message.subject || 'No Subject';
-    const date = new Date((message.received_at || Date.now() / 1000) * 1000).toUTCString();
-    const body = message.body_html || message.body_plain || 'No content';
+    const date = new Date(toMs(message.received_at || Date.now() / 1000)).toUTCString();
+    const isHtml = !!message.body_html;
+    let body = message.body_html || message.body_plain || 'No content';
+    // Escape lines starting with "From " (mboxrd format)
+    body = body.replace(/^From /gm, '>From ');
 
     mboxContent += `From ${fromEmail} ${date}\n`;
     mboxContent += `Return-Path: <${fromEmail}>\n`;
     mboxContent += `Delivered-To: ${account.address}\n`;
-    mboxContent += `From: ${fromEmail}\n`;
+    mboxContent += `From: ${fromName}\n`;
     mboxContent += `To: ${account.address}\n`;
     mboxContent += `Subject: ${subject}\n`;
     mboxContent += `Date: ${date}\n`;
     mboxContent += `Message-ID: <${message.id || Date.now()}-${index}@${account.address}>\n`;
+    mboxContent += `MIME-Version: 1.0\n`;
+    mboxContent += `Content-Type: ${isHtml ? 'text/html' : 'text/plain'}; charset=UTF-8\n`;
+    mboxContent += `Content-Transfer-Encoding: 8bit\n`;
     mboxContent += `\n`;
     mboxContent += `${body}\n`;
     mboxContent += `\n`;

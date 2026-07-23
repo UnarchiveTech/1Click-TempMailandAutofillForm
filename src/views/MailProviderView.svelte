@@ -5,11 +5,13 @@ import { t } from 'svelte-i18n';
 import { browser } from 'wxt/browser';
 import ToastContainer from '@/components/feedback/ToastContainer.svelte';
 import Icon from '@/components/icons/Icon.svelte';
-import SettingsSubNav from '@/components/ui/SettingsSubNav.svelte';
+import { InputField, SelectField } from '@/components/ui/primitives';
 import {
+  exportProvidersAsJson,
   getAllProviderConfigs,
   loadProviderConfig,
   type ProviderConfig,
+  saveProviderOverridesToStorage,
 } from '@/utils/email-service.js';
 import * as PingService from '@/utils/ping-service.js';
 import { domainIndexKey } from '@/utils/storage-keys.js';
@@ -64,7 +66,7 @@ let {
   onSetEmailPreviewEnabled?: (v: boolean) => void;
   onSetProviderInstance?: (id: string) => void;
   onAddCustomInstance?: (name: string, url: string) => void;
-  onLoadProviderInstances?: () => Promise<void>;
+  onLoadProviderInstances?: () => void | Promise<void>;
   onSetDefaultDomain?: (v: string) => void;
   onSaveSettings?: () => void;
   onNavigateTo?: (view: string) => void;
@@ -132,8 +134,46 @@ function saveCustomInstance() {
   hideCustomInstanceForm();
 }
 
-// Domain override state — username -> effective domain string
+// Domain override state - username -> effective domain string
 let domainOverrides = $state<Record<string, string>>({});
+
+// Runtime provider JSON editor (overrides bundled providers.jsonc via storage)
+let jsonEditorOpen = $state(false);
+let providerJsonText = $state('');
+let jsonEditorError = $state('');
+let jsonEditorStatus = $state('');
+let jsonSaving = $state(false);
+
+async function saveProviderJson() {
+  jsonEditorError = '';
+  jsonEditorStatus = '';
+  jsonSaving = true;
+  try {
+    const parsed = JSON.parse(providerJsonText) as ProviderConfig[];
+    if (!Array.isArray(parsed)) throw new Error('Root must be a JSON array of providers');
+    await saveProviderOverridesToStorage(browser, parsed);
+    jsonEditorStatus = get(t)('mailProvider.editJsonSaved') as string;
+    toastStore.success(get(t)('mailProvider.editJsonSaved') as string);
+  } catch (e) {
+    jsonEditorError = e instanceof Error ? e.message : String(e);
+  } finally {
+    jsonSaving = false;
+  }
+}
+
+async function resetProviderJson() {
+  jsonSaving = true;
+  jsonEditorError = '';
+  try {
+    await saveProviderOverridesToStorage(browser, null);
+    providerJsonText = exportProvidersAsJson();
+    jsonEditorStatus = get(t)('mailProvider.editJsonResetDone') as string;
+  } catch (e) {
+    jsonEditorError = e instanceof Error ? e.message : String(e);
+  } finally {
+    jsonSaving = false;
+  }
+}
 
 async function loadDomainOverrides() {
   const config = loadProviderConfig(selectedProvider);
@@ -167,7 +207,8 @@ onMount(() => {
 });
 
 $effect(() => {
-  setTimeout(() => pingAllProviders(), 100);
+  const timer = setTimeout(() => pingAllProviders(), 100);
+  return () => clearTimeout(timer);
 });
 
 $effect(() => {
@@ -214,6 +255,7 @@ async function applyDomainSwitch() {
   if (!domainSwitchDialog) return;
   const { pendingDomain, domains } = domainSwitchDialog;
 
+  const prevDefault = defaultDomain;
   onSetDefaultDomain?.(pendingDomain);
   onSaveSettings();
 
@@ -232,8 +274,13 @@ async function applyDomainSwitch() {
 
     const pendingIndex = domains.indexOf(pendingDomain);
     const storageUpdates: Record<string, number> = {};
+    /** Snapshot previous domain indices for undo */
+    const undoSnapshot: Record<string, number> = {};
     for (const acc of toUpdate) {
       const key = domainIndexKey(selectedProvider, acc.address.split('@')[0]);
+      const prev = (await browser.storage.local.get([key])) as Record<string, number | undefined>;
+      if (typeof prev[key] === 'number') undoSnapshot[key] = prev[key] as number;
+      else undoSnapshot[key] = 0;
       storageUpdates[key] = pendingIndex >= 0 ? pendingIndex : 0;
     }
     if (Object.keys(storageUpdates).length > 0) {
@@ -244,7 +291,15 @@ async function applyDomainSwitch() {
         get(t)('mailProvider.updatedAddresses', {
           default: 'mailProvider.updatedAddressesPlural',
           values: { n: toUpdate.length, domain: pendingDomain },
-        })
+        }),
+        10000,
+        async () => {
+          await browser.storage.local.set(undoSnapshot);
+          onSetDefaultDomain?.(prevDefault || '');
+          onSaveSettings();
+          await loadDomainOverrides();
+          toastStore.info(get(t)('mailProvider.domainSwitchUndone') as string);
+        }
       );
       await loadDomainOverrides();
     }
@@ -255,15 +310,8 @@ async function applyDomainSwitch() {
 </script>
 
 <div class="flex flex-col h-full">
-  <!-- Header -->
-  <div class="flex items-center gap-3 px-4 py-4 border-b border-md-secondary-container">
-    <button
-      class="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-md-secondary-container transition-colors"
-      onclick={onBack}
-      aria-label={$t('common.back')}
-    >
-      <Icon name="chevronLeft" class="w-5 h-5" />
-    </button>
+  <!-- Title + actions - back lives in app header on this deep page -->
+  <div class="flex items-center gap-3 px-4 py-4 border-b border-md-outline-variant/30">
     <div class="flex-1">
       <h1 class="text-base font-bold text-md-on-surface">{$t('mailProvider.title')}</h1>
       <p class="text-xs text-md-on-surface/50">{$t('mailProvider.subtitle')}</p>
@@ -277,7 +325,7 @@ async function applyDomainSwitch() {
     </button>
   </div>
 
-  <div class="flex-1 overflow-y-auto px-4 py-4 space-y-4">
+  <div class="flex-1 overflow-y-auto px-2 py-3 space-y-4">
 
     <!-- Provider Selection -->
     <section class="space-y-2">
@@ -297,23 +345,23 @@ async function applyDomainSwitch() {
                   {@const fastestPing = pingResults ? PingService.getFastestPing(pingResults) : null}
                   {provider.displayName}
                   {#if fastestPing !== null && fastestPing !== undefined}
-                    <span class="text-xs text-md-on-surface/50 ml-2">{getPingDot(fastestPing)} {PingService.formatPing(fastestPing)}</span>
+                    <span class="text-xs text-md-on-surface/50 ms-2">{getPingDot(fastestPing)} {PingService.formatPing(fastestPing)}</span>
                   {:else}
-                    <span class="text-xs text-md-on-surface/50 ml-2">⏳</span>
+                    <span class="text-xs text-md-on-surface/50 ms-2">⏳</span>
                   {/if}
                 {/if}
               {/each}
             </span>
-            <Icon name="chevronDown" class="w-4 h-4 ml-2" />
+            <Icon name="chevronDown" class="w-4 h-4 ms-2" />
           </button>
           {#if providerDropdownOpen}
-            <div class="absolute top-full left-0 right-0 mt-1 bg-md-primary-container rounded-xl shadow-lg border border-md-secondary-container z-50 max-h-60 overflow-y-auto">
+            <div class="absolute top-full inset-x-0 mt-1 bg-md-primary-container rounded-xl shadow-lg border border-md-secondary-container z-50 max-h-60 overflow-y-auto">
               {#each allProviders as provider}
                 {@const providerId = provider.id}
                 {@const pingResults = providerPingResults.get(providerId)}
                 {@const fastestPing = pingResults ? PingService.getFastestPing(pingResults) : null}
                 <button
-                  class="w-full px-4 py-2 text-sm text-left hover:bg-md-secondary-container flex items-center justify-between"
+                  class="w-full px-4 py-2 text-sm text-start hover:bg-md-secondary-container flex items-center justify-between"
                   onclick={() => {
                     handleProviderChange(providerId);
                     providerDropdownOpen = false;
@@ -335,7 +383,7 @@ async function applyDomainSwitch() {
       <!-- Instance Selection -->
       {#if loadProviderConfig(selectedProvider).multiInstance?.enabled}
         <div class="bg-md-primary-container rounded-xl px-4 py-3">
-          <div class="text-[10px] font-semibold text-md-on-surface/40 uppercase tracking-wider mb-1.5">{$t('mailProvider.instance')}</div>
+          <div class="text-xs font-semibold text-md-on-surface/40 uppercase tracking-wider mb-1.5">{$t('mailProvider.instance')}</div>
           <div class="relative">
             <button
               class="w-full bg-transparent text-sm outline-none text-md-on-surface appearance-none cursor-pointer font-medium flex items-center justify-between"
@@ -352,27 +400,27 @@ async function applyDomainSwitch() {
                       {@const instancePing = pingResults?.get(instance.id)}
                       {instance.displayName}{instance.isCustom ? $t('mailProvider.instanceCustom') : ''}
                       {#if instancePing !== undefined && instancePing !== null}
-                        <span class="text-xs text-md-on-surface/50 ml-2">{getPingDot(instancePing)} {PingService.formatPing(instancePing)}</span>
+                        <span class="text-xs text-md-on-surface/50 ms-2">{getPingDot(instancePing)} {PingService.formatPing(instancePing)}</span>
                       {:else}
-                        <span class="text-xs text-md-on-surface/50 ml-2">⏳</span>
+                        <span class="text-xs text-md-on-surface/50 ms-2">⏳</span>
                       {/if}
                     {/if}
                   {/each}
                 {/if}
               </span>
-              <Icon name="chevronDown" class="w-4 h-4 ml-2" />
+              <Icon name="chevronDown" class="w-4 h-4 ms-2" />
             </button>
             {#if instanceDropdownOpen}
-              <div class="absolute top-full left-0 right-0 mt-1 bg-md-primary-container rounded-xl shadow-lg border border-md-secondary-container z-50 max-h-60 overflow-y-auto">
+              <div class="absolute top-full inset-x-0 mt-1 bg-md-primary-container rounded-xl shadow-lg border border-md-secondary-container z-50 max-h-60 overflow-y-auto">
                 <button
-                  class="w-full px-4 py-2 text-sm text-left hover:bg-md-secondary-container"
+                  class="w-full px-4 py-2 text-sm text-start hover:bg-md-secondary-container"
                   onclick={() => { onSetProviderInstance('random'); instanceDropdownOpen = false; }}
                 >{$t('mailProvider.randomInstance')}</button>
                 {#each providerInstances as instance}
                   {@const pingResults = providerPingResults.get(selectedProvider)}
                   {@const instancePing = pingResults?.get(instance.id)}
                   <button
-                    class="w-full px-4 py-2 text-sm text-left hover:bg-md-secondary-container flex items-center justify-between"
+                    class="w-full px-4 py-2 text-sm text-start hover:bg-md-secondary-container flex items-center justify-between"
                     onclick={() => { onSetProviderInstance(instance.id); instanceDropdownOpen = false; }}
                   >
                     <span>{instance.displayName}{instance.isCustom ? $t('mailProvider.instanceCustom') : ''}</span>
@@ -396,12 +444,12 @@ async function applyDomainSwitch() {
           <div class="bg-md-primary-container rounded-xl px-4 py-3 space-y-3">
             <div>
               <div class="text-xs font-semibold text-md-tertiary uppercase tracking-wider mb-1.5">{$t('mailProvider.instanceName')}</div>
-              <input type="text" class="w-full bg-transparent text-sm outline-none text-md-on-surface placeholder:text-md-on-surface/30" placeholder={$t('mailProvider.instanceNamePlaceholder')} bind:value={customInstanceName} />
+              <InputField placeholder={$t('mailProvider.instanceNamePlaceholder')} bind:value={customInstanceName} />
             </div>
-            <div class="border-t border-md-secondary-container"></div>
+            <div class="border-t border-md-outline-variant/30"></div>
             <div>
-              <div class="text-[10px] font-semibold text-md-on-surface/40 uppercase tracking-wider mb-1.5">{$t('mailProvider.apiUrl')}</div>
-              <input type="url" class="w-full bg-transparent text-sm outline-none text-md-on-surface placeholder:text-md-on-surface/30" placeholder={$t('mailProvider.apiUrlPlaceholder')} bind:value={customInstanceUrl} />
+              <div class="text-xs font-semibold text-md-on-surface/40 uppercase tracking-wider mb-1.5">{$t('mailProvider.apiUrl')}</div>
+              <InputField type="url" placeholder={$t('mailProvider.apiUrlPlaceholder')} bind:value={customInstanceUrl} />
             </div>
             <div class="flex gap-2">
               <button class="flex-1 px-3 py-1.5 text-sm rounded-xl bg-md-primary text-md-on-primary hover:bg-md-primary/90 transition-colors" onclick={saveCustomInstance}>{$t('mailProvider.save')}</button>
@@ -417,7 +465,7 @@ async function applyDomainSwitch() {
         {@const multiDomainActive = allInboxes.filter((a: Account) => a.provider === selectedProvider && a.status === 'active')}
         {@const _overrides = domainOverrides}
         <div class="bg-md-tertiary-container rounded-xl px-4 py-3">
-          <div class="text-[10px] font-semibold text-md-on-surface/40 uppercase tracking-wider mb-1.5">{$t('mailProvider.defaultDomain')}</div>
+          <div class="text-xs font-semibold text-md-on-surface/40 uppercase tracking-wider mb-1.5">{$t('mailProvider.defaultDomain')}</div>
 
           <!-- Domain address count stats -->
           {#if multiDomainActive.length > 0}
@@ -425,133 +473,93 @@ async function applyDomainSwitch() {
               {#each md?.domains || [] as d}
                 {@const count = multiDomainActive.filter((a: Account) => getEffectiveDomain(a) === d).length}
                 <div class="flex items-center gap-1.5">
-                  <span class="text-[11px] font-medium text-md-on-surface">@{d}</span>
-                  <span class="text-[10px] px-1.5 py-0.5 rounded-full font-semibold {count > 0 ? 'bg-md-primary/15 text-md-primary' : 'bg-md-secondary-container text-md-on-surface/40'}">{count}</span>
+                  <span class="text-label-sm font-medium text-md-on-surface">@{d}</span>
+                  <span class="text-xs px-1.5 py-0.5 rounded-full font-semibold {count > 0 ? 'bg-md-primary/15 text-md-primary' : 'bg-md-secondary-container text-md-on-surface/40'}">{count}</span>
                 </div>
               {/each}
             </div>
           {/if}
 
-          <div class="relative">
-            <select
-              class="w-full bg-transparent text-sm outline-none text-md-on-surface appearance-none cursor-pointer font-medium"
-              value={defaultDomain || ''}
-              onchange={(e) => openDomainSwitchDialog(e.currentTarget.value)}
-            >
-              <option value="">{$t('mailProvider.cycleNoDefault')}</option>
-              {#each md?.domains || [] as domain}
-                <option value={domain}>@{domain}</option>
-              {/each}
-            </select>
-          </div>
-          <div class="text-[10px] text-md-on-surface/50 mt-1">{$t('mailProvider.defaultDomainDescription')}</div>
+          <SelectField
+            value={defaultDomain || ''}
+            onchange={(e) => openDomainSwitchDialog(e.currentTarget.value)}
+          >
+            <option value="">{$t('mailProvider.cycleNoDefault')}</option>
+            {#each md?.domains || [] as domain}
+              <option value={domain}>@{domain}</option>
+            {/each}
+          </SelectField>
+          <div class="text-xs text-md-on-surface/50 mt-1">{$t('mailProvider.defaultDomainDescription')}</div>
         </div>
       {/if}
     </section>
 
-    <!-- Inbox Behaviour -->
+    <!-- Advanced: edit providers JSON (runtime override of providers.jsonc) -->
     <section class="space-y-2">
-      <div class="text-xs font-semibold text-md-on-surface/50 uppercase tracking-wider px-1">{$t('mailProvider.inboxBehaviour')}</div>
-
-      <!-- Auto-Renew -->
-      <div class="bg-md-primary-container rounded-xl px-4 py-3 flex items-center justify-between">
-        <div>
-          <div class="text-sm font-medium text-md-on-surface">{$t('mailProvider.autoRenew')}</div>
-          <div class="text-xs text-md-on-surface/50">{$t('mailProvider.autoRenewDescription')}</div>
-        </div>
-        <button
-          class="w-8 h-8 flex items-center justify-center rounded-xl border-0 {autoRenew ? 'bg-md-primary/10 hover:bg-md-primary/20 text-md-primary' : 'bg-md-secondary-container hover:bg-md-outline-variant text-md-on-surface/60'} transition-colors"
-          onclick={() => { onSetAutoRenew?.(!autoRenew); onSaveSettings(); }}
-          aria-label={$t('mailProvider.toggleAutoRenew')}
-        >
-          <Icon name="refresh" class="w-5 h-5" />
-        </button>
-      </div>
-
-      <!-- Auto-Refresh Interval -->
-      <div class="bg-md-primary-container rounded-xl px-4 py-3">
-        <div class="text-sm font-medium text-md-on-surface mb-3">{$t('mailProvider.autoRefreshInterval')}</div>
-        <div class="flex items-center justify-between gap-3">
-          <p class="text-xs text-md-on-surface/60 flex-1">{$t('mailProvider.autoRefreshDescription')}</p>
-          <select
-            class="text-xs bg-md-surface border border-md-outline-variant rounded-lg px-2 py-1.5 text-md-on-surface focus:outline-none focus:ring-2 focus:ring-md-primary flex-shrink-0"
-            value={autoRefreshInterval}
-            onchange={(e) => { onSetAutoRefreshInterval?.(Number((e.target as HTMLSelectElement).value)); onSaveSettings?.(); }}
-          >
-            <option value={0}>{$t('mailProvider.manualOnly')}</option>
-            <option value={10000}>{$t('mailProvider.tenSeconds')}</option>
-            <option value={30000}>{$t('mailProvider.thirtySeconds')}</option>
-            <option value={60000}>{$t('mailProvider.oneMinute')}</option>
-            <option value={120000}>{$t('mailProvider.twoMinutes')}</option>
-            <option value={300000}>{$t('mailProvider.fiveMinutes')}</option>
-            <option value={600000}>{$t('mailProvider.tenMinutes')}</option>
-          </select>
-        </div>
-      </div>
-
-      <!-- Email Preview -->
-      <div class="bg-md-primary-container rounded-xl px-4 py-3">
-        <div class="flex items-center justify-between">
-          <div>
-            <div class="text-sm text-md-on-surface">{$t('mailProvider.emailPreviewTooltip')}</div>
-            <div class="text-xs text-md-on-surface/50">{$t('mailProvider.emailPreviewTooltipDescription')}</div>
-          </div>
+      <div class="text-xs font-semibold text-md-on-surface/50 uppercase tracking-wider px-1">{$t('mailProvider.editJsonTitle')}</div>
+      <div class="bg-md-primary-container rounded-xl px-3 py-3 space-y-2">
+        <p class="text-xs text-md-on-surface/60">{$t('mailProvider.editJsonHint')}</p>
+        {#if !jsonEditorOpen}
           <button
-            class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors {emailPreviewEnabled ? 'bg-md-primary' : 'bg-md-surface-variant'}"
-            onclick={() => { onSetEmailPreviewEnabled?.(!emailPreviewEnabled); onSaveSettings?.(); }}
-            aria-label={$t('mailProvider.toggleEmailPreview')}
+            type="button"
+            class="w-full px-3 py-2 text-sm font-semibold rounded-xl border border-md-primary text-md-primary hover:bg-md-primary/10 transition-colors"
+            onclick={() => {
+              providerJsonText = exportProvidersAsJson();
+              jsonEditorOpen = true;
+              jsonEditorError = '';
+              jsonEditorStatus = '';
+            }}
           >
-            <span class="inline-block h-4 w-4 transform rounded-full bg-white transition-transform {emailPreviewEnabled ? 'translate-x-6' : 'translate-x-1'}"></span>
+            {$t('mailProvider.editJsonOpen')}
           </button>
-        </div>
+        {:else}
+          <textarea
+            class="w-full min-h-[180px] max-h-[320px] text-xs font-mono rounded-xl border border-md-outline-variant bg-md-surface px-2 py-2 outline-none focus:ring-2 focus:ring-md-primary"
+            bind:value={providerJsonText}
+            spellcheck="false"
+            aria-label={$t('mailProvider.editJsonTitle')}
+          ></textarea>
+          {#if jsonEditorError}
+            <p class="text-xs text-md-error">{jsonEditorError}</p>
+          {/if}
+          {#if jsonEditorStatus}
+            <p class="text-xs text-md-primary">{jsonEditorStatus}</p>
+          {/if}
+          <div class="flex flex-wrap gap-2">
+            <button
+              type="button"
+              class="flex-1 min-w-[6rem] px-2 py-1.5 text-xs font-semibold rounded-lg bg-md-primary text-md-on-primary"
+              disabled={jsonSaving}
+              onclick={() => void saveProviderJson()}
+            >{$t('common.save')}</button>
+            <button
+              type="button"
+              class="flex-1 min-w-[6rem] px-2 py-1.5 text-xs font-semibold rounded-lg border border-md-outline-variant"
+              onclick={() => {
+                providerJsonText = exportProvidersAsJson();
+                jsonEditorError = '';
+                jsonEditorStatus = '';
+              }}
+            >{$t('mailProvider.editJsonReload')}</button>
+            <button
+              type="button"
+              class="flex-1 min-w-[6rem] px-2 py-1.5 text-xs font-semibold rounded-lg border border-md-error text-md-error"
+              disabled={jsonSaving}
+              onclick={() => void resetProviderJson()}
+            >{$t('mailProvider.editJsonReset')}</button>
+            <button
+              type="button"
+              class="flex-1 min-w-[6rem] px-2 py-1.5 text-xs font-semibold rounded-lg bg-md-surface-variant"
+              onclick={() => {
+                jsonEditorOpen = false;
+                jsonEditorError = '';
+                jsonEditorStatus = '';
+              }}
+            >{$t('common.close')}</button>
+          </div>
+        {/if}
       </div>
-    </section>
-
-    <!-- Notifications -->
-    <section class="space-y-2">
-      <div class="text-xs font-semibold text-md-on-surface/50 uppercase tracking-wider px-1">{$t('mailProvider.notifications')}</div>
-      <div class="bg-md-primary-container rounded-xl px-4 py-3 space-y-3">
-        <div class="flex items-center justify-between">
-          <div>
-            <div class="text-sm text-md-on-surface">{$t('mailProvider.enableNotifications')}</div>
-            <div class="text-xs text-md-on-surface/50">{$t('mailProvider.enableNotificationsDescription')}</div>
-          </div>
-          <label class="cursor-pointer">
-            <input type="checkbox" class="sr-only peer" checked={notificationsEnabled}
-              onchange={(e) => { onSetNotificationsEnabled?.((e.target as HTMLInputElement).checked); onSaveSettings(); }} />
-            <div class="relative w-9 h-5 bg-md-outline-variant peer-checked:bg-md-primary rounded-full peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all"></div>
-          </label>
-        </div>
-        <div class="h-px bg-md-secondary-container"></div>
-        <div class="flex items-center justify-between">
-          <div>
-            <div class="text-sm text-md-on-surface">{$t('mailProvider.notificationSound')}</div>
-            <div class="text-xs text-md-on-surface/50">{$t('mailProvider.notificationSoundDescription')}</div>
-          </div>
-          <label class="cursor-pointer">
-            <input type="checkbox" class="sr-only peer" checked={soundEnabled}
-              onchange={(e) => { onSetSoundEnabled?.((e.target as HTMLInputElement).checked); onSaveSettings(); }} />
-            <div class="relative w-9 h-5 bg-md-outline-variant peer-checked:bg-md-primary rounded-full peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all"></div>
-          </label>
-        </div>
-        <div class="h-px bg-md-secondary-container"></div>
-        <div class="flex items-center justify-between">
-          <div>
-            <div class="text-sm text-md-on-surface">{$t('mailProvider.expiryWarning')}</div>
-            <div class="text-xs text-md-on-surface/50">{$t('mailProvider.expiryWarningDescription')}</div>
-          </div>
-          <select
-            class="bg-md-secondary-container text-sm text-md-on-surface px-3 py-1.5 rounded-lg outline-none border-0 cursor-pointer font-medium"
-            value={expiryWarningThreshold}
-            onchange={(e) => { onSetExpiryWarningThreshold?.(Number((e.target as HTMLSelectElement).value)); onSaveSettings(); }}
-          >
-            <option value={15 * 60 * 1000}>{$t('mailProvider.fifteenMinutes')}</option>
-            <option value={5 * 60 * 1000}>{$t('mailProvider.fiveMinutesShort')}</option>
-            <option value={60 * 1000}>{$t('mailProvider.oneMinuteShort')}</option>
-            <option value={60 * 60 * 1000}>{$t('mailProvider.oneHour')}</option>
-          </select>
-        </div>
-      </div>
+      <p class="text-label-sm text-md-on-surface/45 px-1">{$t('mailProvider.inboxMovedHint')}</p>
     </section>
 
   </div>
@@ -585,7 +593,7 @@ async function applyDomainSwitch() {
       <!-- Scope selector -->
       <div class="space-y-2 mb-4">
         <button
-          class="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl border-2 transition-colors text-left {domainSwitchScope === 'new' ? 'border-md-primary bg-md-primary/10' : 'border-md-secondary-container bg-transparent'}"
+          class="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl border-2 transition-colors text-start {domainSwitchScope === 'new' ? 'border-md-primary bg-md-primary/10' : 'border-md-secondary-container bg-transparent'}"
           onclick={() => { domainSwitchScope = 'new'; }}
         >
           <div class="w-4 h-4 rounded-full border-2 flex items-center justify-center shrink-0 {domainSwitchScope === 'new' ? 'border-md-primary' : 'border-md-outline-variant'}">
@@ -598,7 +606,7 @@ async function applyDomainSwitch() {
         </button>
         {#if pendingDomain}
           <button
-            class="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl border-2 transition-colors text-left {domainSwitchScope === 'existing' ? 'border-md-primary bg-md-primary/10' : 'border-md-secondary-container bg-transparent'}"
+            class="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl border-2 transition-colors text-start {domainSwitchScope === 'existing' ? 'border-md-primary bg-md-primary/10' : 'border-md-secondary-container bg-transparent'}"
             onclick={() => { domainSwitchScope = 'existing'; }}
           >
             <div class="w-4 h-4 rounded-full border-2 flex items-center justify-center shrink-0 {domainSwitchScope === 'existing' ? 'border-md-primary' : 'border-md-outline-variant'}">
@@ -614,29 +622,26 @@ async function applyDomainSwitch() {
 
       <!-- Sub-options when changing existing -->
       {#if domainSwitchScope === 'existing'}
-        <div class="bg-md-secondary-container/50 rounded-xl px-3 py-3 mb-4 space-y-2">
-          <button class="w-full flex items-center gap-2 text-left" onclick={() => { domainSwitchAll = true; }}>
+        <div class="bg-md-secondary-container/50 rounded-xl px-2 py-2 mb-4 space-y-2">
+          <button class="w-full flex items-center gap-2 text-start" onclick={() => { domainSwitchAll = true; }}>
             <div class="w-4 h-4 rounded-full border-2 flex items-center justify-center shrink-0 {domainSwitchAll ? 'border-md-primary' : 'border-md-outline-variant'}">
               {#if domainSwitchAll}<div class="w-2 h-2 rounded-full bg-md-primary"></div>{/if}
             </div>
             <span class="text-xs text-md-on-surface">{$t('mailProvider.changeAllAddresses')}</span>
           </button>
-          <button class="w-full flex items-center gap-2 text-left" onclick={() => { domainSwitchAll = false; }}>
+          <button class="w-full flex items-center gap-2 text-start" onclick={() => { domainSwitchAll = false; }}>
             <div class="w-4 h-4 rounded-full border-2 flex items-center justify-center shrink-0 {!domainSwitchAll ? 'border-md-primary' : 'border-md-outline-variant'}">
               {#if !domainSwitchAll}<div class="w-2 h-2 rounded-full bg-md-primary"></div>{/if}
             </div>
             <span class="text-xs text-md-on-surface">{$t('mailProvider.onlyAddressesUsingDomain')}</span>
           </button>
           {#if !domainSwitchAll}
-            <select
-              class="w-full mt-1 bg-md-primary-container text-sm text-md-on-surface rounded-lg px-3 py-2 outline-none border border-md-secondary-container"
-              bind:value={domainSwitchFromDomain}
-            >
+            <SelectField class="mt-1" bind:value={domainSwitchFromDomain}>
               <option value="">{$t('mailProvider.selectDomainFrom')}</option>
               {#each domains.filter(d => (domainCounts[d] ?? 0) > 0) as d}
                 <option value={d}>@{d} ({$t('mailProvider.addressCount', { default: 'mailProvider.addressCountPlural', values: { n: domainCounts[d] } })})</option>
               {/each}
-            </select>
+            </SelectField>
           {/if}
         </div>
       {/if}
@@ -655,10 +660,6 @@ async function applyDomainSwitch() {
       </div>
   </div>
 
-  <!-- ── Settings Sub-Navigation Bar ── -->
-  <div class="px-0 pb-1 mt-4">
-    <SettingsSubNav currentSubPage="mailProvider" {onNavigateTo} />
-  </div>
 </div>
 {/if}
 

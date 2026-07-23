@@ -1,6 +1,6 @@
 /**
  * Shared type definitions for the 1Click: Temp Mail with Autofill extension.
- * Single source of truth — import from here in all entrypoints.
+ * Single source of truth - import from here in all entrypoints.
  */
 
 export type MailProvider = string;
@@ -56,6 +56,16 @@ export interface Keybindings {
   copyEmail: Keybinding;
   copyOtp: Keybinding;
   closeDialogs: Keybinding;
+  /** Open / focus Addresses management (Alt+Shift+A — avoids browser conflicts) */
+  openAddresses: Keybinding;
+  /** Open Identities (Alt+Shift+I) */
+  openIdentities: Keybinding;
+  /** Open Saved logins (Alt+Shift+L) */
+  openSavedLogins: Keybinding;
+  /** Toggle account selector popup (Alt+Shift+M) */
+  toggleAccountSelector: Keybinding;
+  /** Focus mailbox search (Alt+Shift+F) */
+  focusSearch: Keybinding;
 }
 
 export const DEFAULT_KEYBINDINGS: Keybindings = {
@@ -64,6 +74,12 @@ export const DEFAULT_KEYBINDINGS: Keybindings = {
   copyEmail: { key: 'c', ctrlKey: true, metaKey: true },
   copyOtp: { key: 'o', ctrlKey: true, metaKey: true },
   closeDialogs: { key: 'Escape' },
+  // Alt+Shift combos rarely conflict with browser or site shortcuts
+  openAddresses: { key: 'a', altKey: true, shiftKey: true },
+  openIdentities: { key: 'i', altKey: true, shiftKey: true },
+  openSavedLogins: { key: 'l', altKey: true, shiftKey: true },
+  toggleAccountSelector: { key: 'm', altKey: true, shiftKey: true },
+  focusSearch: { key: 'f', altKey: true, shiftKey: true },
 };
 
 export interface StoredSettings {
@@ -98,6 +114,12 @@ export interface Analytics {
   emailsReceived: number;
   otpsDetected: number;
   notificationsSent: number;
+  /** Times the extension UI was opened (popup/sidepanel/app mount) */
+  extensionOpens?: number;
+  /** Times an email was marked read / opened */
+  emailsRead?: number;
+  /** Per-view visit counts (view id → count) */
+  pageVisits?: Record<string, number>;
   // Performance metrics
   performance?: {
     emailFetchTimes: number[]; // Array of fetch times in milliseconds
@@ -149,8 +171,11 @@ export interface Account {
   expiresAt: number; // ms timestamp
   expiryNotified?: boolean;
   autoExtend?: boolean;
+  /** Primary/legacy single tag (first of `tags` when multi-tag is used) */
   tag?: string;
   tagColor?: string;
+  /** Multiple tags per address (preferred). When set, `tag`/`tagColor` mirror the first entry. */
+  tags?: Array<{ name: string; color: string }>;
   accountStatus?: AccountStatus; // Mutually exclusive: active | archived | deleted
   instanceUrl?: string; // For multi-instance providers
   // UI-specific properties
@@ -159,6 +184,18 @@ export interface Account {
   lastUsed?: string; // Formatted last used string
   status?: string; // Computed display status: active | archived | deleted | expired
   emailUser?: string;
+  /** How many times this inbox was successfully renewed (auto or manual) */
+  renewalCount?: number;
+}
+
+/** Detected one-click / magic sign-in link on a message */
+export interface MagicLink {
+  url: string;
+  label?: string;
+  score: number;
+  host?: string;
+  /** Estimated expiry (ms epoch) from body heuristics */
+  expiresAt?: number;
 }
 
 export interface Email {
@@ -171,11 +208,25 @@ export interface Email {
   from_name?: string;
   received_at: number; // Unix seconds
   otp?: string | null;
+  /** Estimated OTP validity end (ms epoch) from body heuristics */
+  otpExpiresAt?: number;
+  /** Ranked magic / sign-in links extracted from the body */
+  magicLinks?: MagicLink[];
+  /** True when at least one magic link was detected */
+  hasMagicLink?: boolean;
+  attachments?: {
+    filename: string;
+    mimeType: string;
+    partNumber?: string;
+    downloadUrl?: string | null;
+  }[];
   archived?: boolean;
   archived_at?: number;
   stored_at?: number; // ms timestamp (when we stored it)
   original_inbox?: string;
   local_only?: boolean; // Email only exists locally, not in API
+  /** ms epoch when we first detected this message is no longer on the server */
+  local_only_since?: number;
   // Local-only soft archive/delete (separate from `archived` which is server-side)
   local_archived?: boolean;
   local_archived_at?: number;
@@ -207,8 +258,33 @@ export interface Identity {
   phone?: string;
   pin?: string;
   domainHints?: string[];
+  /**
+   * Mailbox address to prefer when autofilling.
+   * Empty / undefined = use the currently selected (active) inbox.
+   * Must match an existing inbox address when set.
+   */
+  preferredEmail?: string | null;
+  /** Optional form-fill profile extras */
+  gender?: 'male' | 'female' | 'other' | 'prefer_not' | null;
+  /** ISO date YYYY-MM-DD */
+  dateOfBirth?: string | null;
+  /** ISO country code e.g. US, DE */
+  country?: string | null;
+  /** City for autofill (optional) */
+  city?: string | null;
+  /** State / province / region */
+  state?: string | null;
+  /** Street address line */
+  address?: string | null;
+  /** Profile picture as data URL (optional, for future auto-account flows) */
+  profilePicture?: string | null;
   isDefault: boolean;
   createdAt: number;
+  /** Last successful save timestamp (ms) */
+  updatedAt?: number;
+  /** Chronological edit history (newest last, capped) */
+  updateHistory?: { at: number; summary?: string }[];
+  userAgent?: string | null;
 }
 
 export interface NotificationSettings {
@@ -230,8 +306,9 @@ export interface EmailFilters {
   searchQuery?: string;
   hasOTP?: boolean;
   senderDomain?: string;
-  dateFrom?: number;
-  dateTo?: number;
+  recipient?: string;
+  dateFrom?: string | number;
+  dateTo?: string | number;
 }
 
 export interface SavedSearchFilter {
@@ -244,6 +321,7 @@ export interface SavedSearchFilter {
   dateFrom: string;
   dateTo: string;
   sortBy?: string;
+  recipient?: string;
   createdAt: number;
 }
 
@@ -270,7 +348,7 @@ export interface MainViewProps {
   onOpenArchivedEmails: () => void;
   onOpenExpiredEmails: () => void;
   onCopyOtp: () => void;
-  onOpenMessageDetail: (message: Email) => void;
+  onOpenMessageDetail: (thread: Email[]) => void;
   onClearFilters: () => void;
   dropdownOpen: boolean;
   domainMenuOpen: boolean;
@@ -310,14 +388,14 @@ export interface EmailDetailProps {
   currentEmailDetail: Account | null;
   emails: Email[];
   loading: boolean;
-  onOpenMessageDetail: (mail: Email) => void;
+  onOpenMessageDetail: (thread: Email[]) => void;
   onRefreshMessages: () => void;
   onExportEmail: () => void;
 }
 
 export interface MessageDetailProps {
   onBack: () => void;
-  selectedMessage: Email | null;
+  selectedThread: Email[];
 }
 
 export interface LoginInfoProps {
@@ -366,6 +444,7 @@ export interface EmailHistoryItem {
 }
 
 export interface CredentialsHistoryItem {
+  id?: string;
   domain: string;
   timestamp: number;
   email?: string | null;
@@ -376,6 +455,8 @@ export interface CredentialsHistoryItem {
   password?: string;
   inboxId?: string;
   identityId?: string;
+  /** Privacy / terms / policy URLs captured from the signup form */
+  policyUrls?: string[];
   [key: string]: unknown;
 }
 
@@ -417,6 +498,10 @@ export type BackgroundMessage =
       user?: string;
       instanceId?: string;
       emailUser?: string;
+      /** Page domain for site-rule provider pick */
+      domain?: string;
+      /** Skip health/rule auto-pick and failover */
+      skipHealthPick?: boolean;
     }
   | { type: 'checkEmails'; inboxId: string; filters?: EmailFilters }
   | { type: 'deleteInbox'; inboxId: string; preserveEmails?: boolean }
@@ -430,6 +515,10 @@ export type BackgroundMessage =
   | { type: 'clearSessionCredentials' }
   | { type: 'updateSessionCredentials'; credentials: Partial<SessionCredentials> }
   | { type: 'getAnalytics' }
+  | { type: 'resetAnalytics' }
+  | { type: 'recordExtensionOpen' }
+  | { type: 'recordPageVisit'; viewId: string }
+  | { type: 'recordEmailRead' }
   | { type: 'renewInbox'; inboxId: string }
   | { type: 'fetchFavicon'; url: string }
   | { action: 'hardReset' }
@@ -457,14 +546,16 @@ export type BackgroundMessage =
       action: 'cleanupOldStoredEmails';
       activeRetentionDays?: number;
       archivedRetentionDays?: number;
-    };
+    }
+  | { action: 'findReusableIdentity'; domain: string; inboxId?: string }
+  | { action: 'findSiteReplay'; domain: string; inboxId?: string };
 
 // ---- Content script message shapes ----
 
 export type ContentMessage =
   | { type: 'clearSessionCredentials' }
   | { type: 'updateSessionCredentials'; credentials: Partial<SessionCredentials> }
-  | { type: 'fillOTP'; otp: string }
+  | { type: 'fillOTP'; otp: string; sender?: string; senderName?: string; subject?: string }
   | { type: 'checkFormDetected' }
   | { type: 'autofillForm' }
   | { action: 'startSignup' };

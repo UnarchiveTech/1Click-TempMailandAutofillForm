@@ -15,4 +15,9 @@ export function getToastTypeFromMessage(message: string): ToastType {
 export interface ConfirmDialogState {
   message: string;
   onConfirm: () => void;
+  title?: string;
+  confirmLabel?: string;
+  secondaryLabel?: string;
+  onSecondary?: () => void;
+  note?: string;
 }

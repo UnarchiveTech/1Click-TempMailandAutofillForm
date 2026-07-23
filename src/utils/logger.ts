@@ -22,7 +22,7 @@ interface LogEntry {
 
 type LogContext = Record<string, unknown>;
 
-let isLoggingEnabled = true;
+let isLoggingEnabled = false;
 let currentLogLevel: LogLevel = LogLevel.INFO;
 
 /**
@@ -168,4 +168,9 @@ export function log(...args: unknown[]): void {
       .join(' ');
     logInfo(message);
   }
+}
+
+// Automatically initialize the logger on load in a valid browser storage context
+if (browser?.storage) {
+  initLogger().catch(() => {});
 }

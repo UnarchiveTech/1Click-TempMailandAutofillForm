@@ -1,2 +1,0 @@
-bun x biome check --write
-bun run check-translations

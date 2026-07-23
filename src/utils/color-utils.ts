@@ -17,20 +17,31 @@
  * ```
  */
 export function rgbToHex(rgb: string): string {
+  if (!rgb) return '#000000';
   // If already hex or var(), return as-is
   if (rgb.startsWith('#') || rgb.startsWith('var(')) {
     return rgb;
   }
 
-  // Parse rgb(r, g, b) or rgba(r, g, b, a)
-  const rgbMatch = rgb.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*[\d.]+)?\)/);
-  if (!rgbMatch) {
+  // Parse rgb(r, g, b), rgba(r, g, b, a), rgb(r g b), rgba(r g b / a)
+  // Percentages are also supported (e.g. 50%)
+  const match = rgb.match(
+    /rgba?\((\d+%?)\s*[,/]?\s*(\d+%?)\s*[,/]?\s*(\d+%?)(?:\s*[,/]?\s*[\d.]+%?)?\)/
+  );
+  if (!match) {
     return '#000000'; // Fallback to black if parsing fails
   }
 
-  const r = parseInt(rgbMatch[1], 10);
-  const g = parseInt(rgbMatch[2], 10);
-  const b = parseInt(rgbMatch[3], 10);
+  const parseVal = (val: string): number => {
+    if (val.endsWith('%')) {
+      return Math.round((parseFloat(val) * 255) / 100);
+    }
+    return parseInt(val, 10);
+  };
+
+  const r = Math.max(0, Math.min(255, parseVal(match[1])));
+  const g = Math.max(0, Math.min(255, parseVal(match[2])));
+  const b = Math.max(0, Math.min(255, parseVal(match[3])));
 
   return (
     '#' +

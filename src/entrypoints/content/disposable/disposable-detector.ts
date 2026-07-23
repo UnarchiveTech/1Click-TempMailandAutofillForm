@@ -8,8 +8,83 @@
 
 import { browser } from 'wxt/browser';
 import { NoActiveInboxError } from '@/utils/errors.js';
+import { t } from '@/utils/i18n-utils.js';
 import { logError } from '@/utils/logger.js';
 import { positionAtEndOfField, trackElementPosition } from '../dom/positioning.js';
+
+// ── Sites known to reject disposable/temporary email domains ────────────────
+// When the user is on one of these sites and types a disposable email, we show
+// a warning instead of the "use temp alias" suggestion - because the signup
+// will fail. This saves the user from wasting a temp inbox on a site that
+// won't accept it.
+//
+// This is a curated list of popular sites that block disposable email
+// providers. Users can also add their own via the autofill blocklist UI.
+const DISPOSABLE_REJECTING_DOMAINS = new Set([
+  'facebook.com',
+  'instagram.com',
+  'twitter.com',
+  'x.com',
+  'reddit.com',
+  'netflix.com',
+  'spotify.com',
+  'amazon.com',
+  'amazon.co.uk',
+  'whatsapp.com',
+  'telegram.org',
+  'discord.com',
+  'twitch.tv',
+  'github.com',
+  'linkedin.com',
+  'pinterest.com',
+  'tiktok.com',
+  'snapchat.com',
+]);
+
+/**
+ * Check if the current site is known to reject disposable email domains.
+ * Returns the root domain if it matches, null otherwise.
+ */
+function getDisposableRejectingDomain(hostname: string): string | null {
+  // Check exact match first, then progressively strip subdomains
+  if (DISPOSABLE_REJECTING_DOMAINS.has(hostname)) return hostname;
+  const parts = hostname.split('.');
+  for (let i = 1; i < parts.length - 1; i++) {
+    const candidate = parts.slice(i).join('.');
+    if (DISPOSABLE_REJECTING_DOMAINS.has(candidate)) return candidate;
+  }
+  return null;
+}
+
+/**
+ * Build a warning chip (orange/amber) - visually distinct from the green
+ * "use temp alias" suggestion chip so users can tell them apart.
+ */
+function buildWarningChip(text: string): HTMLElement {
+  const chip = document.createElement('div');
+  chip.className = 'disposable-reject-warning-chip';
+  chip.style.cssText = `
+    position: absolute;
+    z-index: 10001;
+    background-color: var(--md-warning);
+    color: var(--md-on-warning);
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 500;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-family: system-ui, sans-serif;
+    user-select: none;
+    white-space: nowrap;
+    max-width: 280px;
+    pointer-events: none;
+  `;
+  chip.textContent = text;
+  return chip;
+}
 
 const REAL_EMAIL_DOMAINS = new Set([
   'gmail.com',
@@ -124,14 +199,14 @@ async function createTempInbox(): Promise<InboxShape | null> {
   }
 }
 
-function buildChip(text: string, primaryColor: string): HTMLElement {
+function buildChip(text: string): HTMLElement {
   const chip = document.createElement('div');
   chip.className = 'disposable-suggest-chip';
   chip.style.cssText = `
     position: absolute;
     z-index: 10001;
-    background-color: ${primaryColor};
-    color: white;
+    background-color: var(--md-primary);
+    color: var(--md-on-primary);
     padding: 4px 10px;
     border-radius: 999px;
     font-size: 11px;
@@ -150,18 +225,6 @@ function buildChip(text: string, primaryColor: string): HTMLElement {
   return chip;
 }
 
-const DEFAULT_PRIMARY_COLOR = '#4c662b';
-const DEFAULT_PRIMARY_HOVER = '#3a4e20';
-
-async function _getPrimaryColor(): Promise<string> {
-  try {
-    const result = (await browser.storage.local.get('customColor')) as { customColor?: string };
-    return result.customColor || DEFAULT_PRIMARY_COLOR;
-  } catch {
-    return DEFAULT_PRIMARY_COLOR;
-  }
-}
-
 interface DisposableTracker {
   cleanup: () => void;
 }
@@ -174,8 +237,7 @@ export function attachDisposableHint(
   if (field.dataset.disposableHintAttached === '1') return null;
   field.dataset.disposableHintAttached = '1';
 
-  const primaryColor = DEFAULT_PRIMARY_COLOR;
-  const primaryHover = DEFAULT_PRIMARY_HOVER;
+  // Dynamic colors handled via CSS variables on shadow DOM host
 
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
   let currentChip: HTMLElement | null = null;
@@ -183,9 +245,32 @@ export function attachDisposableHint(
   let currentInbox: InboxShape | null = null;
   let _isDismissedForDomain = false;
 
+  let warningChip: HTMLElement | null = null;
+  const rejectingDomain = getDisposableRejectingDomain(window.location.hostname);
+
+  async function translate(key: string, vars?: Record<string, string | number>): Promise<string> {
+    // Use in-content i18n (same pack as autofill buttons) — no SW round-trip
+    try {
+      return await t(key, vars);
+    } catch {
+      return key;
+    }
+  }
+
   async function refreshChip(): Promise<void> {
     const value = field.value;
     const domain = getEmailDomain(value);
+
+    // ── Disposable-rejection warning ──────────────────────────────────
+    // If the current site is known to reject disposable emails AND the user
+    // has typed a disposable-looking email, show a warning instead of the
+    // "use temp alias" suggestion.
+    if (rejectingDomain && domain && !REAL_EMAIL_DOMAINS.has(domain)) {
+      hideChip();
+      await showWarningChip();
+      return;
+    }
+    hideWarningChip();
 
     if (!domain || !REAL_EMAIL_DOMAINS.has(domain)) {
       hideChip();
@@ -200,7 +285,7 @@ export function attachDisposableHint(
 
     currentDomain = domain;
     currentInbox = await getActiveInbox();
-    showChip();
+    await showChip();
   }
 
   function hideChip(): void {
@@ -211,24 +296,38 @@ export function attachDisposableHint(
     currentDomain = null;
   }
 
-  function showChip(): void {
+  async function showWarningChip(): Promise<void> {
+    if (warningChip) return; // already showing
+    const text = await translate('disposable.rejectWarning', { domain: rejectingDomain || '' });
+    const chip = buildWarningChip(text);
+    positionChip(chip, field, updatePositionListeners);
+    document.body.appendChild(chip);
+    warningChip = chip;
+  }
+
+  function hideWarningChip(): void {
+    if (warningChip?.parentNode) {
+      warningChip.parentNode.removeChild(warningChip);
+    }
+    warningChip = null;
+  }
+
+  async function showChip(): Promise<void> {
+    const text = currentInbox
+      ? await translate('disposable.useAddressInstead', { address: currentInbox.address })
+      : await translate('disposable.createAliasInstead');
+
     if (currentChip) {
-      const text = currentInbox
-        ? `Use ${currentInbox.address} instead?`
-        : 'Create temp alias instead?';
       currentChip.textContent = text;
       return;
     }
 
-    const text = currentInbox
-      ? `Use ${currentInbox.address} instead?`
-      : 'Create temp alias instead?';
-    const chip = buildChip(text, primaryColor);
+    const chip = buildChip(text);
     chip.onmouseover = () => {
-      chip.style.backgroundColor = primaryHover;
+      chip.style.filter = 'brightness(0.9)';
     };
     chip.onmouseout = () => {
-      chip.style.backgroundColor = primaryColor;
+      chip.style.filter = 'none';
     };
     chip.onmousedown = () => {
       chip.style.transform = 'scale(0.97)';
@@ -255,7 +354,7 @@ export function attachDisposableHint(
       if (!inbox) {
         inbox = await createTempInbox();
         if (!inbox) {
-          await showErrorTooltip(currentChip, 'Could not create temp alias');
+          await showErrorTooltip(currentChip, await t('disposable.createFailed'));
           return;
         }
       }
@@ -268,7 +367,7 @@ export function attachDisposableHint(
       currentChip = null;
     } catch (error: unknown) {
       if (error instanceof NoActiveInboxError) {
-        await showErrorTooltip(currentChip, 'No active temp alias');
+        await showErrorTooltip(currentChip, await t('disposable.noActiveAlias'));
       } else {
         logError('Failed to fill with temp alias', error);
       }
@@ -282,9 +381,14 @@ export function attachDisposableHint(
     }, INPUT_DEBOUNCE_MS);
   }
 
+  let blurTimer: ReturnType<typeof setTimeout> | null = null;
+
   function onBlur(): void {
-    setTimeout(() => {
+    if (blurTimer) clearTimeout(blurTimer);
+    blurTimer = setTimeout(() => {
+      blurTimer = null;
       hideChip();
+      hideWarningChip();
     }, 150);
   }
 
@@ -296,20 +400,35 @@ export function attachDisposableHint(
       field.removeEventListener('input', onInput);
       field.removeEventListener('blur', onBlur);
       if (debounceTimer) clearTimeout(debounceTimer);
+      if (blurTimer) clearTimeout(blurTimer);
       hideChip();
+      hideWarningChip();
       delete field.dataset.disposableHintAttached;
     },
   };
 }
 
+let _errorTooltipTimer: ReturnType<typeof setTimeout> | null = null;
+
 async function showErrorTooltip(chip: HTMLElement | null, message: string): Promise<void> {
   if (!chip) return;
+  // Cancel any pending reset from a previous call so timers don't overlap
+  if (_errorTooltipTimer !== null) {
+    clearTimeout(_errorTooltipTimer);
+    _errorTooltipTimer = null;
+  }
   const originalText = chip.textContent;
+  const originalBg = chip.style.backgroundColor;
+  const originalColor = chip.style.color;
   chip.textContent = message;
-  chip.style.backgroundColor = '#b3261e';
-  setTimeout(() => {
+  chip.style.backgroundColor = 'var(--md-error)';
+  chip.style.color = 'var(--md-on-error)';
+  _errorTooltipTimer = setTimeout(() => {
+    _errorTooltipTimer = null;
     chip.textContent = originalText;
-    chip.style.backgroundColor = DEFAULT_PRIMARY_COLOR;
+    // Restore the chip's own original color rather than assuming DEFAULT_PRIMARY_COLOR
+    chip.style.backgroundColor = originalBg;
+    chip.style.color = originalColor;
   }, 1500);
 }
 

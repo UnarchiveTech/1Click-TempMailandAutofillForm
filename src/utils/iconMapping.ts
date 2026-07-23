@@ -214,7 +214,9 @@ export function detectIconFromMessage(message: string): ToastType {
 
   // Check each keyword in the mapping
   for (const [keyword, iconType] of Object.entries(ICON_KEYWORD_MAPPING)) {
-    if (lowerMessage.includes(keyword)) {
+    const escapedKeyword = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(`\\b${escapedKeyword}\\b`, 'i');
+    if (regex.test(lowerMessage)) {
       return iconType;
     }
   }

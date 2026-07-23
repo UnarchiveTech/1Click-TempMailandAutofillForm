@@ -1,30 +1,21 @@
-// Shared time store for reactive time updates across components
-// This consolidates multiple setInterval calls into a single source of truth
+import { writable } from 'svelte/store';
 
-let currentTime = Date.now();
-let intervalId: ReturnType<typeof setInterval> | null = null;
-const subscribers = new Set<() => void>();
+let currentTimeValue = Date.now();
+let activeCount = 0;
 
-// Start the interval when first component subscribes
-function startInterval() {
-  if (intervalId === null) {
-    intervalId = setInterval(() => {
-      currentTime = Date.now();
-      // Notify all subscribers
-      for (const callback of subscribers) {
-        callback();
-      }
-    }, 1000); // Update every second
-  }
-}
+const timeStore = writable(currentTimeValue, (set) => {
+  const interval = setInterval(() => {
+    const now = Date.now();
+    currentTimeValue = now;
+    set(now);
+  }, 1000);
 
-// Stop the interval when no components are subscribed
-function stopInterval() {
-  if (subscribers.size === 0 && intervalId !== null) {
-    clearInterval(intervalId);
-    intervalId = null;
-  }
-}
+  return () => {
+    clearInterval(interval);
+  };
+});
+
+const customSubscribers = new Set<() => void>();
 
 /**
  * Hook to get the current reactive time
@@ -33,14 +24,26 @@ function stopInterval() {
 export function useCurrentTime() {
   return {
     get currentTime() {
-      return currentTime;
+      // Use cached currentTimeValue if store is active; fallback to Date.now() if inactive
+      return activeCount > 0 ? currentTimeValue : Date.now();
     },
     subscribe(callback: () => void) {
-      subscribers.add(callback);
-      startInterval();
+      customSubscribers.add(callback);
+      activeCount++;
+
+      // Also subscribe to timeStore to start/keep it active
+      const unsubscribeTime = timeStore.subscribe((val) => {
+        currentTimeValue = val;
+        callback();
+      });
+
+      let unsubscribed = false;
       return () => {
-        subscribers.delete(callback);
-        stopInterval();
+        if (unsubscribed) return;
+        unsubscribed = true;
+        customSubscribers.delete(callback);
+        activeCount = Math.max(0, activeCount - 1);
+        unsubscribeTime();
       };
     },
   };

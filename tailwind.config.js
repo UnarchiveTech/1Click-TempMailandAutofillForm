@@ -5,6 +5,7 @@ export default {
     extend: {
       fontFamily: {
         sans: [
+          'Roboto',
           'ui-sans-serif',
           'system-ui',
           '-apple-system',
@@ -13,10 +14,85 @@ export default {
           '"Segoe UI Emoji"',
           '"Apple Color Emoji"',
           '"Noto Color Emoji"',
-          'Roboto',
           '"Helvetica Neue"',
           'Arial',
           'sans-serif',
+        ],
+      },
+      /**
+       * MD3 type scale mapped to Tailwind text-* (375×600 popup / mobile width).
+       * Prefer semantic classes from styles.css (MD3 type utilities) for new UI.
+       */
+      fontSize: {
+        xs: [
+          'var(--md-type-body-small-size)',
+          {
+            lineHeight: 'var(--md-type-body-small-line)',
+            letterSpacing: 'var(--md-type-body-small-tracking)',
+          },
+        ],
+        sm: [
+          'var(--md-type-body-medium-size)',
+          {
+            lineHeight: 'var(--md-type-body-medium-line)',
+            letterSpacing: 'var(--md-type-body-medium-tracking)',
+          },
+        ],
+        base: [
+          'var(--md-type-body-large-size)',
+          {
+            lineHeight: 'var(--md-type-body-large-line)',
+            letterSpacing: 'var(--md-type-body-large-tracking)',
+          },
+        ],
+        lg: [
+          'var(--md-type-title-large-size)',
+          {
+            lineHeight: 'var(--md-type-title-large-line)',
+            letterSpacing: 'var(--md-type-title-large-tracking)',
+          },
+        ],
+        xl: [
+          'var(--md-type-headline-small-size)',
+          {
+            lineHeight: 'var(--md-type-headline-small-line)',
+            letterSpacing: 'var(--md-type-headline-small-tracking)',
+          },
+        ],
+        '2xl': [
+          'var(--md-type-headline-medium-size)',
+          {
+            lineHeight: 'var(--md-type-headline-medium-line)',
+            letterSpacing: 'var(--md-type-headline-medium-tracking)',
+          },
+        ],
+        '3xl': [
+          'var(--md-type-headline-large-size)',
+          {
+            lineHeight: 'var(--md-type-headline-large-line)',
+            letterSpacing: 'var(--md-type-headline-large-tracking)',
+          },
+        ],
+        'label-sm': [
+          'var(--md-type-label-small-size)',
+          {
+            lineHeight: 'var(--md-type-label-small-line)',
+            letterSpacing: 'var(--md-type-label-small-tracking)',
+          },
+        ],
+        'title-md': [
+          'var(--md-type-title-medium-size)',
+          {
+            lineHeight: 'var(--md-type-title-medium-line)',
+            letterSpacing: 'var(--md-type-title-medium-tracking)',
+          },
+        ],
+        'title-lg': [
+          'var(--md-type-title-large-size)',
+          {
+            lineHeight: 'var(--md-type-title-large-line)',
+            letterSpacing: 'var(--md-type-title-large-tracking)',
+          },
         ],
       },
       colors: {

@@ -1,5 +1,8 @@
 import type { Browser } from 'wxt/browser';
+import { generateDefaultAvatarDataUrl } from '@/utils/default-avatar.js';
+import { generateLocalProfileExtras } from '@/utils/locale-profile.js';
 import { logError } from '@/utils/logger.js';
+import { withLock } from '@/utils/mutex.js';
 import type { Identity } from '@/utils/types.js';
 
 export interface IdentityState {
@@ -61,15 +64,26 @@ const DEFAULT_LAST_NAMES = [
 export function createDefaultIdentity(): Identity {
   const firstNames = DEFAULT_FIRST_NAMES.join(', ');
   const lastNames = DEFAULT_LAST_NAMES.join(', ');
+  // Country / DOB / ZIP / city - local-only detection + random samples (no network)
+  const extras = generateLocalProfileExtras();
 
+  const firstPick = DEFAULT_FIRST_NAMES[0] || 'D';
   return {
     id: `default_${Date.now()}`,
     name: 'Default Identity',
     firstNames,
     lastNames,
     useRandomPassword: true,
+    pin: extras.pin,
+    country: extras.country,
+    city: extras.city,
+    dateOfBirth: extras.dateOfBirth,
+    // Fake profile picture so form file inputs can be filled immediately
+    profilePicture: generateDefaultAvatarDataUrl('Default Identity', firstPick[0]),
     isDefault: true,
     createdAt: Date.now(),
+    updatedAt: Date.now(),
+    userAgent: null,
   };
 }
 
@@ -84,6 +98,30 @@ export async function loadIdentities(ext: Browser, setters: IdentitySetters): Pr
       const defaultIdentity = createDefaultIdentity();
       identities.push(defaultIdentity);
       await ext.storage.local.set({ identities });
+    } else {
+      // Enrich bare default identity once (country/DOB/ZIP/city/avatar) without network
+      const def = identities.find((i) => i.isDefault) || identities[0];
+      if (
+        def &&
+        (!def.country || !def.dateOfBirth || !def.pin || !def.city || !def.profilePicture)
+      ) {
+        const extras = generateLocalProfileExtras();
+        const idx = identities.findIndex((i) => i.id === def.id);
+        if (idx >= 0) {
+          const firstLetter = (def.firstNames || def.name || 'D').trim()[0] || 'D';
+          identities[idx] = {
+            ...def,
+            country: def.country || extras.country,
+            dateOfBirth: def.dateOfBirth || extras.dateOfBirth,
+            pin: def.pin || extras.pin,
+            city: def.city || extras.city,
+            profilePicture:
+              def.profilePicture || generateDefaultAvatarDataUrl(def.name || def.id, firstLetter),
+            updatedAt: Date.now(),
+          };
+          await ext.storage.local.set({ identities });
+        }
+      }
     }
 
     setters.setIdentities(identities);
@@ -114,19 +152,21 @@ export async function saveIdentity(
   setters: IdentitySetters
 ): Promise<void> {
   try {
-    const { identities = [] } = (await ext.storage.local.get(['identities'])) as {
-      identities?: Identity[];
-    };
+    await withLock('identities_lock', async () => {
+      const { identities = [] } = (await ext.storage.local.get(['identities'])) as {
+        identities?: Identity[];
+      };
 
-    const index = identities.findIndex((i) => i.id === identity.id);
-    if (index >= 0) {
-      identities[index] = identity;
-    } else {
-      identities.push(identity);
-    }
+      const index = identities.findIndex((i) => i.id === identity.id);
+      if (index >= 0) {
+        identities[index] = identity;
+      } else {
+        identities.push(identity);
+      }
 
-    await ext.storage.local.set({ identities });
-    setters.setIdentities(identities);
+      await ext.storage.local.set({ identities });
+      setters.setIdentities(identities);
+    });
   } catch (error: unknown) {
     logError(
       'Failed to save identity:',
@@ -142,30 +182,32 @@ export async function deleteIdentity(
   setters: IdentitySetters
 ): Promise<void> {
   try {
-    const { identities = [] } = (await ext.storage.local.get(['identities'])) as {
-      identities?: Identity[];
-    };
+    await withLock('identities_lock', async () => {
+      const { identities = [] } = (await ext.storage.local.get(['identities'])) as {
+        identities?: Identity[];
+      };
 
-    const filtered = identities.filter((i) => i.id !== identityId);
+      const filtered = identities.filter((i) => i.id !== identityId);
 
-    // Ensure at least one identity exists
-    if (filtered.length === 0) {
-      const defaultIdentity = createDefaultIdentity();
-      filtered.push(defaultIdentity);
-    }
+      // Ensure at least one identity exists
+      if (filtered.length === 0) {
+        const defaultIdentity = createDefaultIdentity();
+        filtered.push(defaultIdentity);
+      }
 
-    await ext.storage.local.set({ identities: filtered });
-    setters.setIdentities(filtered);
+      await ext.storage.local.set({ identities: filtered });
+      setters.setIdentities(filtered);
 
-    // Update selected identity if needed
-    const { selectedIdentityId } = (await ext.storage.local.get(['selectedIdentityId'])) as {
-      selectedIdentityId?: string;
-    };
-    if (selectedIdentityId === identityId) {
-      const newSelected = filtered[0];
-      setters.setSelectedIdentityId(newSelected.id);
-      await ext.storage.local.set({ selectedIdentityId: newSelected.id });
-    }
+      // Update selected identity if needed
+      const { selectedIdentityId } = (await ext.storage.local.get(['selectedIdentityId'])) as {
+        selectedIdentityId?: string;
+      };
+      if (selectedIdentityId === identityId) {
+        const newSelected = filtered[0];
+        setters.setSelectedIdentityId(newSelected.id);
+        await ext.storage.local.set({ selectedIdentityId: newSelected.id });
+      }
+    });
   } catch (error: unknown) {
     logError(
       'Failed to delete identity:',
@@ -200,18 +242,21 @@ export async function reorderIdentities(
 ): Promise<void> {
   if (fromIndex === toIndex) return;
   try {
-    const { identities = [] } = (await ext.storage.local.get(['identities'])) as {
-      identities?: Identity[];
-    };
-    if (fromIndex < 0 || fromIndex >= identities.length) return;
-    if (toIndex < 0 || toIndex >= identities.length) return;
+    await withLock('identities_lock', async () => {
+      const { identities = [] } = (await ext.storage.local.get(['identities'])) as {
+        identities?: Identity[];
+      };
+      if (fromIndex < 0 || fromIndex >= identities.length) return;
+      if (toIndex < 0 || toIndex >= identities.length) return;
 
-    const next = [...identities];
-    const [moved] = next.splice(fromIndex, 1);
-    next.splice(toIndex, 0, moved);
+      const next = [...identities];
+      const [moved] = next.splice(fromIndex, 1);
+      if (!moved) return;
+      next.splice(toIndex, 0, moved);
 
-    await ext.storage.local.set({ identities: next });
-    setters.setIdentities(next);
+      await ext.storage.local.set({ identities: next });
+      setters.setIdentities(next);
+    });
   } catch (error: unknown) {
     logError(
       'Failed to reorder identities:',

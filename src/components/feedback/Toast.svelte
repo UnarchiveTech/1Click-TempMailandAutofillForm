@@ -45,7 +45,9 @@ export type Toast = {
   type: ToastType;
   message: string;
   duration?: number;
-  undoAction?: (() => void) | null;
+  undoAction?: (() => void | Promise<void>) | null;
+  /** Optional label for the action button (defaults to Undo) */
+  actionLabel?: string | null;
 };
 
 let { toast, onClose }: { toast: Toast; onClose: (id: string) => void } = $props();
@@ -228,103 +230,106 @@ function getTextColor() {
 
 {#if visible}
   <div
-    class="flex items-start gap-3 px-4 py-3 rounded-xl border shadow-lg min-w-[280px] max-w-[325px] w-[325px] bg-md-primary"
-    transition:fly={{ y: -20, duration: 300 }}
+    class="pointer-events-auto w-full flex items-center gap-2 px-3 h-10 rounded-xl border border-md-outline-variant/10 shadow-md min-w-0 max-w-[340px] bg-md-inverse-surface"
+    transition:fly={{ y: 12, duration: 220 }}
   >
     {#if toast.type === 'success'}
-      <Icon name="checkCircle" class="w-5 h-5 shrink-0 mt-0.5 text-md-success" />
+      <Icon name="checkCircle" class="w-3.5 h-3.5 shrink-0 text-md-success" />
     {:else if toast.type === 'error'}
-      <Icon name="alertTriangle" class="w-5 h-5 shrink-0 mt-0.5 text-md-error" />
+      <Icon name="alertTriangle" class="w-3.5 h-3.5 shrink-0 text-md-error" />
     {:else if toast.type === 'warning'}
-      <Icon name="warning" class="w-5 h-5 shrink-0 mt-0.5 text-md-warning" />
+      <Icon name="warning" class="w-3.5 h-3.5 shrink-0 text-md-warning" />
     {:else if toast.type === 'expired'}
-      <Icon name="clock" class="w-5 h-5 shrink-0 mt-0.5 text-md-warning" />
+      <Icon name="clock" class="w-3.5 h-3.5 shrink-0 text-md-warning" />
     {:else if toast.type === 'archived'}
-      <Icon name="archive" class="w-5 h-5 shrink-0 mt-0.5 text-md-primary" />
+      <Icon name="archive" class="w-3.5 h-3.5 shrink-0 text-md-primary" />
     {:else if toast.type === 'deleted'}
-      <Icon name="trash" class="w-5 h-5 shrink-0 mt-0.5 text-md-error" />
+      <Icon name="trash" class="w-3.5 h-3.5 shrink-0 text-md-error" />
     {:else if toast.type === 'copy'}
-      <Icon name="copy" class="w-5 h-5 shrink-0 mt-0.5 text-md-primary" />
+      <Icon name="copy" class="w-3.5 h-3.5 shrink-0 text-md-primary" />
     {:else if toast.type === 'auto-renew'}
-      <Icon name="autoRenew" class="w-5 h-5 shrink-0 mt-0.5 text-md-success" />
+      <Icon name="autoRenew" class="w-3.5 h-3.5 shrink-0 text-md-success" />
     {:else if toast.type === 'back'}
-      <Icon name="back" class="w-5 h-5 shrink-0 mt-0.5 text-md-primary" />
+      <Icon name="back" class="w-3.5 h-3.5 shrink-0 text-md-primary" />
     {:else if toast.type === 'chart'}
-      <Icon name="barChart" class="w-5 h-5 shrink-0 mt-0.5 text-md-primary" />
+      <Icon name="barChart" class="w-3.5 h-3.5 shrink-0 text-md-primary" />
     {:else if toast.type === 'bell'}
-      <Icon name="bell" class="w-5 h-5 shrink-0 mt-0.5 text-md-primary" />
+      <Icon name="bell" class="w-3.5 h-3.5 shrink-0 text-md-primary" />
     {:else if toast.type === 'chevron-down'}
-      <Icon name="chevronDown" class="w-5 h-5 shrink-0 mt-0.5 text-md-primary" />
+      <Icon name="chevronDown" class="w-3.5 h-3.5 shrink-0 text-md-primary" />
     {:else if toast.type === 'chevron-up'}
-      <Icon name="chevronUp" class="w-5 h-5 shrink-0 mt-0.5 text-md-primary" />
+      <Icon name="chevronUp" class="w-3.5 h-3.5 shrink-0 text-md-primary" />
     {:else if toast.type === 'download'}
-      <Icon name="download" class="w-5 h-5 shrink-0 mt-0.5 text-md-primary" />
+      <Icon name="download" class="w-3.5 h-3.5 shrink-0 text-md-primary" />
     {:else if toast.type === 'edit'}
-      <Icon name="edit" class="w-5 h-5 shrink-0 mt-0.5 text-md-primary" />
+      <Icon name="edit" class="w-3.5 h-3.5 shrink-0 text-md-primary" />
     {:else if toast.type === 'envelope'}
-      <Icon name="envelope" class="w-5 h-5 shrink-0 mt-0.5 text-md-primary" />
+      <Icon name="envelope" class="w-3.5 h-3.5 shrink-0 text-md-primary" />
     {:else if toast.type === 'filter'}
-      <Icon name="filter" class="w-5 h-5 shrink-0 mt-0.5 text-md-primary" />
+      <Icon name="filter" class="w-3.5 h-3.5 shrink-0 text-md-primary" />
     {:else if toast.type === 'flame'}
-      <Icon name="flame" class="w-5 h-5 shrink-0 mt-0.5 text-md-warning" />
+      <Icon name="flame" class="w-3.5 h-3.5 shrink-0 text-md-warning" />
     {:else if toast.type === 'github'}
-      <Icon name="gitHub" class="w-5 h-5 shrink-0 mt-0.5 text-md-primary" />
+      <Icon name="gitHub" class="w-3.5 h-3.5 shrink-0 text-md-primary" />
     {:else if toast.type === 'globe'}
-      <Icon name="globe" class="w-5 h-5 shrink-0 mt-0.5 text-md-primary" />
+      <Icon name="globe" class="w-3.5 h-3.5 shrink-0 text-md-primary" />
     {:else if toast.type === 'inbox'}
-      <Icon name="inbox" class="w-5 h-5 shrink-0 mt-0.5 text-md-primary" />
+      <Icon name="inbox" class="w-3.5 h-3.5 shrink-0 text-md-primary" />
     {:else if toast.type === 'lock'}
-      <Icon name="lock" class="w-5 h-5 shrink-0 mt-0.5 text-md-warning" />
+      <Icon name="lock" class="w-3.5 h-3.5 shrink-0 text-md-warning" />
     {:else if toast.type === 'mail'}
-      <Icon name="mail" class="w-5 h-5 shrink-0 mt-0.5 text-md-primary" />
+      <Icon name="mail" class="w-3.5 h-3.5 shrink-0 text-md-primary" />
     {:else if toast.type === 'monitor'}
-      <Icon name="monitor" class="w-5 h-5 shrink-0 mt-0.5 text-md-primary" />
+      <Icon name="monitor" class="w-3.5 h-3.5 shrink-0 text-md-primary" />
     {:else if toast.type === 'moon'}
-      <Icon name="moon" class="w-5 h-5 shrink-0 mt-0.5 text-md-primary" />
+      <Icon name="moon" class="w-3.5 h-3.5 shrink-0 text-md-primary" />
     {:else if toast.type === 'plus'}
-      <Icon name="plus" class="w-5 h-5 shrink-0 mt-0.5 text-md-success" />
+      <Icon name="plus" class="w-3.5 h-3.5 shrink-0 text-md-success" />
     {:else if toast.type === 'qr'}
-      <Icon name="qr" class="w-5 h-5 shrink-0 mt-0.5 text-md-primary" />
+      <Icon name="qr" class="w-3.5 h-3.5 shrink-0 text-md-primary" />
     {:else if toast.type === 'refresh'}
-      <Icon name="refresh" class="w-5 h-5 shrink-0 mt-0.5 text-md-primary" />
+      <Icon name="refresh" class="w-3.5 h-3.5 shrink-0 text-md-primary" />
     {:else if toast.type === 'search'}
-      <Icon name="search" class="w-5 h-5 shrink-0 mt-0.5 text-md-primary" />
+      <Icon name="search" class="w-3.5 h-3.5 shrink-0 text-md-primary" />
     {:else if toast.type === 'settings'}
-      <Icon name="settings" class="w-5 h-5 shrink-0 mt-0.5 text-md-primary" />
+      <Icon name="settings" class="w-3.5 h-3.5 shrink-0 text-md-primary" />
     {:else if toast.type === 'shield'}
-      <Icon name="shield" class="w-5 h-5 shrink-0 mt-0.5 text-md-success" />
+      <Icon name="shield" class="w-3.5 h-3.5 shrink-0 text-md-success" />
     {:else if toast.type === 'sun'}
-      <Icon name="sun" class="w-5 h-5 shrink-0 mt-0.5 text-md-warning" />
+      <Icon name="sun" class="w-3.5 h-3.5 shrink-0 text-md-warning" />
     {:else if toast.type === 'tag'}
-      <Icon name="tag" class="w-5 h-5 shrink-0 mt-0.5 text-md-primary" />
+      <Icon name="tag" class="w-3.5 h-3.5 shrink-0 text-md-primary" />
     {:else if toast.type === 'user'}
-      <Icon name="user" class="w-5 h-5 shrink-0 mt-0.5 text-md-primary" />
+      <Icon name="user" class="w-3.5 h-3.5 shrink-0 text-md-primary" />
     {:else}
-      <Icon name="infoCircle" class="w-5 h-5 shrink-0 mt-0.5 text-md-primary" />
+      <Icon name="infoCircle" class="w-3.5 h-3.5 shrink-0 text-md-primary" />
     {/if}
-    <div class="flex-1 min-w-0">
-      <p class="text-sm font-medium text-white">{toast.message}</p>
-    </div>
-    <div class="flex items-center gap-2 shrink-0">
+    <p class="flex-1 min-w-0 text-label-sm font-semibold text-md-inverse-on-surface leading-tight truncate">{toast.message}</p>
+    <div class="flex items-center gap-1.5 shrink-0">
       {#if toast.undoAction}
         <button
-          class="text-white/80 hover:text-white transition-colors text-xs font-medium"
+          class="text-md-inverse-primary hover:opacity-80 transition-opacity text-xs font-semibold uppercase tracking-wide"
           onclick={(e) => {
-          e.stopPropagation();
-          toast.undoAction?.();
-          handleClose();
-        }}
-        aria-label="Undo action"
+            e.stopPropagation();
+            const res = toast.undoAction?.();
+            if (res instanceof Promise) {
+              res.catch((err) => {
+                console.error('Toast undo action failed:', err);
+              });
+            }
+            handleClose();
+          }}
+          aria-label={toast.actionLabel || $t('common.undo') || 'Undo action'}
+        >
+          {toast.actionLabel || $t('common.undo') || 'Undo'}
+        </button>
+      {/if}
+      <button
+        class="text-md-inverse-on-surface/50 hover:text-md-inverse-on-surface transition-colors"
+        onclick={(e) => { e.stopPropagation(); handleClose(); }}
+        aria-label="Close toast"
       >
-        Undo
-      </button>
-    {/if}
-    <button
-      class="text-white/50 hover:text-white transition-colors"
-      onclick={(e) => { e.stopPropagation(); handleClose(); }}
-      aria-label="Close toast"
-    >
-        <Icon name="x" class="w-4 h-4 text-white" />
+        <Icon name="x" class="w-3.5 h-3.5 text-md-inverse-on-surface/75" />
       </button>
     </div>
   </div>

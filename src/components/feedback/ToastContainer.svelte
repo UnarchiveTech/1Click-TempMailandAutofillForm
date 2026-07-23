@@ -4,6 +4,7 @@ import type { Toast } from './Toast.svelte';
 import ToastComponent from './Toast.svelte';
 
 let toasts = $state<Toast[]>([]);
+let visibleToasts = $derived(toasts.slice(-3));
 
 $effect(() => {
   return toastStore.subscribe((newToasts) => {
@@ -16,10 +17,15 @@ function handleClose(id: string) {
 }
 </script>
 
-<div class="absolute bottom-20 right-4 z-[9999] flex flex-col gap-2 pointer-events-none">
-  {#each toasts as toast (toast.id)}
-    <div class="pointer-events-auto">
-      <ToastComponent {toast} onClose={handleClose} />
-    </div>
+<!--
+  Bottom-right of the email list area (above floating nav + multi-row strips).
+  Avoid full-width so toasts never cover the bottom strip stack.
+-->
+<div
+  class="fixed end-2 z-[9000] flex flex-col items-end gap-1.5 pointer-events-none max-w-[min(320px,calc(100%-1rem))]"
+  style="bottom: max(7.5rem, calc(env(safe-area-inset-bottom, 0px) + 6.5rem));"
+>
+  {#each visibleToasts as toast (toast.id)}
+    <ToastComponent {toast} onClose={handleClose} />
   {/each}
 </div>

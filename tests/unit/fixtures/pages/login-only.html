@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Fixture · Login only</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 420px; margin: 2rem auto; padding: 1rem; }
+    label { display: block; margin-top: 0.75rem; font-size: 0.875rem; }
+    input { width: 100%; padding: 0.5rem; box-sizing: border-box; margin-top: 0.25rem; }
+    button { margin-top: 1rem; width: 100%; padding: 0.65rem; }
+  </style>
+</head>
+<body>
+  <h1>Welcome back — Log in</h1>
+  <p>QA fixture — should NOT show Autofill All (login only).</p>
+  <form id="login" action="/login" method="post">
+    <label>Email <input type="email" name="email" autocomplete="email" /></label>
+    <label>Password <input type="password" name="password" autocomplete="current-password" /></label>
+    <button type="submit">Sign in</button>
+  </form>
+  <p><a href="signup-basic.html">Signup fixture</a></p>
+</body>
+</html>

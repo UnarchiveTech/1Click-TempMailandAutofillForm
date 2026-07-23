@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Fixture · OTP wait</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 420px; margin: 2rem auto; padding: 1rem; }
+    label { display: block; margin-top: 0.75rem; }
+    input { width: 100%; padding: 0.5rem; box-sizing: border-box; letter-spacing: 0.2em; font-size: 1.25rem; }
+  </style>
+</head>
+<body>
+  <h1>Enter verification code</h1>
+  <p>We sent a code that expires in 10 minutes.</p>
+  <form>
+    <label>One-time code
+      <input type="text" name="otp" id="otp" inputmode="numeric" autocomplete="one-time-code" maxlength="8" placeholder="000000" />
+    </label>
+    <button type="submit" style="margin-top:1rem;width:100%;padding:0.65rem">Verify</button>
+  </form>
+</body>
+</html>

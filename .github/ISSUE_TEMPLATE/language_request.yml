@@ -1,0 +1,28 @@
+name: Language Request
+description: Request a new UI language for the extension
+title: "[Language Request] Add support for …"
+labels: ["enhancement", "i18n"]
+body:
+  - type: input
+    id: language
+    attributes:
+      label: Language name
+      description: English name of the language (e.g. Portuguese, Hindi)
+      placeholder: Portuguese (Brazil)
+    validations:
+      required: true
+  - type: input
+    id: locale
+    attributes:
+      label: Locale code
+      description: BCP-47 / ISO code if known (e.g. pt-BR, hi)
+      placeholder: pt-BR
+    validations:
+      required: false
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Any regional variant, RTL needs, or volunteering to translate
+    validations:
+      required: false

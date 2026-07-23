@@ -4,7 +4,7 @@
  * Injected buttons are appended to document.body, so the browser's normal
  * layout/scroll context doesn't follow the target field. The previous
  * implementation used `position: absolute` with manual `getBoundingClientRect()
- * + window.scrollY` math, which only worked for window scroll — it broke for
+ * + window.scrollY` math, which only worked for window scroll - it broke for
  * any form inside a nested scroll container (modal, sticky sidebar, any
  * `overflow: auto|scroll` parent) because the inner scroll wasn't tracked.
  *
@@ -59,17 +59,24 @@ export function trackElementPosition(
   positioner: (rect: DOMRect) => { top: number; left: number; visible: boolean },
   updatePositionListeners: Array<() => void>
 ): PositionTracker {
+  let isIntersecting = true;
+  let frameId: number | null = null;
+
   const update = () => {
-    if (!isVisible(target)) {
-      button.style.display = 'none';
-      return;
-    }
-    const rect = target.getBoundingClientRect();
-    const { top, left, visible } = positioner(rect);
-    button.style.position = 'fixed';
-    button.style.top = `${top}px`;
-    button.style.left = `${left}px`;
-    button.style.display = visible ? '' : 'none';
+    if (frameId !== null) return;
+    frameId = requestAnimationFrame(() => {
+      frameId = null;
+      if (!isVisible(target) || !isIntersecting) {
+        button.style.display = 'none';
+        return;
+      }
+      const rect = target.getBoundingClientRect();
+      const { top, left, visible } = positioner(rect);
+      button.style.position = 'fixed';
+      button.style.top = `${top}px`;
+      button.style.left = `${left}px`;
+      button.style.display = visible ? '' : 'none';
+    });
   };
 
   update();
@@ -99,7 +106,8 @@ export function trackElementPosition(
     intersectionObserver = new IntersectionObserver(
       (entries) => {
         for (const entry of entries) {
-          button.style.display = entry.isIntersecting ? '' : 'none';
+          isIntersecting = entry.isIntersecting;
+          update();
         }
       },
       { threshold: 0 }
@@ -108,6 +116,10 @@ export function trackElementPosition(
   }
 
   const cleanup = () => {
+    if (frameId !== null) {
+      cancelAnimationFrame(frameId);
+      frameId = null;
+    }
     window.removeEventListener('resize', resizeListener);
     window.removeEventListener('scroll', scrollListener);
     for (const ancestor of ancestors) {
@@ -137,11 +149,24 @@ export function positionAtEndOfField(rect: DOMRect): {
   left: number;
   visible: boolean;
 } {
-  const BUTTON_SIZE = 24;
+  const BUTTON_SIZE = 20;
   return {
-    top: rect.top + (rect.height - BUTTON_SIZE) / 2,
-    left: Math.max(0, rect.right - BUTTON_SIZE - 4),
-    visible: true,
+    top: rect.top + Math.max(0, (rect.height - BUTTON_SIZE) / 2),
+    left: Math.max(0, rect.right - BUTTON_SIZE - 6),
+    visible: rect.width > 0 && rect.height > 0,
+  };
+}
+
+/** Place control just after a heading / first field (Autofill All). */
+export function positionAfterElement(rect: DOMRect): {
+  top: number;
+  left: number;
+  visible: boolean;
+} {
+  return {
+    top: Math.max(0, rect.bottom + 6),
+    left: Math.max(0, rect.left),
+    visible: rect.width > 0 || rect.height > 0,
   };
 }
 
