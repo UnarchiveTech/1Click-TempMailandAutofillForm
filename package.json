@@ -1,6 +1,6 @@
 {
   "name": "1click-temp-mail-autofill-form",
-  "version": "3.0.0-beta-10",
+  "version": "3.0.0-beta-11",
   "description": "Generate temporary email addresses and auto-fill OTPs and login forms with one click.",
   "type": "module",
   "sideEffects": [
