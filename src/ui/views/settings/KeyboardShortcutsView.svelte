@@ -1,10 +1,19 @@
 <script lang="ts">
 import { get } from 'svelte/store';
 import { t } from 'svelte-i18n';
+import {
+  countCustomizedKeybindings,
+  createKeybindingRecorder,
+  formatKeybinding,
+  isDefaultBinding,
+} from '@/features/settings/keybinding-recorder.svelte.js';
+import type { View } from '@/features/types/view-types.js';
+import ConfirmDialog from '@/ui/blocks/dialogs/ConfirmDialog.svelte';
 import Icon from '@/ui/components/icons/Icon.svelte';
 import Badge from '@/ui/components/primitives/Badge.svelte';
-import type { Keybindings } from '@/utils/types.js';
+import type { Keybinding, Keybindings } from '@/utils/types.js';
 import { DEFAULT_KEYBINDINGS } from '@/utils/types.js';
+import { responsiveButtonLayout } from '@/utils/ui/responsive-button-layout.js';
 
 let {
   onBack = () => {},
@@ -12,26 +21,38 @@ let {
   onSetKeybindings = undefined,
   onSaveSettings = () => {},
   onNavigateTo = undefined,
-} = $props<{
+}: {
   onBack?: () => void;
   keybindings?: Keybindings;
   onSetKeybindings?: (value: Keybindings) => void;
   onSaveSettings?: () => void;
-  onNavigateTo?: (view: string) => void;
-}>();
+  onNavigateTo?: (view: View) => void;
+} = $props();
 
-let editingKeybinding = $state<string | null>(null);
-let recordingKeybinding = $state(false);
-let recordedKeys = $state<string>('');
+const recorder = createKeybindingRecorder({
+  getKeybindings: () => keybindings,
+  onSetKeybindings: (value) => onSetKeybindings?.(value),
+  onSaveSettings: () => onSaveSettings(),
+  tr: (key) => get(t)(key),
+});
+
+const {
+  state: recorderState,
+  startRecording,
+  handleRecordingKeydown,
+  cancelRecording,
+  resetKeybinding,
+  resetAll,
+} = recorder;
 
 const KEYBINDING_LABELS: Record<keyof Keybindings, { labelKey: string; descriptionKey: string }> = {
-  refreshInbox: {
-    labelKey: 'keyboardShortcuts.refreshInbox',
-    descriptionKey: 'keyboardShortcuts.refreshInboxDescription',
+  refreshMailbox: {
+    labelKey: 'keyboardShortcuts.refreshMailbox',
+    descriptionKey: 'keyboardShortcuts.refreshMailboxDescription',
   },
-  createInbox: {
-    labelKey: 'keyboardShortcuts.createInbox',
-    descriptionKey: 'keyboardShortcuts.createInboxDescription',
+  createAddress: {
+    labelKey: 'keyboardShortcuts.createAddress',
+    descriptionKey: 'keyboardShortcuts.createAddressDescription',
   },
   copyEmail: {
     labelKey: 'keyboardShortcuts.copyEmail',
@@ -67,126 +88,33 @@ const KEYBINDING_LABELS: Record<keyof Keybindings, { labelKey: string; descripti
   },
 };
 
-function formatKeybinding(binding: {
-  key: string;
-  ctrlKey?: boolean;
-  metaKey?: boolean;
-  shiftKey?: boolean;
-  altKey?: boolean;
-}): string {
-  const tr = get(t);
-  const parts: string[] = [];
-  if (binding.ctrlKey || binding.metaKey) parts.push(tr('keyboardShortcuts.ctrlCmd'));
-  if (binding.shiftKey) parts.push(tr('keyboardShortcuts.shift'));
-  if (binding.altKey) parts.push(tr('keyboardShortcuts.alt'));
-  parts.push(binding.key.toUpperCase());
-  return parts.join(' + ');
+function formatBinding(binding: Keybinding): string {
+  return formatKeybinding(binding, get(t));
 }
 
-function startRecording(action: string) {
-  editingKeybinding = action;
-  recordingKeybinding = true;
-  recordedKeys = '';
+let hasCustomized = $derived(countCustomizedKeybindings(keybindings) > 0);
+let resetAllConfirm = $state<{
+  message: string;
+  onConfirm: () => void;
+  title?: string;
+  confirmLabel?: string;
+  destructive?: boolean;
+} | null>(null);
+
+function requestResetAll(): void {
+  resetAllConfirm = {
+    title: $t('keyboardShortcuts.resetAll'),
+    message: $t('keyboardShortcuts.resetAllConfirmMessage'),
+    confirmLabel: $t('keyboardShortcuts.resetAll'),
+    destructive: true,
+    onConfirm: resetAll,
+  };
 }
-
-function handleRecordingKeydown(event: KeyboardEvent) {
-  event.preventDefault();
-  event.stopPropagation();
-
-  const tr = get(t);
-  const parts: string[] = [];
-  if (event.ctrlKey || event.metaKey) parts.push(tr('keyboardShortcuts.ctrlCmd'));
-  if (event.shiftKey) parts.push(tr('keyboardShortcuts.shift'));
-  if (event.altKey) parts.push(tr('keyboardShortcuts.alt'));
-  parts.push(event.key.toUpperCase());
-
-  recordedKeys = parts.join(' + ');
-
-  if (editingKeybinding && onSetKeybindings) {
-    // Reject browser/OS-reserved shortcuts (e.g. Ctrl+W closes the tab, Ctrl+N
-    // opens a new window, Ctrl+T a new tab) so a saved binding can't hijack them
-    // or get prevented by the browser before our handler runs.
-    const key = event.key.toLowerCase();
-    const primary = event.ctrlKey || event.metaKey;
-    const reserved =
-      primary &&
-      !event.altKey &&
-      [
-        'w',
-        'n',
-        't',
-        'r',
-        'q',
-        'p',
-        's',
-        'o',
-        'a',
-        'd',
-        'e',
-        'f',
-        'l',
-        'h',
-        'j',
-        'k',
-        'u',
-      ].includes(key);
-    if (reserved) {
-      // Rejected — clear the preview; the combo simply won't be saved.
-      recordedKeys = '';
-      recordingKeybinding = false;
-      editingKeybinding = null;
-      return;
-    }
-
-    const newKeybindings = { ...keybindings };
-    newKeybindings[editingKeybinding as keyof Keybindings] = {
-      key: event.key,
-      ctrlKey: event.ctrlKey,
-      metaKey: event.metaKey,
-      shiftKey: event.shiftKey,
-      altKey: event.altKey,
-    };
-    onSetKeybindings(newKeybindings);
-    onSaveSettings();
-  }
-
-  recordingKeybinding = false;
-  editingKeybinding = null;
-  recordedKeys = '';
-}
-
-function cancelRecording() {
-  recordingKeybinding = false;
-  editingKeybinding = null;
-  recordedKeys = '';
-}
-
-function resetKeybinding(action: string) {
-  if (onSetKeybindings) {
-    const newKeybindings = { ...keybindings };
-    newKeybindings[action as keyof Keybindings] = DEFAULT_KEYBINDINGS[action as keyof Keybindings];
-    onSetKeybindings(newKeybindings);
-    onSaveSettings();
-  }
-}
-
-function resetAll() {
-  if (onSetKeybindings) {
-    onSetKeybindings({ ...DEFAULT_KEYBINDINGS });
-    onSaveSettings();
-  }
-}
-
-let hasCustomized = $derived(
-  (Object.keys(keybindings) as (keyof Keybindings)[]).some(
-    (k) => formatKeybinding(keybindings[k]) !== formatKeybinding(DEFAULT_KEYBINDINGS[k])
-  )
-);
 </script>
 
-<div class="flex flex-col h-full">
+<div class="scroll-frame flex flex-col h-full">
   <!-- Title + actions - back lives in app header on this deep page -->
-  <div class="px-2 py-3 border-b border-md-outline-variant/30 flex items-center gap-3">
+  <div class="scroll-edge py-3 border-b border-md-outline-variant/30 flex items-center gap-3">
     <h1 class="flex-1 min-w-0 font-semibold text-sm">
       {$t('keyboardShortcuts.title')}
       <span class="block text-xs font-normal text-md-on-surface/50">{$t('keyboardShortcuts.subtitle')}</span>
@@ -194,8 +122,8 @@ let hasCustomized = $derived(
     {#if hasCustomized}
       <button
         type="button"
-        class="text-xs text-md-error hover:text-md-error/80 transition-colors px-2 py-1 rounded-lg hover:bg-md-error/10 shrink-0"
-        onclick={resetAll}
+        class="text-xs text-md-error hover:text-md-error/80 transition-colors px-2 py-1 rounded-lg hover:bg-md-error/10 active:bg-md-error/30 shrink-0"
+        onclick={requestResetAll}
       >
         {$t('keyboardShortcuts.resetAll')}
       </button>
@@ -203,12 +131,12 @@ let hasCustomized = $derived(
   </div>
 
   <!-- Shortcut list -->
-  <div class="flex-1 overflow-y-auto px-2 py-3 space-y-2">
+  <div class="scroll-body scroll-body-framed flex-1 overflow-y-auto py-3 space-y-2">
     {#each Object.keys(KEYBINDING_LABELS) as action}
       {@const info = KEYBINDING_LABELS[action as keyof Keybindings]}
       {@const binding = keybindings[action as keyof Keybindings]}
-      {@const isDefault = formatKeybinding(binding) === formatKeybinding(DEFAULT_KEYBINDINGS[action as keyof Keybindings])}
-      <div class="bg-md-primary-container rounded-xl px-3 py-3 flex items-center justify-between gap-3">
+      {@const isDefault = isDefaultBinding(binding, action as keyof Keybindings)}
+      <div class="bg-md-surface-container-low rounded-xl px-3 py-3 border border-md-outline-variant/20 flex items-center justify-between gap-3">
         <div class="min-w-0">
           <div class="text-sm font-medium text-md-on-surface flex items-center gap-2">
             {$t(info.labelKey)}
@@ -219,33 +147,44 @@ let hasCustomized = $derived(
           <div class="text-xs text-md-on-surface/50">{$t(info.descriptionKey)}</div>
         </div>
         <div class="flex items-center gap-2 shrink-0">
-          {#if editingKeybinding === action && recordingKeybinding}
-            <button
-              class="bg-md-secondary-container text-sm text-md-primary px-3 py-1.5 rounded-lg font-medium animate-pulse outline-none min-w-[110px] text-center"
-              onkeydown={handleRecordingKeydown}
-              onblur={cancelRecording}
-            >
-              {recordedKeys || $t('keyboardShortcuts.pressKeys')}
-            </button>
-            <button class="text-xs text-md-on-surface/60 hover:text-md-on-surface" onclick={cancelRecording}>{$t('keyboardShortcuts.cancel')}</button>
-          {:else}
-            <div class="bg-md-secondary-container text-sm text-md-on-surface px-3 py-1.5 rounded-lg font-mono font-medium">
-              {formatKeybinding(binding)}
+          {#if recorderState.editingKeybinding === action && recorderState.recordingKeybinding}
+            <div class="flex flex-nowrap items-center gap-2" use:responsiveButtonLayout data-action-tier="XS">
+              <button
+                class="h-8 bg-md-secondary-container text-md-primary px-3 rounded-lg font-medium animate-pulse outline-none min-w-[140px] text-center flex flex-col items-center gap-1"
+                onkeydown={handleRecordingKeydown}
+                onblur={cancelRecording}
+              >
+                {recorderState.recordedKeys || $t('keyboardShortcuts.pressKeys')}
+              </button>
+              <button class="h-8 text-md-on-surface/60 hover:text-md-on-surface" onclick={cancelRecording}>{$t('common.cancel')}</button>
             </div>
-            <button class="text-xs text-md-primary hover:text-md-primary/80" onclick={() => startRecording(action)}>{$t('keyboardShortcuts.edit')}</button>
-            {#if !isDefault}
-              <button class="text-xs text-md-on-surface/60 hover:text-md-on-surface" onclick={() => resetKeybinding(action)}>{$t('keyboardShortcuts.reset')}</button>
-            {/if}
+          {:else}
+            <div class="bg-md-secondary-container text-sm text-md-on-secondary-container px-3 py-1.5 rounded-lg font-mono font-medium">
+              {formatBinding(binding)}
+            </div>
+            <div class="flex flex-nowrap items-center gap-2" use:responsiveButtonLayout data-action-tier="XS">
+              <button class="h-8 text-md-primary hover:text-md-primary/80" onclick={() => startRecording(action as keyof Keybindings)}>{$t('common.edit')}</button>
+              {#if !isDefault}
+                <button class="h-8 text-md-on-surface/60 hover:text-md-on-surface" onclick={() => resetKeybinding(action as keyof Keybindings)}>{$t('common.reset')}</button>
+              {/if}
+            </div>
           {/if}
         </div>
-      </div>
-    {/each}
+          </div>
+          {#if recorderState.editingKeybinding === action && (recorderState.recordingError || recorderState.conflict?.attempted === action)}
+            <p class="mt-1 text-xs text-md-error" role="status">{recorderState.conflict?.attempted === action
+              ? $t('keyboardShortcuts.duplicateBinding', {
+                  values: { action: $t(KEYBINDING_LABELS[recorderState.conflict.existing].labelKey) },
+                })
+              : recorderState.recordingError}</p>
+          {/if}
+        {/each}
   </div>
 
   <!-- Built-in System & Navigation Shortcuts reference -->
-  <div class="px-2 py-3 border-t border-md-outline-variant/20 space-y-2">
+  <div class="scroll-edge py-3 border-t border-md-outline-variant/20 space-y-2">
     <div class="flex items-center gap-2 mb-1">
-      <Icon name="grip" class="w-4 h-4 text-md-primary" />
+      <Icon name="dragHandle" class="w-4 h-4 text-md-primary" />
       <span role="heading" aria-level="2" class="text-sm font-medium text-md-on-surface">{$t('keyboardShortcuts.systemShortcutsTitle')}</span>
     </div>
     <div class="grid gap-2">
@@ -262,9 +201,11 @@ let hasCustomized = $derived(
       ] as item (item.label)}
         <div class="bg-md-surface-container-low border border-md-outline-variant/20 rounded-xl px-3 py-2 flex items-center justify-between gap-2">
           <span class="text-xs font-medium text-md-on-surface">{$t(item.label)}</span>
-          <span class="font-mono text-xs bg-md-secondary-container px-2 py-0.5 rounded text-md-on-surface font-semibold shrink-0">{item.keys}</span>
+          <span class="font-mono text-xs bg-md-secondary-container px-2 py-0.5 rounded text-md-on-secondary-container font-semibold shrink-0">{item.keys}</span>
         </div>
       {/each}
     </div>
   </div>
 </div>
+
+<ConfirmDialog confirmDialog={resetAllConfirm} onClose={() => (resetAllConfirm = null)} />

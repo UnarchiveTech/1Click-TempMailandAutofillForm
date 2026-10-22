@@ -1,4 +1,5 @@
 import { browser } from 'wxt/browser';
+import { writeWithRetry } from '@/utils/storage/storage-write.js';
 import {
   PRODUCT_TOUR_PENDING_KEY,
   PRODUCT_TOUR_STORAGE_KEY,
@@ -25,7 +26,7 @@ export async function isProductTourCompleted(): Promise<boolean> {
 }
 
 export async function markProductTourCompleted(): Promise<void> {
-  await browser.storage.local.set({
+  await writeWithRetry({
     [PRODUCT_TOUR_STORAGE_KEY]: true,
     [PRODUCT_TOUR_VERSION_KEY]: PRODUCT_TOUR_VERSION,
     [PRODUCT_TOUR_PENDING_KEY]: false,
@@ -33,7 +34,7 @@ export async function markProductTourCompleted(): Promise<void> {
 }
 
 export async function setPendingProductTour(pending: boolean): Promise<void> {
-  await browser.storage.local.set({ [PRODUCT_TOUR_PENDING_KEY]: pending });
+  await writeWithRetry({ [PRODUCT_TOUR_PENDING_KEY]: pending });
 }
 
 export async function isPendingProductTour(): Promise<boolean> {
@@ -49,5 +50,5 @@ export async function isPendingProductTour(): Promise<boolean> {
 }
 
 export async function clearPendingProductTour(): Promise<void> {
-  await browser.storage.local.set({ [PRODUCT_TOUR_PENDING_KEY]: false });
+  await writeWithRetry({ [PRODUCT_TOUR_PENDING_KEY]: false });
 }

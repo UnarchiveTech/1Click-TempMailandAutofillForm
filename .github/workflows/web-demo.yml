@@ -1,0 +1,67 @@
+name: Build and deploy interactive demo
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: web-demo-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun run audit
+      - run: bun run build:web-demo
+      - run: bun x playwright install --with-deps chromium firefox webkit
+      - run: bun run test:web-demo
+      - uses: actions/upload-artifact@v7
+        with:
+          name: web-demo
+          path: .output/web-demo
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: web-demo-evidence
+          path: |
+            audit/web-demo
+            test-results
+          if-no-files-found: ignore
+
+  deploy:
+    needs: build
+    if: vars.CLOUDFLARE_PAGES_PROJECT != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    environment: web-demo
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - uses: actions/download-artifact@v8
+        with:
+          name: web-demo
+          path: .output/web-demo
+      - name: Deploy verified artifact to Cloudflare Pages
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          DEMO_PROJECT: ${{ vars.CLOUDFLARE_PAGES_PROJECT }}
+          DEMO_BRANCH: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref_name }}
+          DEMO_COMMIT: ${{ github.sha }}
+        run: bun x wrangler@4 pages deploy .output/web-demo --project-name "$DEMO_PROJECT" --branch "$DEMO_BRANCH" --commit-hash "$DEMO_COMMIT"

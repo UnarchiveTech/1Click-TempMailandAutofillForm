@@ -1,15 +1,19 @@
 /**
  * Ensure content script can see / fill the active tab after install or inbox create.
- * Existing tabs often lack the content script until reload — inject or ask for refresh.
+ * Existing tabs often lack the content script until reload - inject or ask for refresh.
  */
 import { browser } from 'wxt/browser';
 import { DEFAULT_PRIMARY_COLOR } from '@/utils/constants.js';
-import { tSync } from '@/utils/i18n-utils.js';
-import { logDebug, logError } from '@/utils/logger.js';
+import { tSync } from '@/utils/i18n/i18n-background.js';
+import { logError, logWarn } from '@/utils/logger.js';
+import { createBrowserNotification } from '@/utils/notifications/notification-permission.js';
 
 export type TabAutofillStatus = 'ready' | 'form' | 'no_form' | 'need_refresh' | 'blocked' | 'skip';
 
-const CONTENT_SCRIPT_FILE = 'content-scripts/content.js';
+const CONTENT_GATE_FILE = 'content-scripts/content.js';
+const CONTENT_RUNTIME_FILE = 'content-runtime.js';
+const contentGateLoads = new Map<string, Promise<boolean | null>>();
+const contentRuntimeLoads = new Map<string, Promise<boolean>>();
 
 function isInjectableUrl(url: string | undefined): boolean {
   if (!url) return false;
@@ -18,7 +22,54 @@ function isInjectableUrl(url: string | undefined): boolean {
     if (u.protocol === 'http:' || u.protocol === 'https:') return true;
     return false;
   } catch {
-    /* ignore */
+    /* Invalid tab URLs are not injectable. */
+    return false;
+  }
+}
+
+function isMissingMessageReceiver(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  return /receiving end does not exist|could not establish connection/i.test(message);
+}
+
+function reportUnexpectedMessageFailure(context: string, tabId: number, error: unknown): void {
+  if (isMissingMessageReceiver(error)) return;
+  logWarn(context, {
+    tabId,
+    error: error instanceof Error ? error.message : String(error),
+  });
+}
+
+function injectionSucceeded(
+  results: Array<{ frameId: number; error?: unknown }>,
+  tabId: number,
+  frameId: number,
+  context: string
+): boolean {
+  const result = results.find((entry) => entry.frameId === frameId);
+  if (result && result.error == null) return true;
+
+  logWarn(context, {
+    tabId,
+    frameId,
+    error:
+      result?.error instanceof Error
+        ? result.error.message
+        : result?.error == null
+          ? 'No injection result for target frame'
+          : String(result.error),
+  });
+  return false;
+}
+
+async function pingFrame(tabId: number, frameId: number): Promise<boolean> {
+  try {
+    const res = (await browser.tabs.sendMessage(tabId, { type: 'ping' }, { frameId })) as {
+      ok?: boolean;
+    } | null;
+    return !!res?.ok;
+  } catch (error: unknown) {
+    reportUnexpectedMessageFailure('Failed to ping content runtime frame', tabId, error);
     return false;
   }
 }
@@ -29,36 +80,133 @@ async function pingTab(tabId: number): Promise<boolean> {
       ok?: boolean;
     } | null;
     return !!res?.ok;
-  } catch {
-    /* ignore */
+  } catch (error: unknown) {
+    reportUnexpectedMessageFailure('Failed to ping content runtime', tabId, error);
     return false;
   }
 }
 
-async function injectContentScript(tabId: number): Promise<boolean> {
+async function probeContentGate(tabId: number, frameId: number): Promise<boolean | null> {
   try {
-    await browser.scripting.executeScript({
-      target: { tabId },
-      files: [CONTENT_SCRIPT_FILE],
-    });
-    // Give the script a tick to register listeners
-    await new Promise((r) => setTimeout(r, 80));
-    return await pingTab(tabId);
-  } catch (e) {
-    logDebug(`injectContentScript failed for tab ${tabId}`, e);
-    return false;
+    const res = (await browser.tabs.sendMessage(
+      tabId,
+      { type: 'checkFormDetected', gateProbe: true },
+      { frameId }
+    )) as { formDetected?: boolean; gate?: boolean } | null;
+    return res?.gate === true && typeof res.formDetected === 'boolean' ? res.formDetected : null;
+  } catch (error: unknown) {
+    // A missing gate is the normal signal to inject it; other failures are diagnostic.
+    reportUnexpectedMessageFailure('Failed to query content gate', tabId, error);
+    return null;
   }
 }
 
-export async function checkFormOnTab(tabId: number): Promise<boolean> {
+/** Reuse an installed gate or inject the small gate into a previously open tab. */
+async function ensureContentGateInFrame(tabId: number, frameId: number): Promise<boolean | null> {
+  const key = `${tabId}:${frameId}`;
+  const inFlight = contentGateLoads.get(key);
+  if (inFlight) return inFlight;
+
+  const load = (async () => {
+    const existing = await probeContentGate(tabId, frameId);
+    if (existing !== null) return existing;
+
+    try {
+      const results = await browser.scripting.executeScript({
+        target: { tabId, frameIds: [frameId] },
+        files: [CONTENT_GATE_FILE],
+      });
+      if (!injectionSucceeded(results, tabId, frameId, 'Content gate injection failed')) {
+        return null;
+      }
+
+      const gateResponse = await probeContentGate(tabId, frameId);
+      if (gateResponse !== null) return gateResponse;
+      if (await pingFrame(tabId, frameId)) return true;
+      logWarn('Injected content gate did not start in target frame', { tabId, frameId });
+      return null;
+    } catch (error: unknown) {
+      logWarn('Failed to inject content gate', { tabId, frameId, error });
+      return null;
+    }
+  })();
+
+  contentGateLoads.set(key, load);
+  try {
+    return await load;
+  } finally {
+    if (contentGateLoads.get(key) === load) contentGateLoads.delete(key);
+  }
+}
+
+async function waitForTabRuntime(tabId: number): Promise<boolean> {
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    if (await pingTab(tabId)) return true;
+  }
+  return false;
+}
+
+/**
+ * Ensure the separately packaged runtime exists in one frame. The lightweight
+ * all-frame gate calls this only for a frame with an auth/form surface.
+ */
+export async function ensureContentRuntimeInFrame(
+  tabId: number,
+  frameId: number
+): Promise<boolean> {
+  if (!Number.isInteger(tabId) || tabId < 0 || !Number.isInteger(frameId) || frameId < 0) {
+    return false;
+  }
+
+  const key = `${tabId}:${frameId}`;
+  const inFlight = contentRuntimeLoads.get(key);
+  if (inFlight) return inFlight;
+
+  const load = (async () => {
+    if (await pingFrame(tabId, frameId)) return true;
+
+    try {
+      const results = await browser.scripting.executeScript({
+        target: { tabId, frameIds: [frameId] },
+        files: [CONTENT_RUNTIME_FILE],
+      });
+      if (!injectionSucceeded(results, tabId, frameId, 'Content runtime injection failed')) {
+        return false;
+      }
+
+      const runtimeReady = await pingFrame(tabId, frameId);
+      if (!runtimeReady) {
+        logWarn('Injected content runtime did not start in target frame', { tabId, frameId });
+      }
+      return runtimeReady;
+    } catch (error: unknown) {
+      logWarn('Failed to inject content runtime', { tabId, frameId, error });
+      return false;
+    }
+  })();
+
+  contentRuntimeLoads.set(key, load);
+  try {
+    return await load;
+  } finally {
+    if (contentRuntimeLoads.get(key) === load) contentRuntimeLoads.delete(key);
+  }
+}
+
+export async function checkFormOnTab(tabId: number): Promise<{
+  formDetected: boolean;
+  blocked: boolean;
+}> {
   try {
     const res = (await browser.tabs.sendMessage(tabId, { type: 'checkFormDetected' })) as {
       formDetected?: boolean;
+      blocked?: boolean;
     } | null;
-    return !!res?.formDetected;
+    return { formDetected: !!res?.formDetected, blocked: !!res?.blocked };
   } catch {
     /* ignore */
-    return false;
+    return { formDetected: false, blocked: false };
   }
 }
 
@@ -73,20 +221,32 @@ export async function ensureTabAutofillReady(
 
     let alive = await pingTab(tabId);
     if (!alive) {
-      alive = await injectContentScript(tabId);
+      const topFrameHasSurface = await ensureContentGateInFrame(tabId, 0);
+      if (topFrameHasSurface === true) {
+        alive = await ensureContentRuntimeInFrame(tabId, 0);
+      }
+
+      // A child frame may own the form. Its all-frame gate starts the runtime
+      // in that frame; this broadcast preserves iframe readiness without
+      // loading the heavy runtime in a form-less top frame.
+      if (!alive) {
+        const formCheck = await checkFormOnTab(tabId);
+        if (formCheck.blocked) alive = true;
+        else if (formCheck.formDetected) alive = await waitForTabRuntime(tabId);
+        else if (topFrameHasSurface === false) {
+          await setFormBadge(tabId, false);
+          return 'no_form';
+        }
+      }
     }
     if (!alive) {
       if (opts?.notifyIfRefreshNeeded) {
-        try {
-          await browser.notifications.create(`autofill_refresh_${tabId}`, {
-            type: 'basic',
-            iconUrl: 'icons/icon128.png',
-            title: tSync('notifications.refreshForAutofillTitle'),
-            message: tSync('notifications.refreshForAutofillMessage'),
-          });
-        } catch {
-          /* notifications optional */
-        }
+        createBrowserNotification(`autofill_refresh_${tabId}`, {
+          type: 'basic',
+          iconUrl: 'icons/icon128.png',
+          title: tSync('notifications.refreshForAutofillTitle'),
+          message: tSync('notifications.refreshForAutofillMessage'),
+        });
         try {
           await browser.storage.session.set({
             pendingAutofillRefreshTabId: tabId,
@@ -106,9 +266,13 @@ export async function ensureTabAutofillReady(
       /* ignore */
     }
 
-    const hasForm = await checkFormOnTab(tabId);
-    await setFormBadge(tabId, hasForm);
-    return hasForm ? 'form' : 'no_form';
+    const formCheck = await checkFormOnTab(tabId);
+    // A blocklisted site must neither show the AF badge nor report a form:
+    // the content script answers blocked:true, so surface it as its own
+    // status instead of the misleading generic 'no_form'.
+    await setFormBadge(tabId, formCheck.formDetected && !formCheck.blocked);
+    if (formCheck.blocked) return 'blocked';
+    return formCheck.formDetected ? 'form' : 'no_form';
   } catch (e) {
     logError('ensureTabAutofillReady', e);
     return 'need_refresh';
@@ -122,19 +286,36 @@ export async function setFormBadge(tabId: number, hasForm: boolean): Promise<voi
       await browser.action.setBadgeBackgroundColor({ tabId, color: DEFAULT_PRIMARY_COLOR });
       await browser.action.setTitle({
         tabId,
-        title: '1Click · Signup form detected — open popup or Autofill this page',
+        title: tSync('actionTitle.signupFormDetected'),
       });
     } else {
-      // Don't clear global unread badge if we only clear per-tab when empty —
+      // Don't clear global unread badge if we only clear per-tab when empty -
       // set empty text for this tab so unread global can still show without tabId.
       await browser.action.setBadgeText({ tabId, text: '' });
       await browser.action.setTitle({
         tabId,
-        title: '1Click: Temp Mail & Autofill Form',
+        title: tSync('actionTitle.tempMailAndAutofill'),
       });
     }
   } catch {
     /* badge APIs may fail on restricted tabs */
+  }
+}
+
+/** Mark a tab whose old content-script context stopped working after an update. */
+export async function setReloadRequiredBadge(tabId: number): Promise<void> {
+  try {
+    await browser.action.setBadgeBackgroundColor({ tabId, color: '#b3261e' });
+    await browser.action.setBadgeText({ tabId, text: '•' });
+    await browser.action.setTitle({
+      tabId,
+      title: tSync('actionTitle.contentReloadRequired'),
+    });
+  } catch (error) {
+    logWarn('Failed to show the content reload badge', {
+      tabId,
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
 }
 
@@ -153,7 +334,7 @@ export async function autofillActiveTab(): Promise<{ ok: boolean; reason?: strin
   if (!tab?.id) return { ok: false, reason: 'no_tab' };
 
   const status = await ensureTabAutofillReady(tab.id, { notifyIfRefreshNeeded: true });
-  if (status === 'need_refresh' || status === 'skip') {
+  if (status === 'need_refresh' || status === 'skip' || status === 'blocked') {
     return { ok: false, reason: status };
   }
   if (status === 'no_form') {
@@ -161,8 +342,11 @@ export async function autofillActiveTab(): Promise<{ ok: boolean; reason?: strin
   }
 
   try {
-    await browser.tabs.sendMessage(tab.id, { type: 'startSignup', action: 'startSignup' });
-    return { ok: true };
+    const response = (await browser.tabs.sendMessage(tab.id, {
+      type: 'startSignup',
+    })) as { success?: boolean; error?: string } | undefined;
+    if (response?.success === true) return { ok: true };
+    return { ok: false, reason: response?.error || 'autofill_failed' };
   } catch (e) {
     logError('autofillActiveTab', e);
     return { ok: false, reason: 'send_failed' };

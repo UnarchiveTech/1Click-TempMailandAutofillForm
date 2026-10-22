@@ -115,7 +115,7 @@
         }
       },
       // Undocumented but live endpoint: returns the untouched raw MIME source
-      // (`source`) for a message — the filtered `fetch_email` body strips the
+      // (`source`) for a message - the filtered `fetch_email` body strips the
       // original <head>/<style>/@media CSS and rewrites images to res.php
       // placeholders, so we pull the raw source to keep styling intact.
       "getEmailSource": {
@@ -245,7 +245,7 @@
         "enabled": true,
         "path": "att_info",
         // `att` is present in both the list (check_email) and detail
-        // (fetch_email) responses — "1" when the message has attachments.
+        // (fetch_email) responses - "1" when the message has attachments.
         "hasAttachmentFlagPath": "att",
         "fields": {
           "filename": "f",
@@ -261,6 +261,7 @@
       // 1 hour server message retention from arrival timestamp
       "messageRetentionDuration": 3600000,
       "renewable": true,
+      "renewalLabel": "autoRenew",
       "renewalMethod": "setEmailUser"
     },
     "customEmail": {
@@ -388,7 +389,7 @@
       },
       "fetchEmails": {
         "method": "GET",
-        "function": "/inbox/{inboxId}/messages",
+        "function": "/inbox/{addressId}/messages",
         "requiredParams": {},
         "optionalParams": {},
         "response": {

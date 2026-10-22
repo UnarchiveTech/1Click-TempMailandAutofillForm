@@ -7,24 +7,53 @@
 import {
   recordEmailFetchTime,
   recordProviderLatency,
-} from '@/entrypoints/background/inbox/analytics.js';
+} from '@/entrypoints/background/address/analytics.js';
 import {
-  applyFiltersAndProcessMessages,
+  filterMessages,
   storeNewMessages,
-} from '@/entrypoints/background/inbox/email-storage.js';
-import { extractMagicLinks } from '@/entrypoints/background/parsing/magic-link.js';
-import { extractOTP } from '@/entrypoints/background/parsing/otp.js';
+} from '@/entrypoints/background/address/email-storage.js';
+import { detectOtpAndMagicLinksBatch } from '@/entrypoints/background/parsing/ai-detection.js';
+import { ProviderRequestRejectedError, urlGateError, ValidationError } from '@/utils/errors.js';
 import { log } from '@/utils/logger.js';
-import { withInboxLock } from '@/utils/mutex.js';
-import { getInboxes, getStoredEmailsMap, setInboxes } from '@/utils/storage-keys.js';
-import { toSeconds } from '@/utils/time.js';
-import type { Account, Email, EmailFilters } from '@/utils/types.js';
-import type { EmailServiceContext, OperationConfig, ProviderConfig } from '../email-service.js';
-import { randomToken } from '../secure-random.js';
+import { withAddressLock } from '@/utils/mutex.js';
+import { isSafeFetchUrl } from '@/utils/provider/instance-validation.js';
+import { getClientIp, refreshClientIp } from '@/utils/security/client-ip.js';
+import {
+  getAddresses,
+  getSeenEmailIds,
+  getStoredEmailsForAddress,
+  resolveBagKey,
+  setAddresses,
+} from '@/utils/storage/storage-keys.js';
+import { toSeconds } from '@/utils/time/time.js';
+import type { Address, Email, EmailFilters } from '@/utils/types.js';
+import type {
+  EmailServiceContext,
+  OperationConfig,
+  ProviderConfig,
+} from '../email/email-service.js';
+import { randomToken } from '../security/secure-random.js';
 
 // ============================================================================
 // PATH EXTRACTOR UTILITIES
 // ============================================================================
+
+/** Escape a string for safe use as a RegExp literal body. */
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Redact query string / fragment from a URL for logs and error messages.
+ * Tokens and PII commonly ride on the query; origin + path are enough to
+ * identify the request.
+ */
+function redactUrlForLog(url: URL): string {
+  const safe = new URL(url.toString());
+  safe.search = '';
+  safe.hash = '';
+  return safe.toString();
+}
 
 /**
  * Extract value from nested object using dot notation path
@@ -111,9 +140,12 @@ function resolveTemplateValue(value: string, context: EmailServiceContext): unkn
     return context.instanceUrl;
   }
 
-  // Replace {clientIp}
+  // Replace {clientIp} with the real public IP (cached; falls back to the
+  // historical 127.0.0.1 while unknown). Kick a refresh so the NEXT request
+  // gets a fresh value when the background hasn't resolved one yet.
   if (value === '{clientIp}') {
-    return '127.0.0.1';
+    void refreshClientIp().catch(() => {});
+    return getClientIp();
   }
 
   // Replace {userAgent}
@@ -121,27 +153,59 @@ function resolveTemplateValue(value: string, context: EmailServiceContext): unkn
     return typeof navigator !== 'undefined' ? navigator.userAgent : '1ClickExt';
   }
 
-  // Replace context variables
-  if (value.startsWith('{') && value.endsWith('}')) {
-    const varName = value.slice(1, -1);
-    if (context.variables?.[varName]) {
-      return context.variables[varName];
-    }
-  }
-
-  // Replace headers and cookies variables
+  // Replace headers and cookies variables before ordinary context variables.
   let result = value;
   if (context.sessionHeaders) {
     for (const [key, val] of Object.entries(context.sessionHeaders)) {
-      result = result.replace(new RegExp(`\\{headers\\.${key}\\}`, 'g'), val);
+      result = result.replace(new RegExp(`\\{headers\\.${escapeRegExp(key)}\\}`, 'g'), val);
     }
   }
   if (context.sessionCookies) {
     for (const [key, val] of Object.entries(context.sessionCookies)) {
-      result = result.replace(new RegExp(`\\{cookies\\.${key}\\}`, 'g'), val);
+      result = result.replace(new RegExp(`\\{cookies\\.${escapeRegExp(key)}\\}`, 'g'), val);
     }
   }
 
+  // Auth placeholders are also valid inside composite templates such as
+  // `Bearer {auth.token}`. Exact auth placeholders returned above for the
+  // common case; this handles the embedded form without exposing the token in
+  // an unresolved-variable error.
+  const authValues = {
+    token: context.auth?.token,
+    jwt: context.auth?.jwt,
+    cookie: context.auth?.cookie,
+    apiKey: context.auth?.apiKey,
+    refreshToken: context.auth?.refreshToken,
+  };
+  result = result.replace(
+    /\{auth\.(token|jwt|cookie|apiKey|refreshToken)\}/g,
+    (placeholder, name: keyof typeof authValues) => {
+      const authValue = authValues[name];
+      if (authValue === undefined || authValue === null) {
+        throw new Error(`Unresolved template variable: ${placeholder}`);
+      }
+      return String(authValue);
+    }
+  );
+
+  // Replace context variables, including composite values such as
+  // `msg_{email_id}.eml`. Exact placeholders retain their original value type;
+  // composite templates are strings and substitute every known variable.
+  const variablePattern = /\{([^{}]+)\}/g;
+  let matchedVariable = false;
+  result = result.replace(variablePattern, (placeholder, varName: string) => {
+    matchedVariable = true;
+    const variable = context.variables?.[varName];
+    if (variable !== undefined && variable !== null) return String(variable);
+    throw new Error(`Unresolved template variable: ${placeholder}`);
+  });
+  if (matchedVariable && result === value && value.startsWith('{') && value.endsWith('}')) {
+    throw new Error(`Unresolved template variable: ${value}`);
+  }
+
+  if (result.includes('{')) {
+    throw new Error(`Unresolved template variable in value: ${result}`);
+  }
   return result;
 }
 
@@ -177,42 +241,82 @@ function buildRequest(
   // Resolve API URL with instanceUrl if provided
   let apiUrl = config.apiUrl;
   if (context.instanceUrl && apiUrl.includes('{instanceUrl}')) {
-    apiUrl = apiUrl.replace('{instanceUrl}', context.instanceUrl);
+    apiUrl = apiUrl.split('{instanceUrl}').join(context.instanceUrl);
   }
-
   // Support substituting header/cookie template variables in API URL
   if (context.sessionHeaders) {
     for (const [key, value] of Object.entries(context.sessionHeaders)) {
-      apiUrl = apiUrl.replace(new RegExp(`\\{headers\\.${key}\\}`, 'g'), value);
+      apiUrl = apiUrl.replace(
+        new RegExp(`\\{headers\\.${escapeRegExp(key)}\\}`, 'g'),
+        encodeURIComponent(value)
+      );
     }
   }
   if (context.sessionCookies) {
     for (const [key, value] of Object.entries(context.sessionCookies)) {
-      apiUrl = apiUrl.replace(new RegExp(`\\{cookies\\.${key}\\}`, 'g'), value);
+      apiUrl = apiUrl.replace(
+        new RegExp(`\\{cookies\\.${escapeRegExp(key)}\\}`, 'g'),
+        encodeURIComponent(value)
+      );
     }
+  }
+  if (apiUrl.includes('{')) {
+    // A broken provider config, not a provider failure: the validated-config
+    // path keys it as a validation error. Do not echo the URL - it can carry
+    // instance credentials or other secrets in the query/path.
+    throw new ValidationError('Unresolved template variable in API URL', {
+      reason: 'unresolved_template',
+    });
   }
 
   const url = new URL(apiUrl);
+  const urlSafety = isSafeFetchUrl(url.toString());
+  if (!urlSafety.ok) {
+    throw urlGateError(apiUrl, urlSafety.error, { reason: 'provider_api_url' });
+  }
   const headers: Record<string, string> = { ...config.headers?.default };
 
   // Add function to path for RESTful APIs
   if (operation.function.startsWith('/')) {
     let functionPath = operation.function;
-    // Replace path variables like {inboxId}
+    // Replace path variables like {addressId}
     if (context.variables) {
       for (const [key, value] of Object.entries(context.variables)) {
-        functionPath = functionPath.replace(`{${key}}`, String(value));
+        functionPath = functionPath.split(`{${key}}`).join(encodeURIComponent(String(value)));
       }
     }
     if (context.sessionHeaders) {
       for (const [key, value] of Object.entries(context.sessionHeaders)) {
-        functionPath = functionPath.replace(new RegExp(`\\{headers\\.${key}\\}`, 'g'), value);
+        functionPath = functionPath.replace(
+          new RegExp(`\\{headers\\.${escapeRegExp(key)}\\}`, 'g'),
+          encodeURIComponent(value)
+        );
       }
     }
     if (context.sessionCookies) {
       for (const [key, value] of Object.entries(context.sessionCookies)) {
-        functionPath = functionPath.replace(new RegExp(`\\{cookies\\.${key}\\}`, 'g'), value);
+        functionPath = functionPath.replace(
+          new RegExp(`\\{cookies\\.${escapeRegExp(key)}\\}`, 'g'),
+          encodeURIComponent(value)
+        );
       }
+    }
+    const authValues = {
+      token: context.auth?.token,
+      jwt: context.auth?.jwt,
+      cookie: context.auth?.cookie,
+      apiKey: context.auth?.apiKey,
+      refreshToken: context.auth?.refreshToken,
+    };
+    for (const [key, value] of Object.entries(authValues)) {
+      if (value !== undefined && value !== null) {
+        functionPath = functionPath.split(`{auth.${key}}`).join(encodeURIComponent(String(value)));
+      }
+    }
+    if (functionPath.includes('{')) {
+      throw new ValidationError('Unresolved template variable in provider function path', {
+        reason: 'unresolved_template',
+      });
     }
     url.pathname = url.pathname.replace(/\/$/, '') + functionPath;
   } else {
@@ -234,6 +338,13 @@ function buildRequest(
     if (value !== undefined && value !== null) {
       allParams[key] = value;
     }
+  }
+
+  // Force-new-session cache-busting parameters are part of the provider
+  // operation contract, alongside its no-cache headers and fetch options.
+  if (context.forceNewSession && config.forceNewSession?.enabled && config.forceNewSession.params) {
+    const cacheBustParams = resolveTemplateParams(config.forceNewSession.params, context);
+    Object.assign(allParams, cacheBustParams);
   }
 
   let requestBody: string | undefined;
@@ -269,15 +380,12 @@ function buildRequest(
     headers.Authorization = `Bearer ${context.auth.token}`;
   }
 
-  // Handle captured cookies injection if send is true
-  if (config.cookies?.send && context.sessionCookies) {
-    const cookiePairs = Object.entries(context.sessionCookies)
-      .map(([name, value]) => `${name}=${value}`)
-      .join('; ');
-    if (cookiePairs) {
-      headers.Cookie = cookiePairs;
-    }
-  }
+  // NOTE: `config.cookies.send` is intentionally NOT implemented here.
+  // A manual `Cookie` request header is a forbidden header in browsers and is
+  // silently dropped by fetch(), so this block could never have worked.
+  // Captured cookies are instead written into the browser cookie jar via
+  // `browser.cookies.set` (see EmailService.applySessionCookies) and attached
+  // to the request by `credentials: 'include'`.
 
   // Determine if we should use forceNewSession settings
   const useForceNewSession = context.forceNewSession && config.forceNewSession?.enabled;
@@ -300,7 +408,7 @@ function buildRequest(
     body: requestBody,
   };
 
-  log(`Request URL: ${url.toString()}`);
+  log(`Request URL: ${redactUrlForLog(url)}`);
 
   return { url: url.toString(), options };
 }
@@ -319,8 +427,14 @@ function checkForErrors(data: unknown, errorHandling: OperationConfig['errorHand
 
   const errorValue = extractPath(data, errorHandling.errorPath);
   if (errorValue) {
+    // The provider's own failure text is dynamic, unattributable English: it is
+    // preserved for the log (`context.detail`) while the payload carries the
+    // stable `errors.providerRequestRejected` key.
     const errorMessage = extractPath(data, errorHandling.errorMessagePath) || 'Unknown error';
-    throw new Error(String(errorMessage));
+    throw new ProviderRequestRejectedError(String(errorMessage), {
+      reason: 'provider_error_path',
+      errorPath: errorHandling.errorPath,
+    });
   }
 }
 
@@ -374,16 +488,20 @@ function parseResponse(
 }
 
 /**
- * Decodes HTML entity references in a string.
+ * Decodes HTML entity references in a string (single-level).
+ *
+ * `&amp;` is replaced LAST so an already-escaped sequence like `&amp;lt;`
+ * decodes to the literal text `&lt;` instead of a raw `<`. Decoding `&amp;`
+ * first would double-decode and turn sender-escaped text into markup.
  */
 function decodeHtmlEntities(str: string): string {
   return str
-    .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
-    .replace(/&nbsp;/g, ' ');
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&');
 }
 
 /**
@@ -490,7 +608,7 @@ function isAttachmentFlagTruthy(flag: unknown): boolean {
 }
 
 // ============================================================================
-// RAW SOURCE MIME UTILITIES (generic — not provider-specific)
+// RAW SOURCE MIME UTILITIES (generic - not provider-specific)
 // ============================================================================
 
 /** Decode quoted-printable content (RFC 2045 §6.7). */
@@ -511,7 +629,7 @@ function decodeBase64(input: string): string {
 
 /**
  * Extract the first `text/html` part from a raw MIME message (multipart or
- * single-part). Returns the decoded HTML, or null when none exists — callers
+ * single-part). Returns the decoded HTML, or null when none exists - callers
  * fall back to the provider's filtered `body_html`.
  */
 function extractHtmlPartFromRawSource(rawSource: string): string | null {
@@ -571,7 +689,7 @@ export {
  */
 export async function fetchEmails(
   config: ProviderConfig,
-  inbox: Account,
+  record: Address,
   executeOperation: (
     operationName: string,
     context: EmailServiceContext
@@ -595,7 +713,7 @@ export async function fetchEmails(
     }
     result = await fetchEmailsSingleStep(
       config,
-      inbox,
+      record,
       executeOperation,
       operation,
       filters,
@@ -604,7 +722,7 @@ export async function fetchEmails(
   } else if (emailFetchingConfig.type === 'multi_step') {
     result = await fetchEmailsMultiStep(
       config,
-      inbox,
+      record,
       executeOperation,
       emailFetchingConfig,
       filters
@@ -627,7 +745,7 @@ export async function fetchEmails(
  */
 async function fetchEmailsSingleStep(
   config: ProviderConfig,
-  inbox: Account,
+  record: Address,
   executeOperation: (
     operationName: string,
     context: EmailServiceContext
@@ -637,13 +755,13 @@ async function fetchEmailsSingleStep(
   emailFetchingConfig: NonNullable<ProviderConfig['emailFetching']>
 ): Promise<Email[]> {
   log(`=== FETCHING EMAILS (single step) ===`);
-  log(`Inbox token exists: ${!!inbox.token}`);
-  log(`Inbox ID: ${inbox.id}`);
-  log(`Inbox address: ${inbox.address}`);
+  log(`Inbox token exists: ${!!record.token}`);
+  log(`Inbox ID: ${record.id}`);
+  log(`Inbox address: ${record.address}`);
 
   const context: EmailServiceContext = {
-    auth: inbox.token ? { token: inbox.token } : undefined,
-    variables: { inboxId: inbox.id },
+    auth: record.token ? { token: record.token } : undefined,
+    variables: { addressId: record.id },
   };
 
   const pagination = emailFetchingConfig.pagination;
@@ -658,9 +776,9 @@ async function fetchEmailsSingleStep(
   }
 
   if (config.multiInstance?.enabled) {
-    const inboxUnknown = inbox as unknown;
-    if (inboxUnknown && typeof inboxUnknown === 'object' && 'instanceUrl' in inboxUnknown) {
-      const instanceUrl = (inboxUnknown as Record<string, unknown>).instanceUrl;
+    const addressUnknown = record as unknown;
+    if (addressUnknown && typeof addressUnknown === 'object' && 'instanceUrl' in addressUnknown) {
+      const instanceUrl = (addressUnknown as Record<string, unknown>).instanceUrl;
       if (typeof instanceUrl === 'string') {
         context.instanceUrl = instanceUrl;
       }
@@ -672,7 +790,7 @@ async function fetchEmailsSingleStep(
   const apiLatency = performance.now() - apiStartTime;
   await recordProviderLatency(config.id, apiLatency);
 
-  log(`API response:`, JSON.stringify(response).substring(0, 200));
+  log(`API response:`, JSON.stringify(response)?.substring(0, 200));
 
   // Apply responseMapping if configured
   let messages: unknown[] = [];
@@ -682,7 +800,7 @@ async function fetchEmailsSingleStep(
     const rawData = extractPath(response, emailFetchingConfig.dataPath);
     log(
       `Extracted data from path ${emailFetchingConfig.dataPath}:`,
-      JSON.stringify(rawData).substring(0, 200)
+      JSON.stringify(rawData)?.substring(0, 200)
     );
     if (Array.isArray(rawData)) {
       messages = rawData.map((item: unknown) =>
@@ -713,18 +831,23 @@ async function fetchEmailsSingleStep(
 
   log(`Fetched ${messages.length} messages`);
 
-  // Extract OTP + magic links from messages
-  (messages as Email[]).forEach((msg: Email) => {
-    const otp = extractOTP(msg.subject || '', msg.body_html || msg.body_plain || '');
-    msg.otp = otp || undefined;
-
-    const magicLinks = extractMagicLinks(
-      msg.subject || '',
-      msg.body_html || '',
-      msg.body_plain || msg.body || ''
-    );
-    if (magicLinks.length > 0) {
-      msg.magicLinks = magicLinks;
+  // Extract OTP + magic links from messages in one pass - local algorithm, or
+  // a single (chunked) AI request when the AI engine is selected.
+  const msgs = messages as Email[];
+  const detectedList = await detectOtpAndMagicLinksBatch(
+    msgs.map((msg) => ({
+      subject: msg.subject || '',
+      bodyHtml: msg.body_html || '',
+      bodyPlain: msg.body_plain || msg.body || '',
+      receivedAt: msg.received_at,
+      from: msg.from || '',
+    }))
+  );
+  msgs.forEach((msg, i) => {
+    const detected = detectedList[i];
+    if (detected?.otp) msg.otp = detected.otp;
+    if (detected?.magicLinks && detected.magicLinks.length > 0) {
+      msg.magicLinks = detected.magicLinks;
       msg.hasMagicLink = true;
     }
 
@@ -737,16 +860,45 @@ async function fetchEmailsSingleStep(
     }
   });
 
-  return applyFiltersAndProcessMessages(messages as Email[], filters, inbox);
+  return filterMessages(messages as Email[], filters);
 }
 
 /**
  * Multi-step email fetching (e.g., Guerrilla Mail)
  * First call gets list, then fetch each email details
  */
+const MULTI_STEP_DETAIL_CONCURRENCY = 4;
+
+async function mapWithConcurrency<T, TResult>(
+  items: T[],
+  concurrency: number,
+  mapper: (item: T) => Promise<TResult>
+): Promise<TResult[]> {
+  const results = new Array<TResult>(items.length);
+  let nextIndex = 0;
+  let failed = false;
+  let firstError: unknown;
+  const workerCount = Math.min(items.length, Math.max(1, Math.floor(concurrency)));
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (!failed && nextIndex < items.length) {
+        const index = nextIndex++;
+        try {
+          results[index] = await mapper(items[index] as T);
+        } catch (error) {
+          if (!failed) firstError = error;
+          failed = true;
+        }
+      }
+    })
+  );
+  if (failed) throw firstError;
+  return results;
+}
+
 async function fetchEmailsMultiStep(
   _config: ProviderConfig,
-  inbox: Account,
+  record: Address,
   executeOperation: (
     operationName: string,
     context: EmailServiceContext
@@ -756,30 +908,35 @@ async function fetchEmailsMultiStep(
 ): Promise<Email[]> {
   log('=== FETCHING EMAILS (multi step) ===');
 
-  const token = inbox.token || inbox.sidToken;
+  const token = record.token || record.sidToken;
   // Guerrilla Mail sometimes returns empty token - try without auth in that case
   if (!token || token === '') {
     log('Warning: No token available, attempting email check without authentication');
-    // Try without auth - Guerrilla Mail might allow this for public inboxes
+    // Try without auth - Guerrilla Mail might allow this for public addresses
   }
-  const inboxUnknown = inbox as unknown;
+  const addressUnknown = record as unknown;
   const sequenceNumber =
-    inboxUnknown && typeof inboxUnknown === 'object' && 'lastSequence' in inboxUnknown
-      ? Number((inboxUnknown as Record<string, unknown>).lastSequence) || 0
+    addressUnknown && typeof addressUnknown === 'object' && 'lastSequence' in addressUnknown
+      ? Number((addressUnknown as Record<string, unknown>).lastSequence) || 0
       : 0;
+  const rawInstanceUrl = (record as Address & { instanceUrl?: unknown }).instanceUrl;
+  const instanceUrl = typeof rawInstanceUrl === 'string' ? rawInstanceUrl : undefined;
+  const instanceContext = instanceUrl ? { instanceUrl } : {};
 
   if (emailFetchingConfig.selectMailboxOperation) {
     const emailUser =
-      typeof inbox.emailUser === 'string' && inbox.emailUser
-        ? inbox.emailUser
-        : inbox.address.split('@')[0];
+      typeof record.emailUser === 'string' && record.emailUser
+        ? record.emailUser
+        : record.address.split('@')[0];
     const selectContext: EmailServiceContext = token
       ? {
           auth: { token: token as string },
           variables: { [emailFetchingConfig.selectMailboxVariable || 'emailUser']: emailUser },
+          ...instanceContext,
         }
       : {
           variables: { [emailFetchingConfig.selectMailboxVariable || 'emailUser']: emailUser },
+          ...instanceContext,
         };
     await executeOperation(emailFetchingConfig.selectMailboxOperation, selectContext);
   }
@@ -789,9 +946,11 @@ async function fetchEmailsMultiStep(
     ? {
         auth: { token: token as string },
         variables: { seq: String(sequenceNumber) },
+        ...instanceContext,
       }
     : {
         variables: { seq: String(sequenceNumber) },
+        ...instanceContext,
       };
 
   const pagination = emailFetchingConfig.pagination;
@@ -818,11 +977,12 @@ async function fetchEmailsMultiStep(
   const messages = (extractPath(listData, listPath) as unknown as Record<string, unknown>[]) || [];
   log(`Found ${messages.length} messages`);
 
-  // Get existing emails to filter new ones
-  const storedEmails = await getStoredEmailsMap();
-  if (!storedEmails[inbox.address]) {
-    storedEmails[inbox.address] = [];
-  }
+  // Get existing emails to filter new ones. Resolve the bag key case-
+  // insensitively so a casing drift can't make a populated bag look empty
+  // (which would re-detail-fetch and re-notify everything every poll).
+  const activeStored = await getStoredEmailsForAddress(record.id, record.address);
+  const storedEmails: Record<string, Email[]> = { [record.address]: activeStored };
+  const storedKey = record.address;
 
   const listItemIdField = emailFetchingConfig.listItemIdField;
   if (!listItemIdField) {
@@ -830,7 +990,7 @@ async function fetchEmailsMultiStep(
     return [];
   }
   // Capture list-level attachment flags (e.g. `att: "1"`) so hasAttachment is
-  // known from the list response itself — the badge lights up the moment mail
+  // known from the list response itself - the badge lights up the moment mail
   // arrives, independent of the detail fetch.
   const listAttFlagPath = emailFetchingConfig.attachmentMapping?.hasAttachmentFlagPath;
   const listAttFlags = new Map<string, boolean>();
@@ -841,7 +1001,15 @@ async function fetchEmailsMultiStep(
       }
     }
   }
-  const existingEmailIds = new Set(storedEmails[inbox.address].map((email: Email) => email.id));
+  const existingEmailIds = new Set(storedEmails[storedKey].map((email: Email) => email.id));
+  // Also treat IDs in the durable seen set as known: an email evicted from the
+  // capped bag (or removed by retention cleanup) must not be detail-fetched and
+  // re-detected on every poll just because the provider still lists it.
+  const seenEmailIds = await getSeenEmailIds();
+  const seenKey = resolveBagKey(seenEmailIds, record.address);
+  for (const id of seenEmailIds[seenKey] || []) {
+    if (id) existingEmailIds.add(String(id));
+  }
   const newMessages = messages.filter(
     (msg: Record<string, unknown>) => !existingEmailIds.has(String(msg[listItemIdField]))
   );
@@ -859,15 +1027,19 @@ async function fetchEmailsMultiStep(
     return [];
   }
 
-  const newDetailedMessages = await Promise.all(
-    newMessages.map(async (msg: Record<string, unknown>) => {
+  const newDetailedMessages: Email[] = await mapWithConcurrency(
+    newMessages,
+    MULTI_STEP_DETAIL_CONCURRENCY,
+    async (msg: Record<string, unknown>) => {
       const detailContext: EmailServiceContext = token
         ? {
             auth: { token: token as string },
             variables: { [detailItemIdParam]: String(msg[listItemIdField]) },
+            ...instanceContext,
           }
         : {
             variables: { [detailItemIdParam]: String(msg[listItemIdField]) },
+            ...instanceContext,
           };
 
       const detailApiStartTime = performance.now();
@@ -883,7 +1055,7 @@ async function fetchEmailsMultiStep(
       );
 
       // Fetch the untouched raw MIME source when the provider configures a
-      // rawSource block. Generic and config-driven — the operation name, id
+      // rawSource block. Generic and config-driven - the operation name, id
       // param, and response path all come from providers.jsonc. Best-effort:
       // a raw-source failure never fails the message fetch (we fall back to
       // the provider's `body_html` below).
@@ -895,9 +1067,11 @@ async function fetchEmailsMultiStep(
             ? {
                 auth: { token: token as string },
                 variables: { [rawSourceConfig.itemIdParam]: String(msg[listItemIdField]) },
+                ...instanceContext,
               }
             : {
                 variables: { [rawSourceConfig.itemIdParam]: String(msg[listItemIdField]) },
+                ...instanceContext,
               };
           const rawSourceData = await executeOperation(rawSourceConfig.operation, rawContext);
           const rawValue = extractPath(rawSourceData, rawSourceConfig.sourcePath);
@@ -913,25 +1087,24 @@ async function fetchEmailsMultiStep(
         }
       }
 
-      // Parse timestamp
+      // Parse timestamp. The last-resort fallback must look at THIS message's
+      // raw data (the detail response), not the whole list response - a
+      // list-level field would stamp every message with the same value.
       const timestamp = parseTimestamp(
         mapped.timestamp_field,
         mapped.date_field,
         mapped.fallback_timestamp_field,
-        listData
+        emailData
       );
 
       // Prefer the untouched HTML from the raw source over the provider's
       // filtered `body_html` when the raw source actually carries an HTML
-      // part — this restores original styling/structure that servers strip.
+      // part - this restores original styling/structure that servers strip.
       const rawHtml = rawSource ? extractHtmlPartFromRawSource(rawSource) : null;
       const bodyHtml = String((rawHtml ?? mapped.body_html) || '');
       const bodyPlain = String(mapped.body_plain || '');
 
-      // Extract OTP + magic links
       const subject = String(mapped.subject || '');
-      const otp = extractOTP(subject, bodyHtml || bodyPlain);
-      const magicLinks = extractMagicLinks(subject, bodyHtml, bodyPlain);
 
       // Extract sender name from from field if it contains "Name <email>" format
       let senderName = String(mapped.from_name || '');
@@ -953,30 +1126,49 @@ async function fetchEmailsMultiStep(
         body_plain: bodyPlain,
         raw_source: rawSource,
         received_at: timestamp || Math.floor(Date.now() / 1000),
-        otp: otp || undefined,
-        magicLinks: magicLinks.length > 0 ? magicLinks : undefined,
-        hasMagicLink: magicLinks.length > 0,
         stored_at: Date.now(),
         attachments: mapped.attachments as Email['attachments'],
-        // List-flag OR detail-flag OR manifest — the stored email is
+        // List-flag OR detail-flag OR manifest - the stored email is
         // self-describing even if only one source carried the info.
         hasAttachment:
           mapped.hasAttachment === true ||
           listAttFlags.get(String(msg[listItemIdField])) === true ||
           (Array.isArray(mapped.attachments) && mapped.attachments.length > 0),
       };
-    })
+    }
   );
+
+  // Extract OTP + magic links for all fetched messages in one pass - local
+  // algorithm, or a single (chunked) AI request when the AI engine is selected.
+  if (newDetailedMessages.length > 0) {
+    const detectedList = await detectOtpAndMagicLinksBatch(
+      newDetailedMessages.map((m) => ({
+        subject: m.subject || '',
+        bodyHtml: m.body_html || '',
+        bodyPlain: m.body_plain || '',
+        receivedAt: m.received_at,
+        from: m.from || '',
+      }))
+    );
+    newDetailedMessages.forEach((m, i) => {
+      const d = detectedList[i];
+      if (d?.otp) m.otp = d.otp;
+      if (d?.magicLinks && d.magicLinks.length > 0) {
+        m.magicLinks = d.magicLinks;
+        m.hasMagicLink = true;
+      }
+    });
+  }
 
   // Store new messages
   if (newDetailedMessages.length > 0) {
-    await storeNewMessages(inbox.address, newDetailedMessages);
+    await storeNewMessages(record.address, newDetailedMessages);
   }
 
   // Handle sequence tracking
   if (emailFetchingConfig.sequenceTracking?.enabled && messages.length > 0) {
     await updateSequenceNumber(
-      inbox,
+      record,
       messages,
       emailFetchingConfig.sequenceTracking,
       listItemIdField
@@ -984,19 +1176,24 @@ async function fetchEmailsMultiStep(
   }
 
   // Return all stored messages with filters applied
-  const allStoredMessages = (await getStoredEmailsMap())[inbox.address] || [];
+  const allStoredMessages = await getStoredEmailsForAddress(record.id, record.address);
 
-  return applyFiltersAndProcessMessages(allStoredMessages, filters, inbox);
+  return filterMessages(allStoredMessages, filters);
 }
 
 /**
  * Parse timestamp from various formats
+ *
+ * `itemData` is the CURRENT message's raw data (the single-message response
+ * in a multi-step fetch) - the final fallback reads the item's own `ts`
+ * field, never a list-level field that would apply the same value to every
+ * message.
  */
 function parseTimestamp(
   timestampField: unknown,
   dateField: unknown,
   fallbackTimestampField: unknown,
-  listData: Record<string, unknown>
+  itemData: Record<string, unknown>
 ): number | null {
   let timestamp: number | null = null;
 
@@ -1022,11 +1219,11 @@ function parseTimestamp(
     timestamp = parseTimestampValue(fallbackTimestampField);
   }
 
-  // Use list timestamp as final fallback
+  // Use the current item's timestamp field as final fallback
   if (!timestamp) {
-    const listTimestamp = extractPath(listData, 'ts');
-    if (listTimestamp) {
-      timestamp = parseTimestampValue(listTimestamp);
+    const itemTimestamp = extractPath(itemData, 'ts');
+    if (itemTimestamp) {
+      timestamp = parseTimestampValue(itemTimestamp);
     }
   }
 
@@ -1042,8 +1239,21 @@ function parseTimestamp(
  */
 function parseDateString(dateStr: string): Date | null {
   if (dateStr.includes('-') && dateStr.includes(' ')) {
-    const utcStr =
-      dateStr.includes('Z') || dateStr.includes('+') ? dateStr : `${dateStr.replace(' ', 'T')}Z`;
+    // Normalize to ISO-8601 so every engine parses it the same way: swap the
+    // date/time separator, keep an existing zone designator (Z or ±HHMM / ±HH:MM)
+    // verbatim, and treat a missing zone as UTC. The old code only looked for
+    // '+' / 'Z' - a NEGATIVE offset like "-0700" had 'Z' appended, producing the
+    // invalid "…T10:00:00 -0700Z" and silently falling through to null.
+    const zoneMatch = dateStr.match(/^(.*?)\s*(Z|[+-]\d{2}:?\d{2})\s*$/i);
+    let utcStr: string;
+    if (zoneMatch) {
+      const zone = zoneMatch[2].toUpperCase();
+      // Normalize ±HHMM → ±HH:MM (strict ISO) so `new Date` never misreads it.
+      const isoZone = /^[+-]\d{2}\d{2}$/.test(zone) ? `${zone.slice(0, 3)}:${zone.slice(3)}` : zone;
+      utcStr = `${zoneMatch[1].replace(' ', 'T')}${isoZone}`;
+    } else {
+      utcStr = `${dateStr.replace(' ', 'T')}Z`;
+    }
     const parsedDate = new Date(utcStr);
     if (!Number.isNaN(parsedDate.getTime())) {
       return parsedDate;
@@ -1076,9 +1286,18 @@ function parseDateString(dateStr: string): Date | null {
 function parseTimestampValue(value: unknown): number | null {
   let timestamp = value;
   if (typeof timestamp === 'string') {
-    const numericTimestamp = parseInt(timestamp, 10);
-    if (!Number.isNaN(numericTimestamp) && numericTimestamp > 0) {
-      timestamp = numericTimestamp;
+    const trimmed = timestamp.trim();
+    // Full-string numeric check: parseInt accepts partial parses ("1718abc" →
+    // 1718 ≈ 1970), which would corrupt sort order, newest-OTP selection, and
+    // retention math for that message. Only a string that is ALL digits is a
+    // raw timestamp; anything else falls through to date parsing.
+    if (/^\d+$/.test(trimmed)) {
+      const numericTimestamp = Number(trimmed);
+      if (numericTimestamp > 0) {
+        timestamp = numericTimestamp;
+      } else {
+        return null;
+      }
     } else {
       const parsedDate = new Date(timestamp);
       if (!Number.isNaN(parsedDate.getTime())) {
@@ -1095,10 +1314,10 @@ function parseTimestampValue(value: unknown): number | null {
 }
 
 /**
- * Update sequence number in inbox
+ * Update sequence number in record
  */
 async function updateSequenceNumber(
-  inbox: Account,
+  record: Address,
   messages: Record<string, unknown>[],
   sequenceTracking: NonNullable<ProviderConfig['emailFetching']>['sequenceTracking'],
   _listItemIdField: string
@@ -1123,14 +1342,14 @@ async function updateSequenceNumber(
     newSequence = Number(lastMailId);
   }
 
-  await withInboxLock(async () => {
-    const inboxes = await getInboxes();
-    const updatedInboxes = inboxes.map((inb: Account) => {
-      if (inb.id === inbox.id) {
-        return { ...inb, [sequenceField]: newSequence } as Account;
+  await withAddressLock(async () => {
+    const addresses = await getAddresses();
+    const updatedAddresses = addresses.map((inb: Address) => {
+      if (inb.id === record.id) {
+        return { ...inb, [sequenceField]: newSequence } as Address;
       }
       return inb;
     });
-    await setInboxes(updatedInboxes);
+    await setAddresses(updatedAddresses);
   });
 }

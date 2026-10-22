@@ -2,6 +2,39 @@ import { describe, expect, it } from 'bun:test';
 import { extractOTP, findOtpInText } from '@/entrypoints/background/parsing/otp.js';
 
 describe('extractOTP', () => {
+  it('does not turn newsletter words, promotion codes, IPs, or postal addresses into OTPs', () => {
+    expect(
+      extractOTP('Code: 739201', '<div class="shipping" style="padding:12px">12543</div>')
+    ).toBe('739201');
+    expect(extractOTP('PM2.5 pollution report', "Today's reading is PM2.5")).toBeNull();
+    expect(extractOTP('Demand up 11%', 'Shopping offers for 2026')).toBeNull();
+    expect(extractOTP('60% OFF', '<p>Use code SALE60 for a discount</p>')).toBeNull();
+    expect(
+      extractOTP('A new device logged into your account', 'Login IP: 119.125.43.167')
+    ).toBeNull();
+    expect(
+      extractOTP('Your order', '<pre>Content-Type: text/plain\n0 pts\nView rewards</pre>')
+    ).toBeNull();
+    expect(
+      extractOTP('Your order', '<pre>2280 Avenue West\nMountlake Terrace, WA=\n98043\nUS</pre>')
+    ).toBeNull();
+    expect(extractOTP('Research report', '<div>2 min</div><div>Daily habit</div>')).toBeNull();
+    expect(
+      extractOTP(
+        'Your temporary login code',
+        '<div>Login to Example</div><pre>AB12CD</pre><p>Never share this code</p>'
+      )
+    ).toBe('AB12CD');
+    expect(extractOTP('', '<div>AB12CD</div>')).toBe('AB12CD');
+  });
+  it('handles whitespace-heavy newsletters without cross-line backtracking', () => {
+    const newsletter = `<div>Read the recovery interview</div>${'<div>&nbsp;</div>'.repeat(500)}`;
+    const started = performance.now();
+    expect(extractOTP('The recovery question nobody likes to answer', newsletter)).toBeNull();
+    expect(performance.now() - started).toBeLessThan(1000);
+    expect(extractOTP('', '\n\n  482901  \n\n')).toBe('482901');
+    expect(findOtpInText('Order\n   482901\n', false)).toBeNull();
+  });
   describe('English subjects', () => {
     it('extracts code from "Your code is 392811"', () => {
       expect(extractOTP('Your code is 392811', '')).toBe('392811');
@@ -23,6 +56,41 @@ describe('extractOTP', () => {
   describe('Subject-first preference', () => {
     it('returns subject code when body has different code', () => {
       expect(extractOTP('Code: 111111', 'Some other code: 222222')).toBe('111111');
+    });
+  });
+
+  describe('HTML block fallback priority', () => {
+    it('does not let an unlabelled footer year override a subject OTP', () => {
+      expect(
+        extractOTP('Your verification code is 739201', '<table><tr><td>2026</td></tr></table>')
+      ).toBe('739201');
+    });
+
+    it('keeps an unlabelled code-only block as a last-resort fallback', () => {
+      expect(extractOTP('', '<table><tr><td>482901</td></tr></table>')).toBe('482901');
+    });
+
+    it('does not treat an unlabelled footer year as an OTP', () => {
+      expect(extractOTP('', '<table><tr><td>2026</td></tr></table>')).toBeNull();
+    });
+  });
+
+  describe('date filtering', () => {
+    it('does not treat localized month-name dates or CJK calendar dates as OTPs', () => {
+      expect(extractOTP('', 'Your OTP expires on October 17, 2026')).toBeNull();
+      expect(extractOTP('', 'Ihr Termin ist am 17. Oktober 2026')).toBeNull();
+      expect(extractOTP('', 'Votre rendez-vous est le 17 octobre 2026')).toBeNull();
+      expect(extractOTP('', 'Your account date is 2026年10月17日')).toBeNull();
+      expect(extractOTP('', '계정 날짜는 2026년 10월 17일입니다')).toBeNull();
+    });
+
+    it('recognizes valid compact YYYYMMDD dates without suppressing explicitly labeled codes', () => {
+      expect(extractOTP('', 'Your appointment is 20261017')).toBeNull();
+      expect(extractOTP('', '<table><tr><td>20261017</td></tr></table>')).toBeNull();
+      expect(extractOTP('', 'Your verification code: 20261017')).toBe('20261017');
+      expect(extractOTP('Your verification code is 739201', 'Expires October 17, 2026')).toBe(
+        '739201'
+      );
     });
   });
 
@@ -309,6 +377,100 @@ describe('extractOTP', () => {
       // Block-level detector finds nothing; keyword pattern in body wins.
       const html = '<div>Hello there</div><p>Code: 999888</p>';
       expect(extractOTP('', html)).toBe('999888');
+    });
+  });
+
+  describe('Order/invoice/tracking guard', () => {
+    it('rejects common non-OTP number labels in other supported languages', () => {
+      expect(extractOTP('Bestellnummer: 123456', '')).toBeNull();
+      expect(extractOTP('Número de pedido: 123456', '')).toBeNull();
+      expect(extractOTP('注文番号123456', '')).toBeNull();
+    });
+
+    it('does not let an unanchored HTML number block override a nearby localized label', () => {
+      expect(extractOTP('', '<p>Bestellnummer</p><td>123456</td>')).toBeNull();
+      expect(extractOTP('', '<p>Número de pedido:</p><td>123456</td>')).toBeNull();
+      expect(extractOTP('', '<p>注文番号</p><td>123456</td>')).toBeNull();
+    });
+
+    it('rejects order numbers in subjects', () => {
+      expect(extractOTP('Order 12345 confirmed', '')).toBeNull();
+      expect(extractOTP('Order: 123456', '')).toBeNull();
+      expect(extractOTP('Order #12345678', '')).toBeNull();
+    });
+
+    it('rejects invoice numbers in subjects', () => {
+      expect(extractOTP('Invoice 567890', '')).toBeNull();
+      expect(extractOTP('Invoice no. 567890', '')).toBeNull();
+      expect(extractOTP('Invoice #567890', '')).toBeNull();
+    });
+
+    it('rejects tracking / ticket / reference numbers', () => {
+      expect(extractOTP('Your tracking number is 123456', '')).toBeNull();
+      expect(extractOTP('Ticket #123456', '')).toBeNull();
+      expect(extractOTP('Reference: 123456', '')).toBeNull();
+    });
+
+    it('rejects the "number"/"no." forms that defeated the old guard', () => {
+      expect(extractOTP('', 'Confirmation code: your order number 123456')).toBeNull();
+      expect(extractOTP('', 'Your tracking number is 123456')).toBeNull();
+      expect(extractOTP('', 'Invoice no. 567890')).toBeNull();
+      expect(extractOTP('', 'Order is 123456')).toBeNull();
+      expect(extractOTP('', 'Your account balance is 1234')).toBeNull();
+    });
+
+    it('rejects order numbers in body text too', () => {
+      expect(extractOTP('', 'Order 12345 confirmed')).toBeNull();
+      expect(extractOTP('', 'Your order has shipped: 123456')).toBeNull();
+    });
+  });
+
+  describe('Alphanumeric codes with separators', () => {
+    it('keeps letter prefixes intact (XY-4829)', () => {
+      expect(extractOTP('', 'Code: XY-4829')).toBe('XY4829');
+    });
+
+    it('keeps letter prefixes intact (AB-12-34)', () => {
+      expect(extractOTP('', 'Code: AB-12-34')).toBe('AB1234');
+    });
+
+    it('keeps letter prefixes in possessive form', () => {
+      expect(extractOTP('', 'Your code is XY-4829')).toBe('XY4829');
+    });
+
+    it('does not merge prose words into a capture', () => {
+      // "at https" must not collapse into a fake code.
+      expect(extractOTP('', 'Verify at https://example.com/123456')).toBe('123456');
+    });
+  });
+
+  describe('Keyword-anchored block preference', () => {
+    it('prefers a keyword-adjacent block over an earlier footer number', () => {
+      expect(extractOTP('', '<td>2026</td><p>Your code is</p><strong>482901</strong>')).toBe(
+        '482901'
+      );
+    });
+
+    it('keeps bare code blocks when no keyword exists', () => {
+      expect(extractOTP('', '<div>123456</div>')).toBe('123456');
+    });
+  });
+
+  describe('Standalone line ordering', () => {
+    it('keyword-anchored code beats an earlier standalone numeric line', () => {
+      expect(extractOTP('', 'Thank you for shopping\n2026\nYour code is 482901')).toBe('482901');
+    });
+  });
+
+  describe('Proximity reference guard', () => {
+    it('does not capture reference numbers in the proximity window', () => {
+      expect(extractOTP('', 'Your security code is below:\nReference: 123456')).toBeNull();
+    });
+
+    it('still finds a real code after a guarded reference number', () => {
+      expect(
+        extractOTP('', 'Your security code is below:\nReference: 123456\nYour code: 482901')
+      ).toBe('482901');
     });
   });
 });

@@ -3,6 +3,7 @@ import { onMount } from 'svelte';
 import { t } from 'svelte-i18n';
 import { browser } from 'wxt/browser';
 import Icon from '@/ui/components/icons/Icon.svelte';
+import type { KnownIconName } from '@/ui/components/icons/icon-names.js';
 import { Toggle } from '@/ui/components/primitives';
 import Skeleton from '@/ui/components/primitives/Skeleton.svelte';
 import {
@@ -10,7 +11,8 @@ import {
   type HtmlRenderingSettings,
   loadHtmlRenderingSettings,
   saveHtmlRenderingSettings,
-} from '@/utils/sanitize-html.js';
+} from '@/utils/email/sanitize-html.js';
+import { logError } from '@/utils/logger.js';
 
 interface Props {
   onBack?: () => void;
@@ -21,6 +23,26 @@ let { onBack, showToast }: Props = $props();
 
 let settings = $state<HtmlRenderingSettings>({ ...DEFAULT_HTML_RENDERING_SETTINGS });
 let loading = $state(true);
+let settingsListEl = $state<HTMLElement | null>(null);
+let settingsSkeletonCount = $state(4);
+
+$effect(() => {
+  const list = settingsListEl;
+  if (!loading || !list) return;
+
+  const updateSkeletonCount = () => {
+    // Skeleton card plus the 12px spacing between rows.
+    settingsSkeletonCount = Math.max(1, Math.ceil(list.clientHeight / 76));
+  };
+  updateSkeletonCount();
+  if (typeof ResizeObserver !== 'undefined') {
+    const observer = new ResizeObserver(updateSkeletonCount);
+    observer.observe(list);
+    return () => observer.disconnect();
+  }
+  window.addEventListener('resize', updateSkeletonCount);
+  return () => window.removeEventListener('resize', updateSkeletonCount);
+});
 
 onMount(async () => {
   try {
@@ -31,17 +53,37 @@ onMount(async () => {
 });
 
 async function toggleTag(tagKey: keyof HtmlRenderingSettings) {
+  const previous = settings;
   const updated = { ...settings, [tagKey]: !settings[tagKey] };
   settings = updated;
-  await saveHtmlRenderingSettings(updated);
+  try {
+    await saveHtmlRenderingSettings(updated);
+  } catch (error) {
+    settings = previous;
+    logError('Failed to save HTML rendering settings', error);
+    if (showToast) {
+      showToast($t('toasts.settingsSaveFailed'));
+    }
+    return;
+  }
   if (showToast) {
     showToast($t('common.saved'));
   }
 }
 
 async function resetDefaults() {
+  const previous = settings;
   settings = { ...DEFAULT_HTML_RENDERING_SETTINGS };
-  await saveHtmlRenderingSettings(settings);
+  try {
+    await saveHtmlRenderingSettings(settings);
+  } catch (error) {
+    settings = previous;
+    logError('Failed to reset HTML rendering settings', error);
+    if (showToast) {
+      showToast($t('toasts.settingsSaveFailed'));
+    }
+    return;
+  }
   if (showToast) {
     showToast($t('common.resetToDefaults'));
   }
@@ -49,7 +91,7 @@ async function resetDefaults() {
 
 const tagOptions: {
   key: keyof HtmlRenderingSettings;
-  icon: string;
+  icon: KnownIconName;
   labelKey: string;
   hintKey: string;
 }[] = [
@@ -67,13 +109,13 @@ const tagOptions: {
   },
   {
     key: 'table',
-    icon: 'grid',
+    icon: 'gridView',
     labelKey: 'settings.htmlRenderingTable',
     hintKey: 'settings.htmlRenderingTableHint',
   },
   {
     key: 'svg',
-    icon: 'fileText',
+    icon: 'description',
     labelKey: 'settings.htmlRenderingSvg',
     hintKey: 'settings.htmlRenderingSvgHint',
   },
@@ -85,7 +127,7 @@ const tagOptions: {
   },
   {
     key: 'video',
-    icon: 'video',
+    icon: 'videocam',
     labelKey: 'settings.htmlRenderingVideo',
     hintKey: 'settings.htmlRenderingVideoHint',
   },
@@ -110,14 +152,14 @@ const tagOptions: {
 ];
 </script>
 
-<div class="h-full flex flex-col min-h-0 bg-md-surface text-md-on-surface">
+<div class="scroll-frame h-full flex flex-col min-h-0 bg-md-surface text-md-on-surface">
   <!-- Top bar -->
-  <div class="flex items-center justify-between px-2 py-3 border-b border-md-outline-variant/20 shrink-0">
+  <div class="scroll-edge flex items-center justify-between py-3 border-b border-md-outline-variant/20 shrink-0">
     <div class="flex items-center gap-2">
       {#if onBack}
         <button
           type="button"
-          class="p-1.5 rounded-full hover:bg-md-surface-variant/50 text-md-on-surface transition-colors"
+          class="p-1.5 rounded-full hover:bg-md-surface-variant/50 active:bg-md-surface-variant/70 text-md-on-surface transition-colors"
           aria-label={$t('common.back')}
           onclick={onBack}
         >
@@ -125,8 +167,8 @@ const tagOptions: {
         </button>
       {/if}
       <div>
-        <h2 class="text-sm font-semibold text-md-on-surface">{$t('settings.htmlRenderingTitle') || 'HTML Element Rendering'}</h2>
-        <p class="text-xs text-md-on-surface/50">{$t('settings.htmlRenderingSubtitle') || 'Control allowed HTML tags inside email bodies'}</p>
+        <h2 class="text-sm font-semibold text-md-on-surface">{$t('settings.htmlRenderingTitle')}</h2>
+        <p class="text-xs text-md-on-surface/50">{$t('settings.htmlRenderingSubtitle')}</p>
       </div>
     </div>
     <button
@@ -134,38 +176,38 @@ const tagOptions: {
       class="px-3 py-1.5 text-xs font-semibold rounded-lg bg-md-secondary-container text-md-on-secondary-container hover:opacity-90 transition-opacity"
       onclick={resetDefaults}
     >
-      {$t('common.resetDefaults') || 'Reset'}
+      {$t('common.resetDefaults')}
     </button>
   </div>
 
   <!-- Content list -->
-  <div class="flex-1 overflow-y-auto px-2 py-3 space-y-4">
+  <div bind:this={settingsListEl} class="scroll-body scroll-body-framed flex-1 overflow-y-auto py-3 space-y-4">
     {#if loading}
       <div class="space-y-3">
-        {#each Array(4) as _, i (i)}
+        {#each Array(settingsSkeletonCount) as _, i (i)}
           <Skeleton width="100%" height="4rem" radius="0.75rem" />
         {/each}
       </div>
     {:else}
       <div class="grid grid-cols-1 gap-2.5">
         {#each tagOptions as opt (opt.key)}
-          <div class="flex items-center justify-between bg-md-primary-container rounded-xl px-3 py-3">
+          <div class="flex items-center justify-between bg-md-surface-container-low rounded-xl px-3 py-3 border border-md-outline-variant/20">
             <div class="flex items-start gap-3 min-w-0 pr-2">
               <div class="p-2 rounded-lg bg-md-surface text-md-primary shrink-0 mt-0.5">
                 <Icon name={opt.icon} class="w-4 h-4" />
               </div>
               <div class="min-w-0">
                 <div class="text-sm font-medium text-md-on-surface leading-snug">
-                  {$t(opt.labelKey) || String(opt.key).toUpperCase()}
+                  {$t(opt.labelKey)}
                 </div>
                 <div class="text-xs text-md-on-surface/50 leading-relaxed">
-                  {$t(opt.hintKey) || `Allow rendering of <${String(opt.key)}> elements`}
+                  {$t(opt.hintKey)}
                 </div>
               </div>
             </div>
             <Toggle
               checked={settings[opt.key] ?? false}
-              ariaLabel={$t(opt.labelKey) || String(opt.key)}
+              ariaLabel={$t(opt.labelKey)}
               onChange={() => toggleTag(opt.key)}
             />
           </div>

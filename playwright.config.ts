@@ -4,14 +4,14 @@
  * Playwright configuration for the 1Click extension E2E test suite.
  *
  * Key decisions:
- *  - workers: 1     — Extensions share a Chromium persistent context; running
+ *  - workers: 1     - Extensions share a Chromium persistent context; running
  *                     in parallel would require multiple Chrome instances which
  *                     is both slow and flaky. Single worker keeps tests stable.
- *  - headless: false — Chrome extensions are NOT supported in Playwright's
+ *  - headless: false - Chrome extensions are NOT supported in Playwright's
  *                     headless mode (this is a Playwright/Chrome limitation).
- *  - No baseURL     — We navigate to chrome-extension://<id>/popup.html URLs
+ *  - No baseURL     - We navigate to chrome-extension://<id>/popup.html URLs
  *                     which are resolved dynamically per test run via fixtures.ts.
- *  - timeout: 30s   — Extension startup + Svelte hydration can be slow in CI.
+ *  - timeout: 30s   - Extension startup + Svelte hydration can be slow in CI.
  */
 import { defineConfig, devices } from '@playwright/test';
 
@@ -19,7 +19,7 @@ export default defineConfig({
   testDir: './tests/e2e',
   testMatch: '**/*.e2e.ts',
 
-  // Extensions cannot run in parallel — one persistent context at a time
+  // Extensions cannot run in parallel - one persistent context at a time
   fullyParallel: false,
   workers: 1,
 
@@ -42,7 +42,7 @@ export default defineConfig({
   },
 
   use: {
-    // No baseURL — tests use chrome-extension:// URLs resolved via fixtures.ts
+    // No baseURL - tests use chrome-extension:// URLs resolved via fixtures.ts
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',

@@ -80,11 +80,39 @@ function parseLogLevel(level: string): LogLevel {
 /**
  * Format log entry for console output
  */
+const SENSITIVE_LOG_KEYS =
+  /^(?:token|auth|authorization|password|secret|api[_-]?key|cookie|sid[_-]?token|credential|sessioncredentials?)$/i;
+const URL_LOG_KEYS = /^(?:url|uri|href)$/i;
+
+function redactLogValue(value: unknown, key?: string, depth = 0): unknown {
+  if (key && SENSITIVE_LOG_KEYS.test(key)) return '[REDACTED]';
+  if (key && URL_LOG_KEYS.test(key) && typeof value === 'string') {
+    try {
+      const parsed = new URL(value);
+      parsed.username = '';
+      parsed.password = '';
+      parsed.search = '';
+      parsed.hash = '';
+      return parsed.toString();
+    } catch {
+      return '[REDACTED URL]';
+    }
+  }
+  if (depth > 4 || value === null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map((item) => redactLogValue(item, undefined, depth + 1));
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).map(([entryKey, entryValue]) => [
+      entryKey,
+      redactLogValue(entryValue, entryKey, depth + 1),
+    ])
+  );
+}
+
 function formatLogEntry(entry: LogEntry): string {
   const levelName = LogLevel[entry.level];
   const ts = new Date(entry.timestamp);
   const timestamp = `${ts.getFullYear()}-${String(ts.getMonth() + 1).padStart(2, '0')}-${String(ts.getDate()).padStart(2, '0')} ${String(ts.getHours()).padStart(2, '0')}:${String(ts.getMinutes()).padStart(2, '0')}:${String(ts.getSeconds()).padStart(2, '0')}.${String(ts.getMilliseconds()).padStart(3, '0')}`;
-  const contextStr = entry.context ? ` ${JSON.stringify(entry.context)}` : '';
+  const contextStr = entry.context ? ` ${JSON.stringify(redactLogValue(entry.context))}` : '';
   const errorStr = entry.error ? ` Error: ${entry.error.message}` : '';
   return `[${timestamp}] [${levelName}] ${entry.message}${contextStr}${errorStr}`;
 }
@@ -171,8 +199,8 @@ export function logWarn(message: string, context?: LogContext | unknown): void {
  * Error level log - always logs regardless of setting
  */
 export function logError(message: string, context?: LogContext | unknown, error?: Error): void {
-  // Auto-detect when an Error is mistakenly passed as the 2nd-arg (context) —
-  // a pattern found at 123 call sites across the codebase — and shift it to the
+  // Auto-detect when an Error is mistakenly passed as the 2nd-arg (context) -
+  // a pattern found at 123 call sites across the codebase - and shift it to the
   // 3rd-arg (error) position so stack traces are preserved instead of being
   // JSON-stringified as "{}" (Error has no enumerable own props).
   if (context instanceof Error) {

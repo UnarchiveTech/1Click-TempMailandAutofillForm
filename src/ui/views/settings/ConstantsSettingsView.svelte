@@ -17,7 +17,7 @@ import {
   saveConstantOverrides,
 } from '@/utils/constants.js';
 import { logError } from '@/utils/logger.js';
-import { toastStore } from '@/utils/toastStore.js';
+import { toastStore } from '@/utils/ui/toastStore.js';
 
 let { onBack = () => {} }: { onBack?: () => void } = $props();
 
@@ -108,16 +108,16 @@ const filteredKeys = $derived(
 );
 </script>
 
-<div class="flex flex-col h-full bg-md-surface text-md-on-surface">
+<div class="scroll-frame flex flex-col h-full bg-md-surface text-md-on-surface">
   <!-- Title only - back lives in app header on this deep page -->
-  <div class="px-2 py-3 border-b border-md-outline-variant/30">
+  <div class="scroll-edge py-3 border-b border-md-outline-variant/30">
     <h1 class="text-sm font-semibold text-md-on-surface">{$t('settings.developerConstants')}</h1>
     <p class="text-xs text-md-on-surface/50">{$t('settings.constantsDescription')}</p>
   </div>
 
-  <div class="flex-1 overflow-y-auto px-2 py-3 space-y-4">
+  <div class="scroll-body scroll-body-framed flex-1 overflow-y-auto py-3 space-y-4">
     <!-- Action Header Card -->
-    <div class="bg-md-primary-container rounded-xl px-3 py-3 space-y-3">
+    <div class="bg-md-surface-container-low rounded-xl px-3 py-3 border border-md-outline-variant/20 space-y-3">
       <div class="flex items-center justify-between gap-3">
         <div class="flex items-center gap-2.5 min-w-0">
           <div class="w-8 h-8 rounded-xl bg-md-primary/10 text-md-primary flex items-center justify-center shrink-0">
@@ -194,7 +194,7 @@ const filteredKeys = $derived(
               onclick={() => handleResetConstant(key)}
               title={$t('settings.constantsResetTitle')}
             >
-              {$t('settings.constantsReset')}
+              {$t('common.reset')}
             </Btn>
           </div>
         </div>
@@ -217,7 +217,8 @@ const filteredKeys = $derived(
     title: $t('settings.constantsResetAllConfirmTitle'),
     message: $t('settings.constantsResetAllConfirmMessage'),
     confirmLabel: $t('settings.constantsResetAllConfirmLabel'),
-    onConfirm: handleResetAll
+    onConfirm: handleResetAll,
+    destructive: true,
   } : null}
   onClose={() => (isResetConfirmOpen = false)}
 />

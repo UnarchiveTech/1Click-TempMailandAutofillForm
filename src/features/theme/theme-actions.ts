@@ -1,5 +1,6 @@
-import { browser } from 'wxt/browser';
-import { applyThemeFromSeed, generateThemeColors } from '@/utils/theme-generator.js';
+import type { browser } from 'wxt/browser';
+import { CONTENT_DEFAULT_THEME_COLORS } from '@/utils/content/content-default-theme-colors.js';
+import { writeWithRetry } from '@/utils/storage/storage-write.js';
 
 export type ThemeMode = 'light' | 'system' | 'dark';
 export type ContrastLevel = 'standard' | 'medium' | 'high';
@@ -23,13 +24,17 @@ export interface ThemeSetters {
  * @param ext - Browser extension API
  */
 /** True when the applied theme is dark (reads the resolved `data-theme` that
- * applyTheme sets — `system` mode is already resolved to dark/light there). */
+ * applyTheme sets - `system` mode is already resolved to dark/light there). */
 export function isDarkThemeActive(): boolean {
   if (typeof document === 'undefined') return false;
   return (document.documentElement.getAttribute('data-theme') || '').startsWith('dark');
 }
 
-export async function toggleTheme(state: ThemeState, setters: ThemeSetters, ext: typeof browser) {
+export async function toggleTheme(
+  state: ThemeState,
+  setters: ThemeSetters,
+  _ext: typeof browser
+): Promise<boolean> {
   let newMode: ThemeMode;
   if (state.themeMode === 'light') {
     newMode = 'system';
@@ -41,7 +46,13 @@ export async function toggleTheme(state: ThemeState, setters: ThemeSetters, ext:
   setters.setThemeMode(newMode);
   applyTheme(newMode, state.contrastLevel);
   await reapplyCustomColor(state.customColor);
-  await ext.storage.local.set({ themeMode: newMode });
+  try {
+    await writeWithRetry({ themeMode: newMode });
+  } catch {
+    // Caller owns user feedback (toast + log); false lets it revert state.
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -57,12 +68,18 @@ export async function setThemeMode(
   customColor: string,
   contrastLevel: ContrastLevel,
   setters: ThemeSetters,
-  ext: typeof browser
-) {
+  _ext: typeof browser
+): Promise<boolean> {
   setters.setThemeMode(mode);
   applyTheme(mode, contrastLevel);
   await reapplyCustomColor(customColor);
-  await ext.storage.local.set({ themeMode: mode });
+  try {
+    await writeWithRetry({ themeMode: mode });
+  } catch {
+    // Caller owns user feedback (toast + log); false lets it revert state.
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -118,12 +135,18 @@ export async function setContrastLevel(
   themeMode: ThemeMode,
   customColor: string,
   setters: ThemeSetters,
-  ext: typeof browser
-) {
+  _ext: typeof browser
+): Promise<boolean> {
   setters.setContrastLevel(level);
   applyTheme(themeMode, level);
   await reapplyCustomColor(customColor);
-  await ext.storage.local.set({ contrastLevel: level });
+  try {
+    await writeWithRetry({ contrastLevel: level });
+  } catch {
+    // Caller owns user feedback (toast + log); false lets it revert state.
+    return false;
+  }
+  return true;
 }
 
 export async function reapplyCustomColor(customColor: string) {
@@ -148,14 +171,14 @@ export async function applyCustomColor(customColor: string) {
     };
     const contrastLevel = contrastLevelMap[contrastLevelStr] || 0;
 
-    // Generate full Material Design color scheme from the seed color
+    // Keep the Material color solver off the startup chunk. It is needed only
+    // when a user applies a custom accent color.
+    const { applyThemeFromSeed } = await import('@/utils/theme/theme-generator.js');
     await applyThemeFromSeed(customColor, isDark, contrastLevel);
   } else {
     // Remove all inline CSS custom properties set by applyThemeFromSeed
     const root = document.documentElement;
-    const propsToRemove = Array.from(root.style).filter((prop) =>
-      prop.startsWith('--md-sys-color-')
-    );
+    const propsToRemove = Array.from(root.style).filter((prop) => prop.startsWith('--md-'));
     for (const prop of propsToRemove) {
       root.style.removeProperty(prop);
     }
@@ -169,8 +192,9 @@ export async function syncThemeColors(): Promise<void> {
   const computedStyle = getComputedStyle(root);
   const colors: Record<string, string> = {};
 
-  const dummyColors = await generateThemeColors('#000000', false, 0);
-  const props = Object.keys(dummyColors);
+  // Theme generation always writes this fixed property set. The generated
+  // default palette is kept in sync with the solver by its existing check.
+  const props = Object.keys(CONTENT_DEFAULT_THEME_COLORS);
 
   for (const prop of props) {
     const val = root.style.getPropertyValue(prop) || computedStyle.getPropertyValue(prop);
@@ -181,7 +205,7 @@ export async function syncThemeColors(): Promise<void> {
 
   if (Object.keys(colors).length > 0) {
     try {
-      await browser.storage.local.set({ themeColors: colors });
+      await writeWithRetry({ themeColors: colors });
     } catch {
       // ignore storage write errors
     }

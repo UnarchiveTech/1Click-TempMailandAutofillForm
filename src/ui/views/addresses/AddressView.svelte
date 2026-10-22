@@ -1,10 +1,18 @@
 <script lang="ts">
 import { t } from 'svelte-i18n';
 import { browser } from 'wxt/browser';
+import { migrateEmailBags } from '@/features/address/address-actions.js';
+import { updateAddressColors } from '@/features/settings/address-color.js';
+import { type ToastFn } from '@/ui/blocks/layout/use-toast.js';
 import CopyButton from '@/ui/components/composites/CopyButton.svelte';
 import Icon from '@/ui/components/icons/Icon.svelte';
 import AutoRenewToggle from '@/ui/components/primitives/AutoRenewToggle.svelte';
+import Avatar from '@/ui/components/primitives/Avatar.svelte';
+import Badge from '@/ui/components/primitives/Badge.svelte';
+import Btn from '@/ui/components/primitives/Btn.svelte';
 import FaviconImage from '@/ui/components/primitives/FaviconImage.svelte';
+import IconButton from '@/ui/components/primitives/IconButton.svelte';
+import ProviderPill from '@/ui/components/primitives/ProviderPill.svelte';
 import TagPill from '@/ui/components/primitives/TagPill.svelte';
 import {
   DETAIL_TOOLBAR_STRIP,
@@ -12,15 +20,27 @@ import {
   DETAIL_TOOLBAR_TONE_NEUTRAL,
   detailToolbarBtnClass,
 } from '@/ui/detail-toolbar.js';
-import { avatarColor } from '@/utils/avatar-color.js';
-import { copyToClipboardAndSchedulePurge } from '@/utils/clipboard.js';
-import { loadProviderConfig } from '@/utils/email-service.js';
-import { getMailboxReadState } from '@/utils/mailbox-read-state.js';
-import { getDomainAvatarStack } from '@/utils/sender-avatars.js';
-import { setInboxes } from '@/utils/storage-keys.js';
-import { timeAgo } from '@/utils/time-format.js';
-import { useCurrentTime } from '@/utils/time-store.js';
-import type { Account, CredentialsHistoryItem, Email, Identity } from '@/utils/types.js';
+import {
+  isArchived as isAddressArchived,
+  isDeleted as isAddressDeleted,
+} from '@/utils/address/address-status.js';
+import { addressTagsList, tagColorFor, tagUsageInfo } from '@/utils/address/address-tags.js';
+import { loadProviderConfig } from '@/utils/email/email-service.js';
+import { getDomainAvatarStack } from '@/utils/email/sender-avatars.js';
+import { logError } from '@/utils/logger.js';
+import { withAddressLock } from '@/utils/mutex.js';
+import { getMailboxReadState } from '@/utils/storage/mailbox-read-state.js';
+import { isUndoCurrent, markAddressMutation } from '@/utils/storage/undo-generation.js';
+import { avatarColor } from '@/utils/theme/avatar-color.js';
+import { formatCompactDuration, timeAgo } from '@/utils/time/time-format.js';
+import { useCurrentTime } from '@/utils/time/time-store.js';
+import type { Address, CredentialsHistoryItem, Email, Identity } from '@/utils/types.js';
+import { anchoredFlyout } from '@/utils/ui/anchored-flyout.js';
+import { AVATAR_BOX } from '@/utils/ui/avatar-size.js';
+import { ELEVATION } from '@/utils/ui/elevation.js';
+import { PORTAL_Z_CLASS } from '@/utils/ui/portal-layers.js';
+import { observeResizeOnFrame } from '@/utils/ui/resize-observer.js';
+import { responsiveButtonLayout } from '@/utils/ui/responsive-button-layout.js';
 
 let {
   currentEmailDetail = null,
@@ -31,22 +51,40 @@ let {
   onRefreshMessages = () => {},
   onExportEmail = () => {},
   onNavigateToMailbox = () => {},
-  onArchiveAccount = () => {},
-  onUnarchiveAccount = () => {},
-  onRemoveAccount = () => {},
+  onArchiveAddress = () => {},
+  onUnarchiveAddress = () => {},
+  onRemoveAddress = () => {},
   onToggleAutoExtend = () => {},
+  onExtendAddress = () => {},
   onMarkAllRead = () => {},
   onMarkAllUnread = () => {},
   onOpenTagDialog = () => {},
-  onOpenSavedLogins = (_email: string) => {},
+  onOpenQrDialog = (_email: string) => {},
+  onOpenSavedLogins = (_email: string, _domain?: string) => {},
+  onOpenSite = (_domain: string) => {},
   onOpenIdentities = (_email: string) => {},
   onAddressDomainChanged = (_address: string) => {},
-  showToast = (_msg: string, _type?: string, _undo?: (() => void | Promise<void>) | null) => {},
+  showToast = (
+    _msg: string | { message: string },
+    _type?: string,
+    _undo?: (() => void | Promise<void>) | null
+  ) => {},
   /** When true (split view), toolbar buttons show icon + text label */
   showToolbarLabels = false,
-} = $props<{
+  /**
+   * `buildTagAddressUsage(...)` for the address list - the count on the tag chip
+   * here and the addresses its hover names, identical to every other chip.
+   */
+  tagUsage = {} as Record<string, string[]>,
+  /**
+   * `buildTagColors(...)` for the address list. A tag is one tag regardless of
+   * casing, so it is one color - read through `tagColorFor`, not the color stored
+   * on this address, or `banking` / `Banking` show two different chips.
+   */
+  tagColors = {} as Record<string, string>,
+}: {
   onBack?: () => void;
-  currentEmailDetail?: Account | null;
+  currentEmailDetail?: Address | null;
   emails?: Email[];
   savedLogins?: CredentialsHistoryItem[];
   loading?: boolean;
@@ -54,19 +92,24 @@ let {
   onRefreshMessages?: () => void;
   onExportEmail?: () => void;
   onNavigateToMailbox?: () => void;
-  onArchiveAccount?: (account: Account) => void;
-  onUnarchiveAccount?: (account: Account) => void;
-  onRemoveAccount?: (address: string) => void;
-  onToggleAutoExtend?: (account: Account) => void;
+  onArchiveAddress?: (account: Address) => void;
+  onUnarchiveAddress?: (account: Address) => void;
+  onRemoveAddress?: (address: string) => void;
+  onToggleAutoExtend?: (account: Address) => void;
+  onExtendAddress?: (account: Address) => void | Promise<void>;
   onMarkAllRead?: () => void;
   onMarkAllUnread?: () => void;
   onOpenTagDialog?: () => void;
-  onOpenSavedLogins?: (email: string) => void;
+  onOpenQrDialog?: (email: string) => void;
+  onOpenSavedLogins?: (email: string, domain?: string) => void;
+  onOpenSite?: (domain: string) => void;
   onOpenIdentities?: (email: string) => void;
   onAddressDomainChanged?: (address: string) => void;
-  showToast?: (message: string, type?: string, undo?: (() => void | Promise<void>) | null) => void;
+  showToast?: ToastFn;
   showToolbarLabels?: boolean;
-}>();
+  tagUsage?: Record<string, string[]>;
+  tagColors?: Record<string, string>;
+} = $props();
 
 const toolbarBtn = $derived(detailToolbarBtnClass(showToolbarLabels));
 
@@ -80,35 +123,20 @@ $effect(() => {
     detailToolbarHeightPx = 0;
     return;
   }
-  const ro = new ResizeObserver((entries) => {
+  return observeResizeOnFrame(el, (entries) => {
     for (const entry of entries) {
       detailToolbarHeightPx = Math.ceil(entry.target.getBoundingClientRect().height);
     }
   });
-  ro.observe(el);
-  return () => ro.disconnect();
 });
 
 const timeStore = useCurrentTime();
-let currentTime = $state(timeStore.currentTime);
-
-$effect(() => {
-  const unsubscribe = timeStore.subscribe(() => {
-    currentTime = timeStore.currentTime;
-  });
-  return unsubscribe;
-});
+const currentTime = $derived($timeStore);
 
 const createdAgo = $derived.by(() => {
   const createdAt = currentEmailDetail?.createdAt;
   if (!createdAt) return '';
-  const msPast = currentTime - createdAt;
-  if (msPast < 0) return 'just now';
-  const s = Math.floor(msPast / 1000);
-  if (s < 60) return `${s}s ago`;
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  if (s <= 86400) return `${Math.floor(s / 3600)}h ago`;
-  return `${Math.floor(s / 86400)}d ago`;
+  return timeAgo(createdAt, currentTime);
 });
 
 const unreadCount = $derived(emails.filter((e: Email) => e.unread).length);
@@ -118,6 +146,7 @@ const autofillLogins = $derived(
   currentEmailDetail
     ? savedLogins.filter(
         (l: CredentialsHistoryItem) =>
+          (l.addressId === currentEmailDetail.id && !!currentEmailDetail.id) ||
           (l.email || '').toLowerCase() === (currentEmailDetail.address || '').toLowerCase()
       )
     : []
@@ -127,12 +156,17 @@ const autofillDomains = $derived(
   [
     ...new Set(
       autofillLogins
-        .map((l: CredentialsHistoryItem) => (l.domain || '').toLowerCase().replace(/^www\./, ''))
+        .map((l: CredentialsHistoryItem) =>
+          (l.domain || l.website || '').toLowerCase().replace(/^www\./, '')
+        )
         .filter((d: string): d is string => !!d)
     ),
   ].slice(0, 8) as string[]
 );
 
+let domainDropdownOpen = $state(false);
+/** Current inbox's per-inbox accent color (id-keyed) shown in the domain picker. */
+let addressAccentColor = $state('');
 let usageExpanded = $state(false);
 let usageSites = $state<
   Array<{
@@ -148,6 +182,7 @@ let usageSitesGeneration = 0;
 
 $effect(() => {
   const addr = currentEmailDetail?.address;
+  const addressId = currentEmailDetail?.id;
   const logins = savedLogins;
   if (!addr) {
     usageSites = [];
@@ -155,7 +190,7 @@ $effect(() => {
   }
   const gen = ++usageSitesGeneration;
   void import('@/features/intelligence/address-usage.js')
-    .then(({ getAddressUsageMap }) => getAddressUsageMap(addr, logins))
+    .then(({ getAddressUsageMap }) => getAddressUsageMap(addr, logins, addressId))
     .then((map) => {
       if (gen === usageSitesGeneration) usageSites = map.sites;
     })
@@ -175,7 +210,7 @@ const otpCount = $derived(emails.filter((e: Email) => !!e.otp).length);
 const receivedMailCount = $derived(emails.length || currentEmailDetail?.received || 0);
 
 const autoRenewalCount = $derived.by(() => {
-  const n = (currentEmailDetail as Account & { renewalCount?: number })?.renewalCount;
+  const n = (currentEmailDetail as Address & { renewalCount?: number })?.renewalCount;
   return typeof n === 'number' && Number.isFinite(n) ? n : 0;
 });
 
@@ -183,65 +218,123 @@ const supportsAutoRenew = $derived.by(() => {
   if (!currentEmailDetail?.provider) return false;
   try {
     const config = loadProviderConfig(currentEmailDetail.provider);
-    return !!(config.capabilities?.supportsRenew ?? config.expiry?.renewable);
+    return (
+      (config.capabilities?.supportsRenew === true || config.expiry?.renewable === true) &&
+      typeof config.expiry?.renewalMethod === 'string' &&
+      config.expiry.renewalMethod.length > 0
+    );
   } catch {
     /* ignore */
     return false;
   }
 });
 
-const isArchivedDetail = $derived(
-  currentEmailDetail?.accountStatus === 'archived' || currentEmailDetail?.status === 'archived'
-);
-
-const providerLabel = $derived.by(() => {
-  if (!currentEmailDetail?.provider) return '';
+const isArchivedDetail = $derived(isAddressArchived(currentEmailDetail));
+const detailTags = $derived(addressTagsList(currentEmailDetail));
+const renewalLabel = $derived.by(() => {
+  if (!currentEmailDetail?.provider) return $t('address.autoRenew');
   try {
-    const config = loadProviderConfig(currentEmailDetail.provider);
-    const name = config.displayName || currentEmailDetail.provider;
-    const url = currentEmailDetail.instanceUrl || '';
-    if (url) {
-      try {
-        const host = new URL(url).hostname;
-        return host ? `${name} (${host})` : name;
-      } catch {
-        /* ignore */
-        return `${name} (${url})`;
-      }
-    }
-    return name;
+    return loadProviderConfig(currentEmailDetail.provider).expiry?.renewalLabel === 'autoExtend'
+      ? $t('activity.autoExtend')
+      : $t('address.autoRenew');
   } catch {
-    /* ignore */
-    return currentEmailDetail.provider;
+    // Unknown providers have no renewal control; retain a safe caption.
+    return $t('address.autoRenew');
   }
 });
 
-const providerFaviconDomain = $derived.by(() => {
-  if (currentEmailDetail?.instanceUrl) {
-    try {
-      return new URL(currentEmailDetail.instanceUrl).hostname;
-    } catch {
-      /* fall through */
-    }
+/** Banner window: matches the notification default (1h) so the UI warns in sync with alerts. */
+const EXPIRING_SOON_MS = 60 * 60 * 1000;
+/** A renewal failure older than this is stale and no longer banner-worthy. */
+const RENEWAL_FAIL_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/** Localized countdown label - the shared time-unit formatter owns the s/m/h tokens. */
+function formatCountdown(ms: number): string {
+  return formatCompactDuration(ms);
+}
+
+/**
+ * Live expiry status for the banner. Order matters: expired wins, then a recent
+ * renewal failure, then the T-1h expiring-soon window. Null → no banner.
+ */
+const expiryBanner = $derived.by(() => {
+  const acc = currentEmailDetail;
+  if (!acc?.expiresAt || acc.expiresAt <= 0) return null;
+  const now = currentTime;
+  const left = acc.expiresAt - now;
+  if (left <= 0) {
+    return {
+      wrapClass: 'bg-md-error/10 border-md-error/25',
+      iconClass: 'text-md-error',
+      btnClass: 'bg-md-error/15 text-md-error hover:bg-md-error/25',
+      icon: 'warning',
+      message: $t('address.expiredHint'),
+      showRenew: true,
+    };
   }
-  try {
-    const config = loadProviderConfig(currentEmailDetail?.provider || '');
-    const site =
-      (config as { website?: string; domain?: string }).website ||
-      (config as { website?: string; domain?: string }).domain;
-    if (site) {
-      try {
-        return new URL(site.startsWith('http') ? site : `https://${site}`).hostname;
-      } catch {
-        /* ignore */
-        return site;
-      }
-    }
-  } catch {
-    /* ignore */
+  const failCount = (acc as Address & { renewalFailCount?: number }).renewalFailCount || 0;
+  const lastFailure = (acc as Address & { lastFailureAt?: number }).lastFailureAt || 0;
+  // A retry countdown may only describe a retry that WILL happen, so the streak
+  // is gated on `autoExtend` exactly as AddressesView.renewalRetryCaption and
+  // the mailbox's renewal strip gate theirs. Disabling auto-renew clears the
+  // streak (toggleAutoExtend), but a stale/raw record can still reach here -
+  // and promising a retry on an address that will never retry is the banner
+  // lying. Off → fall through to the expiry countdown below, which is still
+  // true for the address.
+  if (
+    acc.autoExtend &&
+    failCount >= 1 &&
+    lastFailure > 0 &&
+    now - lastFailure < RENEWAL_FAIL_WINDOW_MS
+  ) {
+    const nextRetryAt = (acc as Address & { nextRetryAt?: number }).nextRetryAt || 0;
+    const message =
+      nextRetryAt > now
+        ? $t('addressView.renewalFailedRetryIn', {
+            values: { time: formatCountdown(nextRetryAt - now) },
+          })
+        : $t('addressView.renewalFailed');
+    return {
+      wrapClass: 'bg-md-warning/10 border-md-warning/25',
+      iconClass: 'text-md-warning',
+      btnClass: 'bg-md-warning/15 text-md-warning hover:bg-md-warning/25',
+      icon: 'warning',
+      message,
+      showRenew: true,
+    };
   }
-  return currentEmailDetail?.provider || '';
+  if (left <= EXPIRING_SOON_MS) {
+    return {
+      wrapClass: 'bg-md-warning/10 border-md-warning/25',
+      iconClass: 'text-md-warning',
+      btnClass: 'bg-md-warning/15 text-md-warning hover:bg-md-warning/25',
+      icon: 'schedule',
+      message: $t('address.expiresIn', {
+        values: { time: formatCountdown(left) },
+      }),
+      showRenew: false,
+    };
+  }
+  return null;
 });
+
+let renewing = $state(false);
+async function renewNow() {
+  if (!currentEmailDetail || renewing) return;
+  renewing = true;
+  try {
+    await onExtendAddress(currentEmailDetail);
+  } catch {
+    /* extendAddress surfaces its own toast; swallow here */
+  } finally {
+    renewing = false;
+  }
+}
+
+function openInProvider() {
+  const url = currentEmailDetail?.instanceUrl;
+  if (url) void browser.tabs.create({ url });
+}
 
 let defaultIdentityUsesThis = $state(false);
 $effect(() => {
@@ -279,91 +372,84 @@ async function changeAddressDomain(domain: string) {
   const nextAddr = `${user}@${domain}`;
   if (nextAddr === currentEmailDetail.address) return;
   try {
-    const { inboxes = [] } = (await browser.storage.local.get(['inboxes'])) as {
-      inboxes?: Account[];
-    };
-    // Match by id first; fall back to current address (import / id drift)
-    const detailId = currentEmailDetail?.id;
-    const detailAddr = currentEmailDetail?.address;
-    let idx = detailId ? inboxes.findIndex((i) => i.id === detailId) : -1;
-    if (idx < 0 && detailAddr) {
-      const addrLower = detailAddr.toLowerCase();
-      idx = inboxes.findIndex(
-        (i) => i.address === detailAddr || i.address?.toLowerCase() === addrLower
-      );
-    }
-    if (idx < 0) {
-      showToast($t('addressView.domainChangeFailed'), 'error');
-      return;
-    }
-    const prev = inboxes[idx].address;
-    const inboxId = inboxes[idx].id;
-    const prevSnapshot = { ...inboxes[idx] };
-    inboxes[idx] = { ...inboxes[idx], address: nextAddr, emailUser: user };
-    await setInboxes(inboxes);
-    await browser.storage.local.set({ activeInboxId: inboxes[idx].id });
-    // Migrate mail bags if helper exists in UI via storage only
-    const bags = (await browser.storage.local.get(['storedEmails', 'archivedEmails'])) as {
-      storedEmails?: Record<string, Email[]>;
-      archivedEmails?: Record<string, Email[]>;
-    };
-    const move = (map: Record<string, Email[]>) => {
-      if (!map[prev]?.length) return map;
-      const merged = [
-        ...(map[nextAddr] || []),
-        ...map[prev].map((e) => ({ ...e, original_inbox: nextAddr })),
-      ];
-      const next = { ...map, [nextAddr]: merged };
-      delete next[prev];
-      return next;
-    };
-    const prevStored = bags.storedEmails || {};
-    const prevArchived = bags.archivedEmails || {};
-    await browser.storage.local.set({
-      storedEmails: move({ ...prevStored }),
-      archivedEmails: move({ ...prevArchived }),
-    });
-    // Keep per-inbox accent color stable across domain rewrite (id-keyed)
-    try {
-      const { inboxColors = {} } = (await browser.storage.local.get(['inboxColors'])) as {
-        inboxColors?: Record<string, string>;
+    const { prev, addressId, prevSnapshot } = await withAddressLock(async () => {
+      const { addresses = [] } = (await browser.storage.local.get(['addresses'])) as {
+        addresses?: Address[];
       };
-      if (inboxId && (inboxColors[inboxId] || inboxColors[prev])) {
-        const color = inboxColors[inboxId] || inboxColors[prev];
-        const nextColors = { ...inboxColors, [inboxId]: color };
-        delete nextColors[prev];
-        await browser.storage.local.set({ inboxColors: nextColors });
+      // Match by id first; fall back to current address (import / id drift)
+      const detailId = currentEmailDetail?.id;
+      const detailAddr = currentEmailDetail?.address;
+      let idx = detailId ? addresses.findIndex((i) => i.id === detailId) : -1;
+      if (idx < 0 && detailAddr) {
+        const addrLower = detailAddr.toLowerCase();
+        idx = addresses.findIndex(
+          (i) => i.address === detailAddr || i.address?.toLowerCase() === addrLower
+        );
+      }
+      if (idx < 0) throw new Error('Address not found for domain change');
+      const prev = addresses[idx].address;
+      const addressId = addresses[idx].id;
+      const prevSnapshot = { ...addresses[idx] };
+      addresses[idx] = { ...addresses[idx], address: nextAddr, emailUser: user };
+      // Publish the renamed address, ID index, and migrated bags in the same
+      // storage transaction so a bag failure cannot leave an empty mailbox.
+      await migrateEmailBags(browser, prev, nextAddr, {
+        addresses,
+        activeAddressId: addressId,
+      });
+      return { prev, addressId, prevSnapshot };
+    });
+    // Keep per-inbox accent color stable across domain rewrite (id-keyed).
+    // Serialized: the colour picker writes this same map, so a whole-map write
+    // of what this flow read would erase the colour it just gave another inbox.
+    try {
+      if (addressId) {
+        await updateAddressColors((current) => {
+          const color = current[addressId] || current[prev];
+          if (!color) return current;
+          const next = { ...current, [addressId]: color };
+          delete next[prev];
+          return next;
+        });
       }
     } catch {
       /* ignore */
     }
     onAddressDomainChanged(nextAddr);
     const msg = $t('addressView.domainChanged', { values: { from: prev, to: nextAddr } });
-    showToast(
-      typeof msg === 'string' ? msg : `Domain updated from ${prev} to ${nextAddr}.`,
-      'success',
-      async () => {
-        // Undo domain change
-        try {
-          const { inboxes: list = [] } = (await browser.storage.local.get(['inboxes'])) as {
-            inboxes?: Account[];
-          };
-          const i = list.findIndex((x) => x.id === inboxId);
-          if (i >= 0) {
-            list[i] = { ...list[i], address: prev, emailUser: prevSnapshot.emailUser };
-            await setInboxes(list);
-            await browser.storage.local.set({ activeInboxId: inboxId });
-          }
-          await browser.storage.local.set({
-            storedEmails: prevStored,
-            archivedEmails: prevArchived,
-          });
-          onAddressDomainChanged(prev);
-        } catch {
-          /* ignore */
-        }
+    // The record rewrite + bag migration LANDED: every undo offered before it
+    // is stale, and the undo this toast carries is created under the new
+    // revision (same shared counter the delete/archive/import flows mark).
+    const undoRevision = await markAddressMutation();
+    showToast(msg, 'success', async () => {
+      // A newer surface mutation landed while this toast was up: this undo
+      // would write the captured pre-change record over it. Say so.
+      if (!(await isUndoCurrent(undoRevision))) {
+        showToast($t('toasts.undoSuperseded'), 'warning');
+        return;
       }
-    );
+      // Undo domain change
+      try {
+        await withAddressLock(async () => {
+          const { addresses: list = [] } = (await browser.storage.local.get(['addresses'])) as {
+            addresses?: Address[];
+          };
+          const i = list.findIndex((x) => x.id === addressId);
+          if (i < 0) throw new Error('Address not found for domain-change undo');
+          list[i] = { ...list[i], address: prev, emailUser: prevSnapshot.emailUser };
+          await migrateEmailBags(browser, nextAddr, prev, {
+            addresses: list,
+            activeAddressId: addressId,
+          });
+        });
+        onAddressDomainChanged(prev);
+      } catch (error) {
+        // The forward change already committed: surface the failed undo
+        // instead of leaving the user on an address that claims to be undone.
+        logError('Undo address domain change failed', error);
+        showToast($t('addressView.domainChangeFailed'), 'error');
+      }
+    });
   } catch {
     showToast($t('addressView.domainChangeFailed'), 'error');
   }
@@ -373,77 +459,247 @@ async function changeAddressDomain(domain: string) {
 /** Domain-ranked favicon stack (same logic as Addresses page) */
 const domainAvatarStack = $derived(getDomainAvatarStack(emails, 4));
 
-// Copy email address
-let copied = $state(false);
-async function copyEmail() {
-  if (!currentEmailDetail) return;
+/** 2-3 most recent emails for the preview list before “View in mailbox”. */
+const recentEmails = $derived(
+  [...emails].sort((a, b) => (b.received_at || 0) - (a.received_at || 0)).slice(0, 3)
+);
+
+const localPart = $derived((currentEmailDetail?.address || '').split('@')[0] || '');
+const domainPart = $derived((currentEmailDetail?.address || '').split('@')[1] || '');
+
+/** Read the per-inbox accent color (id-keyed, legacy address fallback) - read-only. */
+async function refreshAddressAccentColor() {
+  const id = currentEmailDetail?.id;
+  const addr = currentEmailDetail?.address;
+  if (!id && !addr) {
+    addressAccentColor = '';
+    return;
+  }
   try {
-    await copyToClipboardAndSchedulePurge(currentEmailDetail.address);
-    copied = true;
-    setTimeout(() => {
-      copied = false;
-    }, 1500);
+    const r = (await browser.storage.local.get(['addressColors'])) as {
+      addressColors?: Record<string, string>;
+    };
+    const map = r.addressColors || {};
+    addressAccentColor = (id && map[id]) || (addr && map[addr]) || '';
   } catch {
     /* ignore */
   }
 }
 
-/** 2–3 most recent emails for the preview list before “View in mailbox”. */
-const recentEmails = $derived(
-  [...emails].sort((a, b) => (b.received_at || 0) - (a.received_at || 0)).slice(0, 3)
-);
+$effect(() => {
+  void currentEmailDetail?.id;
+  void currentEmailDetail?.address;
+  void refreshAddressAccentColor();
+});
 </script>
 
 <div class="relative flex flex-col h-full min-h-0">
 {#if currentEmailDetail}
   <div
-    class="flex-1 px-0 py-3 space-y-3 overflow-y-auto"
+    class="scroll-body flex-1 py-3 space-y-3 overflow-y-auto"
     style="padding-bottom: calc(var(--bottom-safe-area, 0px) + {detailToolbarHeightPx}px + 12px);"
   >
 
-    <!-- Email address + Copy button -->
-    <div class="flex items-center gap-2">
-      <span data-selectable-text="true" class="font-mono text-sm font-bold flex-1 min-w-0 truncate">{currentEmailDetail.address}</span>
+    <!-- Email address + domain selector + Copy button: a control row that owns the two
+         row-level keys - D opens the domain picker, Escape closes it. -->
+    <div
+      class="flex items-center gap-3 rounded-xl bg-md-surface-container-low p-3 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-md-primary/30"
+      tabindex="0"
+      role="toolbar"
+      aria-label={$t('addressView.changeDomain')}
+      onkeydown={(e) => {
+        const target = e.target as HTMLElement | null;
+        const typingInField =
+          !!target &&
+          (target.tagName === 'INPUT' ||
+            target.tagName === 'TEXTAREA' ||
+            target.tagName === 'SELECT' ||
+            target.isContentEditable);
+        if (
+          !typingInField &&
+          supportsDomainChange &&
+          e.key.toLowerCase() === 'd' &&
+          !e.ctrlKey &&
+          !e.metaKey &&
+          !e.altKey &&
+          !e.shiftKey
+        ) {
+          e.preventDefault();
+          if (!domainDropdownOpen) void refreshAddressAccentColor();
+          domainDropdownOpen = !domainDropdownOpen;
+        } else if (e.key === 'Escape' && domainDropdownOpen) {
+          e.preventDefault();
+          e.stopPropagation();
+          domainDropdownOpen = false;
+        }
+      }}
+    >
+      <!-- Letter avatar - single Avatar source -->
+      <Avatar
+        size="xl"
+        letter={currentEmailDetail.address[0] || '?'}
+        email={currentEmailDetail.address}
+        shape="square"
+        class="shrink-0"
+      />
+      <div
+        class="flex-1 min-w-0 flex flex-col items-start gap-1"
+        style="direction:ltr;unicode-bidi:isolate;"
+        data-selectable-text="true"
+      >
+        <span class="min-w-0 truncate font-medium text-sm text-md-on-surface">{localPart}</span>
+        <span class="relative inline-flex items-center shrink-0">
+          {#if supportsDomainChange}
+            <button
+              type="button"
+              class="inline-flex items-center gap-1 ps-1.5 pe-1 py-0.5 rounded-md bg-md-secondary-container text-md-on-secondary-container hover:bg-md-secondary-container/80 active:bg-md-secondary-container/100 transition-colors text-xs font-medium overflow-hidden max-w-full"
+              aria-label={$t('addressView.changeDomain')}
+              aria-haspopup="menu"
+              aria-expanded={domainDropdownOpen}
+              onclick={(e) => {
+                e.stopPropagation();
+                if (!domainDropdownOpen) void refreshAddressAccentColor();
+                domainDropdownOpen = !domainDropdownOpen;
+              }}
+            >
+              <span class="truncate min-w-0">@{domainPart}</span>
+              <Icon name="chevronDown" class="w-3.5 h-3.5 shrink-0" />
+            </button>
+          {:else}
+            <span class="shrink-0 font-medium text-sm text-md-on-surface">@{domainPart}</span>
+          {/if}
+          {#if domainDropdownOpen}
+            <button
+              type="button"
+              class="fixed inset-0 {PORTAL_Z_CLASS.accountMenu} cursor-default bg-transparent border-0"
+              aria-label={$t('common.close')}
+              onclick={() => (domainDropdownOpen = false)}
+            ></button>
+            <div
+              use:anchoredFlyout={{ onClose: () => { domainDropdownOpen = false; } }}
+              class="menu-list absolute top-full start-0 mt-1 bg-md-surface-container-low border border-md-outline-variant/50 rounded-xl {ELEVATION.level2} {PORTAL_Z_CLASS.accountMenu} overflow-y-auto max-h-56 min-w-[170px]"
+              role="menu"
+              aria-label={$t('addressView.changeDomain')}
+            >
+              {#each multiDomainList as d (d)}
+                {@const active = d === domainPart}
+                <button
+                  type="button"
+                  role="menuitem"
+                  class="w-full flex items-center gap-2 px-3 min-h-10 text-sm text-start hover:bg-md-surface-variant active:brightness-95 transition-colors {active
+                    ? 'text-md-primary font-semibold'
+                    : 'text-md-on-surface'}"
+                  style="direction:ltr;"
+                  disabled={active}
+                  onclick={() => {
+                    domainDropdownOpen = false;
+                    if (!active) void changeAddressDomain(d);
+                  }}
+                >
+                  {#if addressAccentColor}
+                    <span
+                      class="w-2.5 h-2.5 rounded-full shrink-0"
+                      style="background-color: {addressAccentColor};"
+                      aria-hidden="true"
+                    ></span>
+                  {/if}
+                  <span class="flex-1 truncate">@{d}</span>
+                  {#if active}<Icon name="check" class="w-3.5 h-3.5 shrink-0" />{/if}
+                </button>
+              {/each}
+            </div>
+          {/if}
+        </span>
+      </div>
+      <IconButton
+        icon="qrCode2"
+        size="sm"
+        ariaLabel={$t('inbox.showQrAria')}
+        title={$t('inbox.showQrAria')}
+        onclick={() => onOpenQrDialog(currentEmailDetail.address)}
+      />
       <CopyButton text={currentEmailDetail.address} size="sm" variant="surface" />
     </div>
 
-    <!-- Tag row -->
-    <div class="flex items-center gap-2">
-      <TagPill
-        tag={currentEmailDetail.tag}
-        tagColor={currentEmailDetail.tagColor}
-        onClick={onOpenTagDialog}
-        showIcon={true}
+    <!-- Live expiry / renewal-failure banner -->
+    {#if expiryBanner}
+      <div
+        class="rounded-xl border flex items-center gap-2 px-3 py-2 {expiryBanner.wrapClass}"
+        role="status"
+      >
+        <Icon name={expiryBanner.icon} class="w-4 h-4 shrink-0 {expiryBanner.iconClass}" />
+        <span class="flex-1 min-w-0 text-xs font-medium text-md-on-surface">
+          {expiryBanner.message}
+        </span>
+        {#if expiryBanner.showRenew && supportsAutoRenew}
+          <button
+            type="button"
+            class="shrink-0 inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-label-sm font-semibold border-0 transition-colors disabled:opacity-60 {expiryBanner.btnClass}"
+            disabled={renewing}
+            onclick={(e) => {
+              e.stopPropagation();
+              void renewNow();
+            }}
+          >
+            <Icon name="refresh" class="w-3.5 h-3.5 {renewing ? 'animate-spin' : ''}" />
+            {renewing ? $t('addressView.renewing') : $t('addressView.renewNow')}
+          </button>
+        {/if}
+      </div>
+    {/if}
+
+    <!-- Provider (instance) pill + auto-renew toggle + tag row -->
+    <div class="flex flex-wrap items-center gap-2">
+      <ProviderPill
+        provider={currentEmailDetail.provider}
+        instanceUrl={currentEmailDetail.instanceUrl}
       />
+      {#if isArchivedDetail}
+        <Badge variant="outline" label={$t('common.archived')} />
+      {:else if isAddressDeleted(currentEmailDetail)}
+        <Badge variant="error" label={$t('common.deleted')} />
+      {/if}
+      {#if currentEmailDetail.instanceUrl}
+        <button
+          type="button"
+          class="w-6 h-6 rounded-full flex items-center justify-center text-md-on-surface/60 hover:text-md-primary hover:bg-md-primary/10 active:bg-md-primary/20 transition-colors"
+          title={$t('addressView.openInProvider')}
+          aria-label={$t('addressView.openInProvider')}
+          onclick={(e) => {
+            e.stopPropagation();
+            openInProvider();
+          }}
+        >
+          <Icon name="globe" class="w-3.5 h-3.5" />
+        </button>
+      {/if}
+      {#if supportsAutoRenew && !isAddressDeleted(currentEmailDetail)}
+        <AutoRenewToggle
+          autoRenew={currentEmailDetail.autoExtend || false}
+          label={renewalLabel}
+          showStateText={false}
+          onToggle={() => {
+            if (currentEmailDetail) onToggleAutoExtend(currentEmailDetail);
+          }}
+        />
+      {/if}
+      {#each detailTags as tag (tag.name)}
+        <TagPill tag={tag.name} tagColor={tagColorFor(tagColors, tag.name) ?? tag.color}
+          usage={tagUsageInfo($t, tagUsage, tag.name)} onClick={onOpenTagDialog} />
+      {:else}
+        <TagPill onClick={onOpenTagDialog} />
+      {/each}
     </div>
 
-    <!-- Single stats container -->
-    <div class="rounded-xl border border-md-outline-variant/30 bg-md-surface-container-low/60 p-3 space-y-2">
-      <!-- Provider (+ instance) with favicon -->
-      <div class="flex items-center gap-2 min-w-0">
-        <div class="w-5 h-5 rounded flex items-center justify-center overflow-hidden bg-md-surface flex-shrink-0">
-          <FaviconImage
-            domain={providerFaviconDomain}
-            size={20}
-            class="w-4 h-4 object-contain"
-            fallbackLetter={providerLabel[0]?.toUpperCase() ?? 'P'}
-          />
-        </div>
-        <span class="text-xs text-md-on-surface font-medium truncate">{providerLabel}</span>
-      </div>
+    <!-- Lifecycle -->
+    <details class="rounded-xl border border-md-outline-variant/30 bg-md-surface-container-low/60 p-3 space-y-2" data-address-stats="lifecycle">
+      <summary class="cursor-pointer ui-label text-md-on-surface">{$t('addressView.statsLifecycle')}</summary>
 
-      <div class="text-label-sm text-md-on-surface/60">
+      <div class="text-xs text-md-on-surface-variant pt-2">
         {$t('addressView.created')} {createdAgo}
       </div>
 
-      {#if supportsAutoRenew}
-        <div class="flex items-center gap-1 text-label-sm text-md-on-surface/60">
-          <Icon name="refresh" class="w-3 h-3 text-md-primary/60" />
-          <span>{$t('addressView.autoRenewalCount', { values: { n: autoRenewalCount } })}</span>
-        </div>
-      {/if}
-
-      <div class="text-label-sm text-md-on-surface/70">
+      <div class="text-xs text-md-on-surface-variant">
         {$t('addressView.receivedMails', {
           values: {
             n: receivedMailCount,
@@ -452,20 +708,43 @@ const recentEmails = $derived(
         })}
       </div>
 
-      {#if domainAvatarStack.senders.length > 0}
+      <div class="flex items-center gap-2 text-xs text-md-on-surface-variant">
+        <Icon name="lock" class="w-3 h-3 text-md-primary/60" />
+        <span>{$t('addressView.otpCount', { values: { n: otpCount } })}</span>
+      </div>
+
+      {#if supportsAutoRenew}
+        <div class="flex items-center gap-2 text-xs text-md-on-surface-variant">
+          <Icon name="refresh" class="w-3 h-3 text-md-primary/60" />
+          <span>{$t('addressView.autoRenewalCount', { values: { n: autoRenewalCount } })}</span>
+        </div>
+      {/if}
+
+      {#if defaultIdentityUsesThis}
+        <div class="flex items-center gap-1 text-label-sm text-md-tertiary font-medium">
+          <Icon name="person" class="w-3 h-3" />
+          <span>{$t('addressView.defaultInIdentity')}</span>
+        </div>
+      {/if}
+    </details>
+
+    <!-- Sender activity -->
+    {#if domainAvatarStack.senders.length > 0}
+      <details class="rounded-xl border border-md-outline-variant/30 bg-md-surface-container-low/60 p-3 space-y-2" data-address-stats="senders">
+        <summary class="cursor-pointer ui-label text-md-on-surface">{$t('addressView.statsSenders')}</summary>
         <div class="flex items-center gap-1.5">
           <div class="flex items-center">
             {#each domainAvatarStack.senders as sender, i (sender.domain)}
               <div
-                class="relative w-6 h-6 rounded-full border-2 border-md-surface overflow-hidden flex items-center justify-center bg-md-surface-container-low flex-shrink-0"
+                class="relative {AVATAR_BOX.md} rounded-full border-2 border-md-surface overflow-hidden flex items-center justify-center bg-md-surface-container-low flex-shrink-0"
                 style="z-index: {4 - i}; margin-inline-start: {i === 0 ? '0' : '-6px'};"
                 title="{sender.domain} ({sender.count})"
               >
                 <FaviconImage
                   email={sender.email}
                   domain={sender.domain}
-                  size={24}
-                  class="absolute inset-0 w-full h-full object-cover"
+                  size="md"
+                  class="object-cover"
                   fallbackLetter={sender.letter}
                   fallbackColor={avatarColor(sender.domain)}
                 />
@@ -473,7 +752,7 @@ const recentEmails = $derived(
             {/each}
             {#if domainAvatarStack.remainder > 0}
               <div
-                class="relative w-6 h-6 rounded-full border-2 border-md-surface bg-md-surface-variant flex items-center justify-center flex-shrink-0"
+                class="relative {AVATAR_BOX.md} rounded-full border-2 border-md-surface bg-md-surface-variant flex items-center justify-center flex-shrink-0"
                 style="z-index: 0; margin-inline-start: -6px;"
               >
                 <span class="text-label-sm font-bold text-md-on-surface/60">+{domainAvatarStack.remainder}</span>
@@ -481,81 +760,84 @@ const recentEmails = $derived(
             {/if}
           </div>
         </div>
-      {/if}
+      </details>
+    {/if}
 
-      <div class="flex items-center gap-1 text-label-sm text-md-on-surface/60">
-        <Icon name="lock" class="w-3 h-3 text-md-primary/60" />
-        <span>{$t('addressView.otpCount', { values: { n: otpCount } })}</span>
-      </div>
+    <!-- Credentials & usage -->
+    <div class="rounded-xl border border-md-outline-variant/30 bg-md-surface-container-low/60 p-3 space-y-1.5">
+      <h3 class="ui-label text-md-on-surface">{$t('addressView.statsCredentials')}</h3>
 
-      <!-- Address usage map — sites this email was used on -->
-      <div class="rounded-lg border border-md-outline-variant/20 bg-md-surface/40 p-2 space-y-1.5">
-        <button
-          type="button"
-          class="w-full flex items-center gap-2 text-start rounded-lg px-1 py-1 hover:bg-md-primary/10 transition-colors border-0 bg-transparent"
-          title={$t('addressView.usedInAutofillsHint')}
-          onclick={(e) => {
-            e.stopPropagation();
-            usageExpanded = !usageExpanded;
-          }}
-        >
-          <Icon name="lock" class="w-3.5 h-3.5 text-md-primary shrink-0" />
-          <span class="text-label-sm font-semibold text-md-primary flex-1">
-            {$t('addressView.usageMapTitle', {
-              values: { n: usageSites.length || autofillCount },
-            })}
-          </span>
-          {#if usageSites.length > 0 || autofillDomains.length > 0}
-            <div class="flex -space-x-1.5">
-              {#each (usageSites.length ? usageSites.map((s) => s.domain) : autofillDomains).slice(0, 4) as domain}
-                <div
-                  class="w-5 h-5 rounded-md bg-md-surface flex items-center justify-center overflow-hidden border border-md-outline-variant/30"
-                  title={domain}
-                >
-                  <FaviconImage
-                    {domain}
-                    size={16}
-                    class="w-3.5 h-3.5 object-contain"
-                    fallbackLetter={domain[0]?.toUpperCase() ?? '?'}
-                  />
-                </div>
-              {/each}
-            </div>
-          {/if}
-          <Icon name={usageExpanded ? 'chevronUp' : 'chevronDown'} class="w-3.5 h-3.5 text-md-on-surface/40" />
-        </button>
+      <button
+        type="button"
+        class="w-full flex items-center gap-2 text-start rounded-lg px-1 py-1 hover:bg-md-primary/10 active:bg-md-primary/30 transition-colors border-0 bg-transparent"
+        title={$t('addressView.usedInAutofillsHint')}
+        aria-expanded={usageExpanded}
+        onclick={(e) => {
+          e.stopPropagation();
+          usageExpanded = !usageExpanded;
+        }}
+      >
+        <Icon name="lock" class="w-3.5 h-3.5 text-md-primary shrink-0" />
+        <span class="text-xs font-semibold text-md-primary flex-1">
+          {$t('addressView.usageMapTitle', {
+            values: { n: usageSites.length || autofillCount },
+          })}
+        </span>
+        {#if usageSites.length > 0 || autofillDomains.length > 0}
+          <div class="flex -space-x-1.5">
+            {#each (usageSites.length ? usageSites.map((s) => s.domain) : autofillDomains).slice(0, 4) as domain}
+              <div
+                class="{AVATAR_BOX.sm} rounded-md bg-md-surface flex items-center justify-center overflow-hidden border border-md-outline-variant/30"
+                title={domain}
+              >
+                <FaviconImage
+                  {domain}
+                  size="sm"
+                  class="object-contain"
+                  fallbackLetter={domain[0]?.toUpperCase() ?? '?'}
+                />
+              </div>
+            {/each}
+          </div>
+        {/if}
+        <Icon name={usageExpanded ? 'chevronUp' : 'chevronDown'} class="w-3.5 h-3.5 text-md-on-surface/40" />
+      </button>
 
-        {#if usageExpanded && usageSites.length > 0}
-          <ul class="space-y-1 max-h-40 overflow-y-auto">
+      {#if usageExpanded}
+        {#if usageSites.length > 0}
+          <ul class="max-h-40 overflow-y-auto divide-y divide-md-outline-variant/20">
             {#each usageSites as site (site.domain)}
               <li>
                 <button
                   type="button"
-                  class="w-full flex items-center gap-2 rounded-lg px-1.5 py-1 text-start hover:bg-md-primary/10 border-0 bg-transparent"
-                  title={$t('addressView.openSavedLoginsForSite', { values: { domain: site.domain } })}
+                  class="w-full flex items-center gap-2 rounded-lg px-1.5 py-1.5 text-start hover:bg-md-primary/10 active:bg-md-primary/30 disabled:opacity-55 disabled:cursor-default border-0 bg-transparent"
+                  title={site.loginCount > 0
+                    ? $t('addressView.openSavedLoginsForSite', { values: { domain: site.domain } })
+                    : $t('addressView.openSiteDetails', { values: { domain: site.domain } })}
                   onclick={(e) => {
                     e.stopPropagation();
-                    onOpenSavedLogins(currentEmailDetail.address);
+                    if (site.loginCount > 0) onOpenSavedLogins(currentEmailDetail.address, site.domain);
+                    else onOpenSite(site.domain);
                   }}
                 >
                   <div
-                    class="w-5 h-5 rounded-md bg-md-surface flex items-center justify-center overflow-hidden border border-md-outline-variant/30 shrink-0"
+                    class="{AVATAR_BOX.sm} rounded-md bg-md-surface flex items-center justify-center overflow-hidden border border-md-outline-variant/30 shrink-0"
                   >
                     <FaviconImage
                       domain={site.domain}
-                      size={16}
-                      class="w-3.5 h-3.5 object-contain"
+                      size="sm"
+                      class="object-contain"
                       fallbackLetter={site.domain[0]?.toUpperCase() ?? '?'}
                     />
                   </div>
                   <div class="min-w-0 flex-1">
-                    <div class="text-label-sm font-medium text-md-on-surface truncate">{site.domain}</div>
-                    <div class="text-xs text-md-on-surface/50">
+                    <div class="text-sm font-medium text-md-on-surface truncate">{site.domain}</div>
+                    <div class="text-xs text-md-on-surface-variant">
                       {#if site.loginCount > 0}
                         {$t('addressView.usageLogins', { values: { n: site.loginCount } })}
                         ·
                       {/if}
-                      {site.lastUsedAt ? timeAgo(site.lastUsedAt) : '—'}
+                      {site.lastUsedAt ? timeAgo(site.lastUsedAt) : '-'}
                       {#if site.inSiteMemory}
                         · {$t('addressView.usageInMemory')}
                       {/if}
@@ -565,65 +847,47 @@ const recentEmails = $derived(
               </li>
             {/each}
           </ul>
-          <button
-            type="button"
-            class="w-full text-xs font-semibold text-md-primary py-1 rounded-lg hover:bg-md-primary/10 border-0 bg-transparent"
-            onclick={(e) => {
-              e.stopPropagation();
-              onOpenSavedLogins(currentEmailDetail.address);
-            }}
-          >
-            {$t('addressView.viewAllSavedLogins')}
-          </button>
-        {:else if usageExpanded}
+        {:else}
           <p class="text-xs text-md-on-surface/50 px-1">{$t('addressView.usageMapEmpty')}</p>
         {/if}
-      </div>
-
-      {#if defaultIdentityUsesThis}
-        <div class="flex items-center gap-1 text-label-sm text-md-tertiary font-medium">
-          <Icon name="user" class="w-3 h-3" />
-          <span>{$t('addressView.defaultInIdentity')}</span>
-        </div>
       {/if}
-    </div>
 
-    <!-- Jump to Identities filtered by this mailbox -->
-    <div class="flex items-center gap-1.5">
-      <button
-        type="button"
-        class="flex-1 px-2 py-1.5 text-label-sm font-semibold rounded-lg bg-md-tertiary/10 text-md-tertiary hover:bg-md-tertiary/20 transition-colors flex items-center justify-center gap-1"
-        title={$t('inbox.emailActions.openIdentities')}
-        aria-label={$t('inbox.emailActions.openIdentities')}
-        onclick={(e) => {
-          e.stopPropagation();
-          onOpenIdentities(currentEmailDetail.address);
-        }}
+      <!-- Unified logins & identities actions -->
+      <div
+        class="flex flex-nowrap items-center gap-3 pt-2 mt-0.5 border-t border-md-outline-variant/20"
+        use:responsiveButtonLayout
+        data-action-tier="S"
       >
-        <Icon name="user" class="w-3.5 h-3.5" />
-        <span class="truncate">{$t('inbox.emailActions.openIdentities')}</span>
-      </button>
+        <button
+          type="button"
+          class="flex-1 h-10 px-2 text-label-sm font-semibold rounded-lg bg-md-tertiary/10 text-md-tertiary hover:bg-md-tertiary/20 active:bg-md-tertiary/40 transition-colors flex items-center justify-center gap-1"
+          title={$t('addressView.viewAllSavedLogins')}
+          aria-label={$t('addressView.viewAllSavedLogins')}
+          onclick={(e) => {
+            e.stopPropagation();
+            onOpenSavedLogins(currentEmailDetail.address);
+          }}
+        >
+          <Icon name="lock" class="w-3.5 h-3.5" />
+          <span class="truncate">{$t('addressView.savedLoginsCount', { values: { n: autofillCount } })}</span>
+        </button>
+        <button
+          type="button"
+          class="flex-1 h-10 px-2 text-label-sm font-semibold rounded-lg bg-md-tertiary/10 text-md-tertiary hover:bg-md-tertiary/20 active:bg-md-tertiary/40 transition-colors flex items-center justify-center gap-1"
+          title={$t('inbox.emailActions.openIdentities')}
+          aria-label={$t('inbox.emailActions.openIdentities')}
+          onclick={(e) => {
+            e.stopPropagation();
+            onOpenIdentities(currentEmailDetail.address);
+          }}
+        >
+          <Icon name="person" class="w-3.5 h-3.5" />
+          <span class="truncate">{$t('inbox.emailActions.openIdentities')}</span>
+        </button>
+      </div>
     </div>
 
-    {#if supportsDomainChange && currentEmailDetail}
-      <div class="space-y-1">
-        <div class="text-xs text-md-on-surface/60">{$t('addressView.changeDomain')}</div>
-        <div class="flex flex-wrap gap-1.5">
-          {#each multiDomainList as d (d)}
-            {@const active = (currentEmailDetail.address || '').split('@')[1] === d}
-            <button
-              type="button"
-              class="px-2 py-1 rounded-lg text-xs font-semibold border transition-colors {active
-                ? 'bg-md-primary text-md-on-primary border-md-primary'
-                : 'bg-md-surface-container border-md-outline-variant/40 text-md-on-surface hover:bg-md-surface-variant'}"
-              style="direction: ltr;"
-              disabled={active}
-              onclick={() => void changeAddressDomain(d)}
-            >@{d}</button>
-          {/each}
-        </div>
-      </div>
-    {/if}
+
 
     <!-- Recent emails preview -->
     {#if recentEmails.length > 0}
@@ -633,7 +897,7 @@ const recentEmails = $derived(
           {#each recentEmails as mail (mail.id)}
             <button
               type="button"
-              class="w-full text-start px-3 py-2 hover:bg-md-surface-variant/40 transition-colors"
+              class="w-full text-start px-3 py-2 hover:bg-md-surface-variant/40 active:bg-md-surface-variant/60 transition-colors"
               onclick={() => onOpenMessageDetail([mail])}
             >
               <div class="flex items-center justify-between gap-2">
@@ -651,18 +915,39 @@ const recentEmails = $derived(
           {/each}
         </div>
       </div>
+    {:else if !loading}
+      <div class="space-y-1.5 pt-1">
+        <div class="text-xs font-semibold text-md-on-surface/70">{$t('addressView.recentEmails')}</div>
+        <div class="rounded-xl border border-dashed border-md-outline-variant/40 bg-md-surface-container-low/40 px-4 py-5 flex flex-col items-center gap-2 text-center">
+          <Icon name="inbox" class="w-6 h-6 text-md-on-surface/25" />
+          <p class="text-xs text-md-on-surface/50">{$t('address.noMailYet')}</p>
+          <button
+            type="button"
+            class="inline-flex items-center gap-1 text-xs font-semibold text-md-primary hover:text-md-primary/80 transition-colors border-0 bg-transparent"
+            onclick={(e) => {
+              e.stopPropagation();
+              onRefreshMessages();
+            }}
+          >
+            <Icon name="refresh" class="w-3 h-3" />
+            {$t('addressView.checkForMail')}
+          </button>
+        </div>
+      </div>
     {/if}
 
     <!-- View Mailbox button -->
     <div class="pt-2">
-      <button
-        class="w-full flex items-center justify-center gap-2 py-2 rounded-xl bg-md-primary/10 hover:bg-md-primary/20 text-md-primary text-sm font-medium transition-colors"
+      <Btn
+        variant="tonal"
+        size="md"
+        class="w-full"
         onclick={onNavigateToMailbox}
         aria-label={$t('addressView.viewInMailbox')}
       >
         <Icon name="mail" class="w-4 h-4" />
         {$t('addressView.viewInMailbox')}
-      </button>
+      </Btn>
     </div>
 
   </div>
@@ -670,10 +955,10 @@ const recentEmails = $derived(
 
   <!-- Bottom toolbar (same placement language as MessageDetail / Activity) -->
   <div
-    class="absolute inset-x-0 z-30 flex items-center justify-center px-2 pointer-events-none"
+    class="absolute inset-x-0 {PORTAL_Z_CLASS.chrome} flex items-center justify-center px-2 pointer-events-none"
     style="bottom: calc(var(--bottom-safe-area, 0px) + 4px);"
   >
-    <div bind:this={detailToolbarEl} class="{DETAIL_TOOLBAR_STRIP}">
+    <div bind:this={detailToolbarEl} use:responsiveButtonLayout data-action-tier="XS" class="{DETAIL_TOOLBAR_STRIP}">
       <button
         type="button"
         class="{toolbarBtn} {mailboxReadState.canMarkAllRead ? DETAIL_TOOLBAR_TONE_NEUTRAL : 'text-md-on-surface/30 cursor-not-allowed'}"
@@ -687,7 +972,7 @@ const recentEmails = $derived(
           onMarkAllRead();
         }}
       >
-        <Icon name="checkCircle" class="w-4 h-4 shrink-0" />
+        <Icon name="mark_email_read" class="w-4 h-4 shrink-0" />
         {#if showToolbarLabels}<span>{$t('addressView.markAllReadShort')}</span>{/if}
       </button>
       <button
@@ -703,10 +988,9 @@ const recentEmails = $derived(
           onMarkAllUnread();
         }}
       >
-        <Icon name="mail" class="w-4 h-4 shrink-0" />
+        <Icon name="mark_email_unread" class="w-4 h-4 shrink-0" />
         {#if showToolbarLabels}<span>{$t('addressView.markAllUnreadShort')}</span>{/if}
       </button>
-      <span class="w-px h-5 bg-md-outline-variant/40 mx-0.5 shrink-0"></span>
       {#if currentEmailDetail}
         <button
           type="button"
@@ -716,12 +1000,12 @@ const recentEmails = $derived(
           onclick={(e) => {
             e.stopPropagation();
             if (!currentEmailDetail) return;
-            if (isArchivedDetail) onUnarchiveAccount(currentEmailDetail);
-            else onArchiveAccount(currentEmailDetail);
+            if (isArchivedDetail) onUnarchiveAddress(currentEmailDetail);
+            else onArchiveAddress(currentEmailDetail);
           }}
         >
-          <Icon name="archive" class="w-4 h-4 shrink-0" />
-          {#if showToolbarLabels}<span>{isArchivedDetail ? $t('common.unarchive') : $t('inbox.emailActions.archive')}</span>{/if}
+          <Icon name={isArchivedDetail ? 'unarchive' : 'archive'} class="w-4 h-4 shrink-0" />
+          {#if showToolbarLabels}<span>{isArchivedDetail ? $t('common.unarchive') : $t('common.archive')}</span>{/if}
         </button>
         <button
           type="button"
@@ -730,14 +1014,13 @@ const recentEmails = $derived(
           aria-label={$t('addressView.deleteMailbox')}
           onclick={(e) => {
             e.stopPropagation();
-            if (currentEmailDetail) onRemoveAccount(currentEmailDetail.address);
+            if (currentEmailDetail) onRemoveAddress(currentEmailDetail.address);
           }}
         >
-          <Icon name="trash" class="w-4 h-4 shrink-0" />
-          {#if showToolbarLabels}<span>{$t('inbox.emailActions.delete')}</span>{/if}
+          <Icon name="delete" class="w-4 h-4 shrink-0" />
+          {#if showToolbarLabels}<span>{$t('common.delete')}</span>{/if}
         </button>
       {/if}
-      <span class="w-px h-5 bg-md-outline-variant/40 mx-0.5 shrink-0"></span>
       <button
         type="button"
         class="{toolbarBtn} {DETAIL_TOOLBAR_TONE_NEUTRAL} disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-md-on-surface-variant"
@@ -757,19 +1040,8 @@ const recentEmails = $derived(
         onclick={(e) => { e.stopPropagation(); onExportEmail(); }}
       >
         <Icon name="download" class="w-4 h-4 shrink-0" />
-        {#if showToolbarLabels}<span>{$t('inbox.emailActions.downloadShort')}</span>{/if}
+        {#if showToolbarLabels}<span>{$t('inbox.emailActions.download')}</span>{/if}
       </button>
-      {#if supportsAutoRenew && currentEmailDetail?.expiresAt}
-        <span class="w-px h-5 bg-md-outline-variant/40 mx-0.5 shrink-0"></span>
-        <div class="shrink-0 flex items-center px-1">
-          <AutoRenewToggle
-            autoRenew={currentEmailDetail.autoExtend || false}
-            onToggle={() => {
-              if (currentEmailDetail) onToggleAutoExtend(currentEmailDetail);
-            }}
-          />
-        </div>
-      {/if}
     </div>
   </div>
 </div>

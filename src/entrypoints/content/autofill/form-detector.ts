@@ -1,11 +1,16 @@
 /**
- * Signup form detection — light DOM + open shadow roots (closed shadows remain opaque).
+ * Signup form detection - light DOM + open shadow roots (closed shadows remain opaque).
  * Scores candidate forms so SPA re-renders pick the best signup form.
  * Also pierces same-origin iframes via collectFormsDeep.
  */
 
 import { collectFormsDeep, collectInputsDeep } from '@/features/intelligence/dom-pierce.js';
-import { safeId, safeName, safePlaceholder } from '@/utils/dom-safe.js';
+import {
+  safeAccessibleName,
+  safeId,
+  safeName,
+  safePlaceholder,
+} from '@/utils/security/dom-safe.js';
 
 export type FormPageType = 'signup' | 'login' | 'unknown';
 
@@ -75,10 +80,10 @@ function isEmailish(input: HTMLInputElement): boolean {
   const id = safeId(input).toLowerCase();
   const ph = safePlaceholder(input).toLowerCase();
   const ac = (input.getAttribute('autocomplete') || '').toLowerCase();
-  const aria = (input.getAttribute('aria-label') || '').toLowerCase();
+  const aria = safeAccessibleName(input).toLowerCase();
   const blob = `${name} ${id} ${ph} ${ac} ${aria}`;
 
-  // Demote "confirm email" / "repeat email" / "verify email" fields — these are
+  // Demote "confirm email" / "repeat email" / "verify email" fields - these are
   // secondary confirmation inputs, not the primary email field to autofill.
   const CONFIRM_EMAIL_RE =
     /\b(confirm|repeat|retype|verify|re-?enter|re-?type)\b.*\bemail\b|\bemail\b.*\b(confirm|repeat|retype|verify|re-?enter|re-?type)\b/i;
@@ -110,18 +115,67 @@ function isPasswordish(input: HTMLInputElement): boolean {
   const name = safeName(input).toLowerCase();
   const id = safeId(input).toLowerCase();
   const ac = (input.getAttribute('autocomplete') || '').toLowerCase();
+  const a11y = safeAccessibleName(input).toLowerCase();
   return (
     input.type === 'password' ||
     ac === 'new-password' ||
     ac === 'current-password' ||
     name.includes('password') ||
-    id.includes('password')
+    id.includes('password') ||
+    a11y.includes('password')
+  );
+}
+
+/** A field in a hidden dialog is not an available autofill destination. */
+function isAvailableInput(input: HTMLInputElement): boolean {
+  if (input.disabled || input.readOnly || input.type === 'hidden' || input.type === 'search')
+    return false;
+  if (input.getAttribute('role') === 'searchbox' || input.closest('[role="search"]')) return false;
+  try {
+    let ancestor: Element | null = input;
+    const view = input.ownerDocument.defaultView;
+    if (!view) return false;
+    while (ancestor) {
+      const style = view.getComputedStyle(ancestor);
+      if (
+        ancestor.hasAttribute('hidden') ||
+        ancestor.hasAttribute('inert') ||
+        style.display === 'none' ||
+        style.visibility === 'hidden' ||
+        style.visibility === 'collapse' ||
+        style.opacity === '0'
+      )
+        return false;
+      const root = ancestor.getRootNode();
+      ancestor = ancestor.parentElement || (root instanceof ShadowRoot ? root.host : null);
+    }
+    const rect = input.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  } catch {
+    return false;
+  }
+}
+
+function availableInputs(root: HTMLElement): HTMLInputElement[] {
+  return Array.from(root.querySelectorAll<HTMLInputElement>('input')).filter(isAvailableInput);
+}
+
+function isProfileInput(input: HTMLInputElement): boolean {
+  if (isEmailish(input) || isPasswordish(input) || input.type === 'tel') return true;
+  const hints = `${safeName(input)} ${safeId(input)} ${safePlaceholder(input)} ${safeAccessibleName(input)} ${input.autocomplete}`;
+  return /\b(username|first.?name|last.?name|full.?name|given-name|family-name|one-time-code|otp|phone|mobile|address|street|postal|zip|birth|dob)\b/i.test(
+    hints
   );
 }
 
 function collectForms(root: Document | ShadowRoot | Element): HTMLFormElement[] {
   if (root instanceof Document) {
-    return collectFormsDeep(root);
+    // With allFrames enabled the content script runs in every frame, so only
+    // forms of the CURRENT document are handled here - iframe forms are
+    // injected by the iframe's own instance (correctly positioned). Filtering
+    // here prevents the top frame from picking up iframe forms and placing
+    // buttons at wrong (iframe-relative) coordinates.
+    return collectFormsDeep(root).filter((form) => form.ownerDocument === root);
   }
   const out: HTMLFormElement[] = [];
   try {
@@ -142,7 +196,7 @@ function collectForms(root: Document | ShadowRoot | Element): HTMLFormElement[] 
   return out;
 }
 
-/** Text from headings / labels only — exclude buttons/submits (they often say "Create account"). */
+/** Text from headings / labels only - exclude buttons/submits (they often say "Create account"). */
 function headingAndLabelText(form: HTMLFormElement): string {
   const parts: string[] = [];
   try {
@@ -183,6 +237,10 @@ function headingAndLabelText(form: HTMLFormElement): string {
 }
 
 function scoreForm(form: HTMLFormElement): number {
+  const visible = availableInputs(form);
+  // Marketing headings and submit buttons cannot turn a search/contact shell
+  // with no available profile fields into a signup form.
+  if (!visible.some(isProfileInput)) return 0;
   let score = 0;
   // Prefer heading/label text so submit buttons ("Create account") do not fake signup signals alone
   const headingText = headingAndLabelText(form);
@@ -224,25 +282,8 @@ function scoreForm(form: HTMLFormElement): number {
   if (hasLoginHint && !hasSignupHint) score -= 45;
   // Require email+password OR explicit signup heading for Autofill All threshold (~55)
   if (!hasSignupHint && headingText && !signupHints.some((h) => headingText.includes(h))) {
-    // no extra penalty — field mix still scores below
+    // no extra penalty - field mix still scores below
   }
-
-  const inputs = Array.from(form.querySelectorAll('input')) as HTMLInputElement[];
-  const visible = inputs.filter((i) => {
-    if (i.type === 'hidden' || i.type === 'search' || i.disabled || i.readOnly) return false;
-    // Also exclude searchbox role
-    if (i.getAttribute('role') === 'searchbox') return false;
-    try {
-      const style = window.getComputedStyle(i);
-      if (style.opacity === '0' || style.visibility === 'hidden' || style.display === 'none')
-        return false;
-      const r = i.getBoundingClientRect();
-      return r.width > 0 && r.height > 0;
-    } catch {
-      /* ignore */
-      return false;
-    }
-  });
 
   const hasEmail = visible.some(isEmailish);
   const hasPassword = visible.some(isPasswordish);
@@ -277,10 +318,10 @@ function scoreForm(form: HTMLFormElement): number {
   if (hasAddress) score += 25;
   if (hasCountrySelect) score += 15;
   if (visible.length >= 8) score += 20;
-  // Login form is usually 2–3 fields
+  // Login form is usually 2-3 fields
   if (visible.length <= 3 && hasPassword && !hasConfirmPassword && !hasSignupHint) score -= 20;
 
-  // Progressive multi-step (email/phone only + continue) — Canva-style, any site
+  // Progressive multi-step (email/phone only + continue) - Canva-style, any site
   const hasContinue =
     !!form.querySelector('button, input[type="submit"], [role="button"]') &&
     /continue|next|sign\s*up|log\s*in|sign\s*in|verify|submit|get\s+started|join|登録|登录|登錄|다음|ถัดไป|متابعة|suivant|weiter|siguiente/i.test(
@@ -307,8 +348,8 @@ function scoreForm(form: HTMLFormElement): number {
  * Returns a container element to use as the fill root (not always HTMLFormElement).
  */
 export function findProgressiveAuthContainer(): HTMLElement | null {
-  // Step fields: email/phone, name, OTP — multi-step SPA auth without <form>
-  const allInputs = collectInputsDeep(document);
+  // Step fields: email/phone, name, OTP - multi-step SPA auth without <form>
+  const allInputs = collectInputsDeep(document).filter((el) => el.ownerDocument === document);
   const stepInputs = allInputs.filter((el) => {
     if (el.tagName !== 'INPUT') return false;
     const type = el.getAttribute('type');
@@ -316,7 +357,7 @@ export function findProgressiveAuthContainer(): HTMLElement | null {
     const name = safeName(el).toLowerCase();
     const id = safeId(el).toLowerCase();
     const placeholder = safePlaceholder(el).toLowerCase();
-    const ariaLabel = (el.getAttribute('aria-label') || '').toLowerCase();
+    const a11y = safeAccessibleName(el).toLowerCase();
 
     const isEmailLike =
       type === 'email' ||
@@ -324,41 +365,38 @@ export function findProgressiveAuthContainer(): HTMLElement | null {
       name.includes('email') ||
       id.includes('email') ||
       placeholder.includes('email') ||
-      ariaLabel.includes('email');
+      a11y.includes('email');
     const isPhoneLike =
       type === 'tel' ||
       autocomplete === 'tel' ||
       placeholder.includes('phone') ||
       placeholder.includes('mobile') ||
-      ariaLabel.includes('phone') ||
-      ariaLabel.includes('mobile');
+      a11y.includes('phone') ||
+      a11y.includes('mobile');
     const isNameLike =
       autocomplete === 'name' ||
       autocomplete === 'given-name' ||
       (name.includes('first') && name.includes('name')) ||
       placeholder.includes('first name') ||
-      placeholder.includes('full name');
+      placeholder.includes('full name') ||
+      a11y.includes('first name') ||
+      a11y.includes('full name') ||
+      a11y.includes('your name');
     const isOtpLike =
       name.includes('otp') ||
       autocomplete === 'one-time-code' ||
-      (el.getAttribute('inputmode') === 'numeric' && el.getAttribute('maxlength') === '1');
+      (el.getAttribute('inputmode') === 'numeric' && el.getAttribute('maxlength') === '1') ||
+      a11y.includes('code');
+    const isPasswordLike =
+      type === 'password' ||
+      autocomplete === 'new-password' ||
+      autocomplete === 'current-password' ||
+      a11y.includes('password');
 
-    return isEmailLike || isPhoneLike || isNameLike || isOtpLike;
+    return isEmailLike || isPhoneLike || isNameLike || isOtpLike || isPasswordLike;
   }) as HTMLInputElement[];
 
-  const filteredStepInputs = stepInputs.filter((el) => {
-    if (el.disabled || el.type === 'hidden' || el.type === 'password') return false;
-    try {
-      const style = window.getComputedStyle(el);
-      if (style.opacity === '0' || style.visibility === 'hidden' || style.display === 'none')
-        return false;
-      const r = el.getBoundingClientRect();
-      return r.width > 0 && r.height > 0;
-    } catch {
-      /* ignore */
-      return false;
-    }
-  });
+  const filteredStepInputs = stepInputs.filter(isAvailableInput);
 
   let best: HTMLElement | null = null;
   let bestScore = 0;
@@ -372,6 +410,16 @@ export function findProgressiveAuthContainer(): HTMLElement | null {
         continue;
       }
       const text = (parent.textContent || '').toLowerCase().slice(0, 2500);
+      // A password field only seeds a progressive step when the container
+      // clearly asks the user to CREATE a new password (signup/reset), not to
+      // ENTER one (login). Otherwise a 2-step login's password screen would
+      // get an Autofill All pill that overwrites the real password.
+      const isPasswordSeed = field.type === 'password';
+      const passwordCreation =
+        /(create|set|choose|pick|make)\s+(a\s+|an\s+|your\s+|new\s+)?(password|passcode)|new\s+password/i.test(
+          text
+        );
+      const signupContext = /sign\s*up|register|create\s+account|join|get\s+started/i.test(text);
       const hasContinue = Array.from(
         parent.querySelectorAll('button, [role="button"], input[type="submit"], a[class*="btn" i]')
       ).some((b) => {
@@ -384,8 +432,8 @@ export function findProgressiveAuthContainer(): HTMLElement | null {
         /sign\s*up|log\s*in|sign\s*in|register|email|phone|continue|welcome|create|account|verify|code|otp|one.?time|name|join|get\s+started/i.test(
           text
         ) || hasContinue;
-      const inputCount = parent.querySelectorAll(
-        'input:not([type="hidden"]):not([type="submit"]):not([type="button"])'
+      const inputCount = availableInputs(parent).filter(
+        (input) => input.type !== 'submit' && input.type !== 'button'
       ).length;
       // Reasonable dialog/panel size (not whole page)
       let areaOk = true;
@@ -395,7 +443,14 @@ export function findProgressiveAuthContainer(): HTMLElement | null {
       } catch {
         /* ignore */
       }
-      if (hasContinue && looksAuth && areaOk && inputCount >= 1 && inputCount <= 20) {
+      if (
+        (!isPasswordSeed || passwordCreation || signupContext) &&
+        hasContinue &&
+        looksAuth &&
+        areaOk &&
+        inputCount >= 1 &&
+        inputCount <= 20
+      ) {
         let score = 40 + Math.min(inputCount * 5, 30);
         if (/sign\s*up|register|create.?account|join|get\s+started/i.test(text)) score += 20;
         if (/email|phone|mobile/i.test(text)) score += 10;
@@ -416,7 +471,7 @@ export function findProgressiveAuthContainer(): HTMLElement | null {
 /**
  * Also consider loose field groups without a <form> (common in React SPAs).
  * We wrap conceptually by returning the nearest form ancestor of the best email field,
- * or null if no form — caller uses document-scoped fill.
+ * or null if no form - caller uses document-scoped fill.
  */
 
 /** Public score for Autofill All gating */
@@ -425,7 +480,7 @@ export function scoreSignupForm(form: HTMLFormElement | HTMLElement): number {
   // Progressive container: estimate like a light form
   try {
     const fake = form as unknown as HTMLFormElement;
-    // scoreForm uses form.querySelectorAll — works on HTMLElement too
+    // scoreForm uses form.querySelectorAll - works on HTMLElement too
     return scoreForm(fake);
   } catch {
     /* ignore */
@@ -475,17 +530,7 @@ export function classifyFormIntent(
   const signupHit = signupHints.some((h) => hay.includes(h));
   const loginHit = loginHints.some((h) => hay.includes(h));
 
-  const inputs = Array.from(form.querySelectorAll('input')) as HTMLInputElement[];
-  const visible = inputs.filter((i) => {
-    if (i.type === 'hidden' || i.disabled) return false;
-    try {
-      const r = i.getBoundingClientRect();
-      return r.width > 0 && r.height > 0;
-    } catch {
-      /* ignore */
-      return true;
-    }
-  });
+  const visible = availableInputs(form);
   const passwords = visible.filter(isPasswordish);
   const acList = visible.map((i) => (i.getAttribute('autocomplete') || '').toLowerCase());
   const hasNewPw = acList.includes('new-password') || passwords.length >= 2;
@@ -495,18 +540,19 @@ export function classifyFormIntent(
     return /first.?name|last.?name|full.?name|given-name|family-name/.test(m);
   });
 
-  // Strong signup signals
+  // Strong signin signals first: login wording or a current-password field
+  // wins over password-count heuristics (a "Sign in" page with a confirm
+  // field, or a current-password change form, is not a signup).
+  // NB: loginHit alone does NOT win when the page also has signup wording
+  // ("Already have an account? Log in" links live inside signup forms).
+  if ((loginHit && !signupHit) || (hasCurrentPw && !hasNewPw && passwords.length === 1)) {
+    return 'signin';
+  }
+  // Strong signup signals (confirm password beats generic login wording)
   if (hasNewPw || passwords.length >= 2 || (signupHit && !loginHit) || (signupHit && hasName)) {
     return 'signup';
   }
-  // Strong signin signals
-  if (
-    (loginHit && !signupHit) ||
-    (hasCurrentPw && !hasNewPw && passwords.length === 1) ||
-    (loginHit && passwords.length === 1 && !hasName)
-  ) {
-    return 'signin';
-  }
+  if (loginHit && passwords.length === 1 && !hasName) return 'signin';
   if (signupHit && loginHit) return 'mixed';
   if (score >= 55) return 'signup';
   if (passwords.length === 1 && visible.some(isEmailish) && !hasName) return 'signin';
@@ -558,11 +604,11 @@ export async function findSignupForm(minScore = 55): Promise<HTMLFormElement | H
   // Fallbacks only when minScore is low (field icons)
   if (minScore <= 35) {
     for (const form of forms) {
-      const inputs = Array.from(form.querySelectorAll('input')) as HTMLInputElement[];
+      const inputs = availableInputs(form);
       if (inputs.some(isEmailish) && inputs.some(isPasswordish)) return form;
     }
     for (const form of forms) {
-      const inputs = Array.from(form.querySelectorAll('input')) as HTMLInputElement[];
+      const inputs = availableInputs(form);
       if (inputs.some(isEmailish)) return form;
     }
     if (progressive) return progressive;

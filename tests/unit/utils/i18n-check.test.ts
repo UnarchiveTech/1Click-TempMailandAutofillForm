@@ -64,7 +64,7 @@ describe('Translation completeness', () => {
   });
 
   test('all expected locale files exist', () => {
-    const expected = ['ar', 'de', 'es', 'fr', 'ja', 'zh'];
+    const expected = ['ar', 'de', 'es', 'fr', 'ja', 'th', 'zh'];
     for (const lang of expected) {
       const exists = allFiles.includes(`${lang}.json`);
       expect(exists, `${lang}.json should exist in src/locales/`).toBe(true);

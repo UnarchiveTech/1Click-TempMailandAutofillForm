@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { groupEmailsByThread, normalizeSubject } from '@/utils/email-threads';
+import { groupEmailsByThread, normalizeSubject } from '@/utils/email/email-threads';
 import type { Email } from '@/utils/types';
 
 // ── normalizeSubject ────────────────────────────────────────────────────────

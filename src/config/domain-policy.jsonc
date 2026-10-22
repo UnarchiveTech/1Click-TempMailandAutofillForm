@@ -1,5 +1,5 @@
-// Global policy for custom provider instance URLs (AGENTS.md §2 — JSON-driven).
+// Global policy for custom provider instance URLs (AGENTS.md §2 - JSON-driven).
 // Suffix patterns (with leading dot) that are rejected as custom instance
 // hostnames. `.exe`/`.bat`/`.sh` are file-extension suffixes that can appear at
-// the end of a hostname in pathological URLs — kept for defense in depth.
+// the end of a hostname in pathological URLs - kept for defense in depth.
 [".tk", ".ml", ".ga", ".cf", ".gq", ".xyz", ".top", ".zip", ".mov", ".exe", ".bat", ".sh"]

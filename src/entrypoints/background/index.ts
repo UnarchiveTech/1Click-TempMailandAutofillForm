@@ -1,101 +1,237 @@
 import { browser } from 'wxt/browser';
 import { defineBackground } from 'wxt/utils/define-background';
+import {
+  isWebDAVEnabled,
+  loadWebDAVSettings,
+  runAutoWebDAVBackup,
+} from '@/features/backup/webdav-sync.js';
+import { openSignupVerificationLink } from '@/features/intelligence/signup-attempts.js';
+import { initializeSmartAutofillSettings } from '@/features/intelligence/smart-settings.js';
+import {
+  isReloadablePageUrl,
+  normalizeReloadRequiredTabIds,
+  RELOAD_REQUIRED_TAB_IDS_KEY,
+  updateReloadRequiredTabIds,
+} from '@/features/navigation/reload-required-tabs.js';
 import { SETTINGS_SYNC_KEYS } from '@/features/settings/use-extension-storage-sync.js';
-import { processClipboardPurgeQueue } from '@/utils/clipboard.js';
+import type { View } from '@/features/types/view-types.js';
+import { isLive } from '@/utils/address/address-status.js';
+import { clearWebmcpOnce } from '@/utils/browser/webmcp-access.js';
 import {
-  DEBUG,
-  DEFAULT_PRIMARY_COLOR,
-  NEAR_EXPIRY_BADGE_COLOR,
-  NEAR_EXPIRY_BADGE_WINDOW_MS,
-} from '@/utils/constants.js';
-import { getStoredLocaleAsync, preloadTranslations, tSync } from '@/utils/i18n-utils.js';
-import { initializeDefaultProvider } from '@/utils/instance-manager.js';
-import { initLogger, log, logDebug, logError, logInfo } from '@/utils/logger.js';
-import { withLock } from '@/utils/mutex.js';
+  CLIPBOARD_PURGE_ALARM,
+  copyToClipboardFromBackground,
+  processClipboardPurgeQueue,
+  scheduleNextClipboardPurgeAlarm,
+} from '@/utils/clipboard/clipboard.js';
+import { CONSTANTS, DEFAULT_PRIMARY_COLOR } from '@/utils/constants.js';
+import { isBlockedByList } from '@/utils/content/autofill-blocklist.js';
+import { getStoredLocaleAsync, preloadTranslations, tSync } from '@/utils/i18n/i18n-background.js';
+import { initLogger, log, logDebug, logError, logInfo, logWarn } from '@/utils/logger.js';
+import { LOCKS, PERSISTENT_LOCK_TTL_MS, withLock } from '@/utils/mutex.js';
+import { createBrowserNotification } from '@/utils/notifications/notification-permission.js';
+import { perfEnd, perfMark, perfStart } from '@/utils/perf/perf-marks.js';
+import { initializeDefaultProvider } from '@/utils/provider/instance-manager.js';
+import { decryptSecret } from '@/utils/security/crypto.js';
 import {
-  addToAutofillBlocklist,
+  createEmailReadChecker,
   getAutofillBlocklist,
+  getEmailStorageMetadata,
   getSelectedProvider,
-  removeFromAutofillBlocklist,
-} from '@/utils/storage-keys.js';
-import type { Account } from '@/utils/types.js';
-import { lockVault } from '@/utils/vault-lock.js';
-import { initializeAnalytics } from './inbox/analytics.js';
+  getStoredEmailsForAddress,
+  getStoredEmailsMap,
+  toggleAutofillBlocklist,
+} from '@/utils/storage/storage-keys.js';
+import { writeWithRetry } from '@/utils/storage/storage-write.js';
+import {
+  getVaultAutoLockTimeoutMs,
+  getVaultConfig,
+  lockVault,
+} from '@/utils/storage/vault-lock.js';
+import type { Address, AddressStatus, Identity } from '@/utils/types.js';
 import {
   checkNewEmails,
-  createInbox,
+  createAddress,
   ensureBadgeCountdownAlarm,
-  setupInboxExpiryCheck,
+  setupAddressExpiryCheck,
   setupPeriodicEmailCheck,
-} from './inbox/inbox-manager.js';
-import { type OtpDetectionMode, setOtpDetectionMode } from './parsing/otp.js';
+} from './address/address-manager.js';
+import { initializeAnalytics } from './address/analytics.js';
+import { handleCopyLatestOtpCommand } from './address/latest-otp-shortcut.js';
+import { setupOnboardingPreparation } from './address/onboarding-preparation.js';
+import {
+  type OtpDetectionProvider,
+  setAiConfig,
+  setOtpDetectionProvider,
+} from './parsing/ai-detection.js';
+import { setMagicLinkDetectionEnabled } from './parsing/magic-link.js';
+import {
+  type OtpDetectionMode,
+  setOtpDetectionEnabled,
+  setOtpDetectionMode,
+} from './parsing/otp.js';
 import { registerMessageHandler } from './runtime/message-handler.js';
-import { autofillActiveTab, ensureTabAutofillReady } from './tab-autofill.js';
+import {
+  autofillActiveTab,
+  ensureTabAutofillReady,
+  setReloadRequiredBadge,
+} from './tab-autofill.js';
+
+const RELOAD_REQUIRED_TABS_LOCK = 'content_reload_required_tabs_lock';
+let reloadRequiredTabIdsCache: Set<number> | null = null;
+
+async function markOpenTabsForReload(): Promise<void> {
+  const tabs = await browser.tabs.query({});
+  const tabIds = tabs
+    .filter((tab) => tab.id !== undefined && isReloadablePageUrl(tab.url))
+    .map((tab) => tab.id as number);
+
+  await withLock(RELOAD_REQUIRED_TABS_LOCK, async () => {
+    await browser.storage.session.set({ [RELOAD_REQUIRED_TAB_IDS_KEY]: tabIds });
+    reloadRequiredTabIdsCache = new Set(tabIds);
+  });
+
+  await Promise.all(tabIds.map((tabId) => setReloadRequiredBadge(tabId)));
+}
+
+async function clearTabReloadRequirement(tabId: number): Promise<boolean> {
+  if (reloadRequiredTabIdsCache !== null && !reloadRequiredTabIdsCache.has(tabId)) return false;
+  return withLock(RELOAD_REQUIRED_TABS_LOCK, async () => {
+    if (reloadRequiredTabIdsCache === null) {
+      const stored = (await browser.storage.session.get(RELOAD_REQUIRED_TAB_IDS_KEY)) as Record<
+        string,
+        unknown
+      >;
+      reloadRequiredTabIdsCache = new Set(
+        normalizeReloadRequiredTabIds(stored[RELOAD_REQUIRED_TAB_IDS_KEY])
+      );
+    }
+    if (!reloadRequiredTabIdsCache.has(tabId)) return false;
+    reloadRequiredTabIdsCache = new Set(
+      updateReloadRequiredTabIds([...reloadRequiredTabIdsCache], tabId, false)
+    );
+    await browser.storage.session.set({
+      [RELOAD_REQUIRED_TAB_IDS_KEY]: [...reloadRequiredTabIdsCache],
+    });
+    return true;
+  });
+}
 
 async function syncOtpDetectionMode() {
   try {
-    const { otpDetectionMode } = (await browser.storage.local.get(['otpDetectionMode'])) as {
+    const stored = (await browser.storage.local.get([
+      'otpDetectionMode',
+      'otpDetectionEnabled',
+      'magicLinkDetectionEnabled',
+      'otpDetectionProvider',
+      'aiBaseUrl',
+      'aiApiKey',
+      'aiModel',
+    ])) as {
       otpDetectionMode?: OtpDetectionMode;
+      otpDetectionEnabled?: boolean;
+      magicLinkDetectionEnabled?: boolean;
+      otpDetectionProvider?: OtpDetectionProvider;
+      aiBaseUrl?: string;
+      aiApiKey?: string;
+      aiModel?: string;
     };
-    if (otpDetectionMode) setOtpDetectionMode(otpDetectionMode);
-  } catch {
-    /* ignore */
+    if (stored.otpDetectionMode) setOtpDetectionMode(stored.otpDetectionMode);
+    setOtpDetectionEnabled(stored.otpDetectionEnabled !== false);
+    setMagicLinkDetectionEnabled(stored.magicLinkDetectionEnabled !== false);
+    if (stored.otpDetectionProvider === 'algorithm' || stored.otpDetectionProvider === 'ai') {
+      setOtpDetectionProvider(stored.otpDetectionProvider);
+    }
+    // aiApiKey is persisted `_enc_:` ciphertext - decrypt for the engine.
+    // When the vault is locked the key resolves to '' and AI mode gracefully
+    // falls back to the local algorithm until the vault is unlocked.
+    const apiKey = stored.aiApiKey ? await decryptSecret(stored.aiApiKey) : '';
+    setAiConfig(stored.aiBaseUrl || '', apiKey, stored.aiModel || '');
+  } catch (e) {
+    // Corrupt otpDetectionMode / AI config silently degrades the whole
+    // detection engine - surface it in error logs, not just debug.
+    logError('Failed to load AI/detection settings', e);
   }
 }
 
-/** Count unread emails across all inboxes and set the badge. */
+/** Count unread emails across all addresses and set the badge. */
 async function setupUnreadBadge() {
   async function updateBadge() {
     const {
-      storedEmails = {},
       readEmails = {},
       customColor,
-      inboxes = [],
-      activeInboxId,
+      addresses = [],
+      activeAddressId,
     } = (await browser.storage.local.get([
-      'storedEmails',
       'readEmails',
       'customColor',
-      'inboxes',
-      'activeInboxId',
+      'addresses',
+      'activeAddressId',
     ])) as {
-      storedEmails?: Record<string, { id: string }[]>;
       readEmails?: Record<string, boolean>;
       customColor?: string;
-      inboxes?: Array<{ id?: string; expiresAt?: number; autoExtend?: boolean; status?: string }>;
-      activeInboxId?: string;
+      addresses?: Array<{
+        id?: string;
+        expiresAt?: number;
+        autoExtend?: boolean;
+        accountStatus?: AddressStatus;
+      }>;
+      activeAddressId?: string;
     };
-
     // Near-expiry override: when the active inbox expires soon and auto-renew
     // is disabled, show a live countdown ("45m") in amber instead of the unread
     // count, so the "why did my inbox die?" loop is answered at a glance.
     const now = Date.now();
     const active =
-      inboxes.find((i) => i.id === activeInboxId) ||
-      inboxes.find((i) => i.status === 'active') ||
-      inboxes[0];
+      addresses.find((i) => i.id === activeAddressId) ||
+      addresses.find((i) => isLive({ accountStatus: i.accountStatus, expiresAt: i.expiresAt })) ||
+      addresses[0];
     const expiresAt = active?.expiresAt;
     if (
       expiresAt &&
       expiresAt > now &&
       active?.autoExtend !== true &&
-      expiresAt - now <= NEAR_EXPIRY_BADGE_WINDOW_MS
+      expiresAt - now <= CONSTANTS.NEAR_EXPIRY_BADGE_WINDOW_MS
     ) {
       const minutes = Math.max(1, Math.ceil((expiresAt - now) / 60000));
-      await browser.action.setBadgeBackgroundColor({ color: NEAR_EXPIRY_BADGE_COLOR });
-      await browser.action.setBadgeText({ text: `${minutes}m` });
+      await browser.action.setBadgeBackgroundColor({ color: CONSTANTS.NEAR_EXPIRY_BADGE_COLOR });
+      await browser.action.setBadgeText({ text: tSync('time.durationM', { m: minutes }) });
       return;
     }
 
+    // Fast path: compact per-address metadata (1 key) instead of sweeping every
+    // inbox bag (N keys) on every readEmails change. deriveEmailStorageMetadata
+    // uses mailbox-scoped read keys. Fall back to bags for older cached counts
+    // that may still have interpreted bare IDs as read in unrelated inboxes.
+    // Shared bag sweep: counts unread across every inbox bag using the same
+    // `${original_inbox || address}_${id}` + `id` keying. Used both when metadata
+    // is empty AND when the metadata read itself throws, so the two paths can't
+    // drift apart.
+    async function countUnreadFromBags(): Promise<number> {
+      const storedEmails = await getStoredEmailsMap();
+      const read = createEmailReadChecker(readEmails);
+      let count = 0;
+      for (const [addr, msgs] of Object.entries(storedEmails)) {
+        if (!Array.isArray(msgs)) continue;
+        count += msgs.filter((m) => {
+          if (!m || typeof m !== 'object' || !m.id) return false;
+          const mExt = m as { id: string; original_inbox?: string };
+          return !read(m.id, mExt.original_inbox || addr);
+        }).length;
+      }
+      return count;
+    }
+
     let unread = 0;
-    for (const [addr, msgs] of Object.entries(storedEmails)) {
-      if (!Array.isArray(msgs)) continue;
-      unread += msgs.filter((m) => {
-        if (!m || typeof m !== 'object' || !m.id) return false;
-        const mExt = m as { id: string; original_inbox?: string };
-        const key = `${mExt.original_inbox || addr}_${m.id}`;
-        return !readEmails[key] && !readEmails[m.id];
-      }).length;
+    try {
+      const metadata = await getEmailStorageMetadata();
+      const ids = Object.keys(metadata);
+      if (ids.length > 0 && ids.every((id) => metadata[id]?.readStateVersion === 1)) {
+        for (const id of ids) unread += metadata[id]?.unreadCount ?? 0;
+      } else {
+        unread = await countUnreadFromBags();
+      }
+    } catch {
+      unread = await countUnreadFromBags();
     }
     await browser.action.setBadgeBackgroundColor({ color: customColor || DEFAULT_PRIMARY_COLOR });
     await browser.action.setBadgeText({ text: unread > 0 ? String(unread) : '' });
@@ -104,21 +240,35 @@ async function setupUnreadBadge() {
   // Update on every relevant storage change
   browser.storage.onChanged.addListener((changes) => {
     if (
-      changes.storedEmails ||
       changes.readEmails ||
       changes.customColor ||
-      changes.inboxes ||
-      changes.activeInboxId
+      changes.addresses ||
+      changes.activeAddressId ||
+      Object.keys(changes).some((key) => key.startsWith('storedEmailsByAddress_')) ||
+      Object.keys(changes).some((key) => key.startsWith('archivedEmailsByAddress_'))
     ) {
       updateBadge().catch((e) => logError('updateBadge error', e));
+      // The countdown alarm may need to start (expiry entered the window,
+      // address activated) or stop (renewed, deleted) - re-derive idempotently.
+      void ensureBadgeCountdownAlarm();
     }
   });
 
-  // Keep the countdown fresh while the SW is alive (cheap read of a few keys).
+  // Event-driven countdown: the alarm only exists while the "\{m\}m" badge is
+  // actually showing; each fire re-arms the next minute tick via
+  // ensureBadgeCountdownAlarm and self-terminates when the countdown ends.
   void ensureBadgeCountdownAlarm();
   browser.alarms.onAlarm.addListener((alarm) => {
     if (alarm.name === 'near_expiry_badge') {
-      updateBadge().catch((e) => logError('updateBadge error', e));
+      const t0 = perfStart('bg.updateBadge');
+      updateBadge()
+        .catch((e) => logError('updateBadge error', e))
+        .finally(() => {
+          perfEnd('bg.updateBadge', t0);
+          // Re-arm the next tick (no-op + alarm clear when the countdown is
+          // no longer displaying).
+          void ensureBadgeCountdownAlarm();
+        });
     }
   });
 
@@ -126,34 +276,41 @@ async function setupUnreadBadge() {
   await updateBadge();
 }
 
-async function getActiveInboxAddress(): Promise<string> {
+async function getActiveAddressValue(): Promise<string> {
   try {
-    const res = (await browser.storage.local.get(['activeInboxId', 'inboxes'])) as {
-      activeInboxId?: string;
-      inboxes?: Array<{ id?: string; address?: string; status?: string }>;
+    const res = (await browser.storage.local.get(['activeAddressId', 'addresses'])) as {
+      activeAddressId?: string;
+      addresses?: Array<{
+        id?: string;
+        address?: string;
+        accountStatus?: AddressStatus;
+        expiresAt?: number;
+      }>;
     };
-    const list = res.inboxes || [];
-    const byId = list.find((i) => i.id === res.activeInboxId && i.address);
+    const list = res.addresses || [];
+    const byId = list.find((i) => i.id === res.activeAddressId && i.address);
     if (byId?.address) return byId.address;
-    const active = list.find((i) => i.status === 'active' && i.address);
+    const active = list.find(
+      (i) => i.address && isLive({ accountStatus: i.accountStatus, expiresAt: i.expiresAt })
+    );
     return active?.address || list[0]?.address || '';
-  } catch {
-    /* ignore */
+  } catch (e) {
+    logDebug('getActiveAddressValue failed', e);
     return '';
   }
 }
 
-async function openExtensionView(view: string, extra?: Record<string, unknown>): Promise<void> {
+async function openExtensionView(view: View, extra?: Record<string, unknown>): Promise<void> {
   const payload = { openView: view, openViewAt: Date.now(), ...extra };
   try {
-    await browser.storage.local.set(payload);
-  } catch {
-    /* ignore */
+    await writeWithRetry(payload);
+  } catch (e) {
+    logDebug('openExtensionView: storage.local.set failed', e);
   }
   try {
     await browser.storage.session.set(payload);
-  } catch {
-    /* session may be unavailable */
+  } catch (e) {
+    logDebug('openExtensionView: storage.session.set failed', e);
   }
   // Notify any open popup/sidepanel/app to navigate immediately
   try {
@@ -217,10 +374,11 @@ function setupContextMenu() {
         options as Parameters<typeof browser.contextMenus.create>[0],
         () => {
           // Access runtime.lastError to mark it checked in Chrome engine
-          const _err =
+          void (
             browser.runtime.lastError ||
             (globalThis as unknown as { chrome?: { runtime?: { lastError?: unknown } } }).chrome
-              ?.runtime?.lastError;
+              ?.runtime?.lastError
+          );
         }
       );
     } catch (e) {
@@ -249,9 +407,9 @@ function setupContextMenu() {
     .removeAll()
     .then(async () => {
       await preloadTranslations(await getStoredLocaleAsync());
-      const addr = (await getActiveInboxAddress()) || tSync('contextMenu.noAddressYet');
+      const addr = (await getActiveAddressValue()) || tSync('contextMenu.noAddressYet');
 
-      // —— Extension icon (toolbar) menu ——
+      // -- Extension icon (toolbar) menu --
       // Keep this list short + flat: nested menus sometimes truncate siblings on Chrome.
       // Order: identity → primary actions → open surfaces → secondary.
       createActionMenu('action-active-email', addr, { enabled: false });
@@ -267,14 +425,14 @@ function setupContextMenu() {
       sep('action-sep-3');
       createActionMenu('action-report-issue', tSync('contextMenu.reportIssue'));
       sep('action-sep-4');
-      // Flat address list (no nested parent — Chrome action menus drop siblings when nested)
+      // Flat address list (no nested parent - Chrome action menus drop siblings when nested)
       try {
         await rebuildAddressSubmenu();
       } catch (e) {
         logDebug('rebuildAddressSubmenu failed', e);
       }
 
-      // —— Page context menu ——
+      // -- Page context menu --
       try {
         safeCreateMenu({
           id: 'create-temp-email',
@@ -307,20 +465,20 @@ function setupContextMenu() {
 
   async function refreshActionEmailTitle() {
     try {
-      const addr = (await getActiveInboxAddress()) || tSync('contextMenu.noAddressYet');
+      const addr = (await getActiveAddressValue()) || tSync('contextMenu.noAddressYet');
       await browser.contextMenus.update('action-active-email', { title: addr });
-    } catch {
-      /* menu may not exist yet */
+    } catch (e) {
+      logDebug('refreshActionEmailTitle failed', e);
     }
   }
 
   async function rebuildAddressSubmenu() {
     try {
-      // Flat list under action context (max ~8) — nested parent menus are unreliable on Chrome.
-      const res = (await browser.storage.local.get(['inboxes'])) as {
-        inboxes?: Array<{ id?: string; address?: string; accountStatus?: string }>;
+      // Flat list under action context (max ~8) - nested parent menus are unreliable on Chrome.
+      const res = (await browser.storage.local.get(['addresses'])) as {
+        addresses?: Array<{ id?: string; address?: string; accountStatus?: AddressStatus }>;
       };
-      const list = (res.inboxes || [])
+      const list = (res.addresses || [])
         .filter((i) => i.address && i.accountStatus !== 'deleted')
         .slice(0, 8);
 
@@ -340,8 +498,8 @@ function setupContextMenu() {
         });
         return;
       }
-      list.forEach((inbox, idx) => {
-        const title = inbox.address || inbox.id || 'address';
+      list.forEach((record, idx) => {
+        const title = record.address || record.id || 'address';
         // Truncate long addresses for the action menu
         const short = title.length > 36 ? `${title.slice(0, 33)}…` : title;
         createActionMenu(`action-address-item-${idx}`, short);
@@ -349,11 +507,11 @@ function setupContextMenu() {
       try {
         await browser.storage.session.set({
           actionAddressMenuMap: Object.fromEntries(
-            list.map((inbox, idx) => [`action-address-item-${idx}`, inbox.id || ''])
+            list.map((record, idx) => [`action-address-item-${idx}`, record.id || ''])
           ),
         });
-      } catch {
-        /* session optional */
+      } catch (e) {
+        logDebug('actionAddressMenuMap session set failed', e);
       }
     } catch (e) {
       logDebug('rebuildAddressSubmenu failed', e);
@@ -367,44 +525,65 @@ function setupContextMenu() {
       const url = new URL(tab.url);
       const domain = url.hostname;
       const blocklist = await getAutofillBlocklist();
-      const isBlocked = blocklist.includes(domain);
+      const isBlocked = isBlockedByList(domain, blocklist);
 
       await browser.contextMenus.update('autofill-toggle-blocklist', {
-        title: isBlocked ? `Remove "${domain}" from Autofill Blocklist` : 'Exclude from Autofill',
+        title: isBlocked
+          ? tSync('contextMenu.removeFromAutofillBlocklist', { domain })
+          : tSync('contextMenu.excludeFromAutofill'),
       });
       await refreshActionEmailTitle();
       // Password-manager-style cue: badge when signup form present
-      void ensureTabAutofillReady(tabId).catch(() => {});
-    } catch {
-      // Tab may not have a valid URL (e.g. about:blank)
+      void ensureTabAutofillReady(tabId).catch((error) =>
+        logWarn('Autofill readiness check failed', {
+          tabId,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      );
+    } catch (error) {
+      // Tab may not have a valid URL (e.g. about:blank), but other failures can
+      // prevent the context-menu state from matching the current tab.
+      logWarn('Failed to update context-menu state for tab', {
+        tabId,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 
   browser.tabs.onActivated.addListener((activeInfo) => {
-    updateContextMenuForTab(activeInfo.tabId).catch(() => {});
-    // Side panel follows the active tab. When the active tab leaves the app
-    // page, the app-page conflict is gone — clear the open flag so a later
-    // visit to app.html doesn't show the overlay spuriously.
-    void (async () => {
-      try {
-        const tab = await browser.tabs.get(activeInfo.tabId);
-        const url = tab?.url || '';
-        const onApp = /(chrome|moz)-extension:\/\/[^/]+\/app\.html/i.test(url);
-        if (!onApp) {
-          const { sidePanelOpen } = (await browser.storage.local.get(['sidePanelOpen'])) as {
-            sidePanelOpen?: boolean;
-          };
-          if (sidePanelOpen) await browser.storage.local.set({ sidePanelOpen: false });
-        }
-      } catch {
-        /* ignore */
-      }
-    })();
+    updateContextMenuForTab(activeInfo.tabId).catch((error) =>
+      logWarn('Context-menu refresh on tab activation failed', {
+        tabId: activeInfo.tabId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    );
   });
 
   browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
+    if (changeInfo.status === 'loading' || changeInfo.url) {
+      void clearWebmcpOnce(tabId).catch((error) =>
+        logError('Failed to revoke temporary WebMCP access on navigation', error)
+      );
+    }
+    if (changeInfo.status === 'complete') {
+      void clearTabReloadRequirement(tabId)
+        .then(async (cleared) => {
+          // The stale badge intentionally wins over form/unread state only
+          // until a reload/navigation completes. Re-probe so the per-tab
+          // action title and badge are restored from the current page.
+          if (cleared) await ensureTabAutofillReady(tabId);
+        })
+        .catch((error) =>
+          logError('Failed to clear the content reload requirement after page load', error)
+        );
+    }
     if (changeInfo.status === 'complete' || changeInfo.url) {
-      updateContextMenuForTab(tabId).catch(() => {});
+      updateContextMenuForTab(tabId).catch((error) =>
+        logWarn('Context-menu refresh on tab update failed', {
+          tabId,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      );
     }
     if (changeInfo.url) {
       void withLock('session_credentials_lock', async () => {
@@ -424,38 +603,31 @@ function setupContextMenu() {
     }
   });
 
+  browser.tabs.onRemoved.addListener((tabId) => {
+    void clearWebmcpOnce(tabId).catch((error) =>
+      logError('Failed to revoke temporary WebMCP access for a closed tab', error)
+    );
+    void clearTabReloadRequirement(tabId).catch((error) =>
+      logError('Failed to clear the content reload requirement for a closed tab', error)
+    );
+  });
+
   browser.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local') return;
-    if (changes.activeInboxId || changes.inboxes) {
+    if (changes.activeAddressId || changes.addresses) {
       void refreshActionEmailTitle();
       void rebuildAddressSubmenu();
     }
   });
 
   browser.contextMenus.onClicked.addListener(async (info, tab) => {
-    browser.storage.session.set({ _last_vault_activity: Date.now() }).catch(() => {});
+    await recordVaultActivity().catch((error) =>
+      logError('Failed to record context-menu vault activity', error)
+    );
     const id = String(info.menuItemId);
 
     if (id === 'action-autofill-page' || id === 'page-autofill-form') {
-      const result = await autofillActiveTab();
-      if (!result.ok) {
-        const msg =
-          result.reason === 'no_form'
-            ? 'No signup form found. Refresh the page if you just installed the extension.'
-            : result.reason === 'need_refresh'
-              ? 'Refresh this page so autofill can run, then try again.'
-              : 'Could not autofill this page.';
-        browser.notifications
-          .create(`af_${Date.now()}`, {
-            type: 'basic',
-            iconUrl: 'icons/icon128.png',
-            title: 'Autofill',
-            message: msg,
-          })
-          .catch(() => {
-            /* ignore notification permission or display failure */
-          });
-      }
+      await runAutofillActiveTabAndNotify();
       return;
     }
 
@@ -463,11 +635,11 @@ function setupContextMenu() {
       try {
         const provider = await getSelectedProvider();
         if (!provider) return;
-        const inbox = await createInbox(provider);
+        const record = await createAddress(provider);
         // Select new mailbox + open popup mailbox view on next open
         try {
-          await browser.storage.local.set({
-            activeInboxId: inbox.id,
+          await writeWithRetry({
+            activeAddressId: record.id,
             openView: 'mailbox',
             openViewAt: Date.now(),
           });
@@ -475,62 +647,41 @@ function setupContextMenu() {
             openView: 'mailbox',
             openViewAt: Date.now(),
           });
-        } catch {
-          /* ignore storage write error */
+        } catch (error) {
+          logError('Failed to persist context-menu mailbox selection', error);
         }
         if (tab?.id !== undefined) {
-          await browser.scripting
-            .executeScript({
-              target: { tabId: tab.id },
-              func: (text: string) => {
-                navigator.clipboard.writeText(text).catch(() => {});
-                // Schedule auto-purge in the page context (best-effort; page-scoped)
-                setTimeout(() => {
-                  navigator.clipboard.writeText('').catch(() => {});
-                }, 60000);
-              },
-              args: [inbox.address],
-            })
-            .catch(() => {
-              /* ignore executeScript failure if tab permissions restricted or closed */
-            });
+          // Copy through the sensitive-data path, not a blind writeText +
+          // setTimeout(''): the blind clear would overwrite whatever the user
+          // copied in the intervening minute and bypassed verify-before-wipe
+          // (no background purge record). This routes through the standard
+          // copy + scheduled purge with the user's clipboard-privacy duration.
+          await copyToClipboardFromBackground(record.address);
           const status = await ensureTabAutofillReady(tab.id, {
             notifyIfRefreshNeeded: true,
           });
           if (status === 'form') {
-            browser.notifications
-              .create(`ctx_form_${inbox.address}`, {
-                type: 'basic',
-                iconUrl: 'icons/icon128.png',
-                title: 'Temp email ready',
-                message: `${inbox.address}\nSignup form detected — use Autofill this page or the on-page button.`,
-              })
-              .catch(() => {
-                /* ignore notification permission or display failure */
-              });
-          } else {
-            browser.notifications
-              .create(`ctx_${inbox.address}`, {
-                type: 'basic',
-                iconUrl: 'icons/icon128.png',
-                title: 'Temp Email Created',
-                message: `${inbox.address}\nCopied to clipboard!`,
-              })
-              .catch(() => {
-                /* ignore notification permission or display failure */
-              });
-          }
-        } else {
-          browser.notifications
-            .create(`ctx_${inbox.address}`, {
+            createBrowserNotification(`ctx_form_${record.address}`, {
               type: 'basic',
               iconUrl: 'icons/icon128.png',
-              title: 'Temp Email Created',
-              message: `${inbox.address}`,
-            })
-            .catch(() => {
-              /* ignore notification permission or display failure */
+              title: tSync('notifications.tempEmailReady'),
+              message: tSync('notifications.tempEmailReadyMessage', { address: record.address }),
             });
+          } else {
+            createBrowserNotification(`ctx_${record.address}`, {
+              type: 'basic',
+              iconUrl: 'icons/icon128.png',
+              title: tSync('notifications.tempEmailCreated'),
+              message: tSync('notifications.tempEmailCreatedMessage', { address: record.address }),
+            });
+          }
+        } else {
+          createBrowserNotification(`ctx_${record.address}`, {
+            type: 'basic',
+            iconUrl: 'icons/icon128.png',
+            title: tSync('notifications.tempEmailCreated'),
+            message: record.address,
+          });
         }
         await refreshActionEmailTitle();
         await rebuildAddressSubmenu();
@@ -541,16 +692,16 @@ function setupContextMenu() {
           /* gesture may be consumed */
         }
       } catch (e) {
-        logError('Context menu createInbox error', e);
+        logError('Context menu createAddress error', e);
       }
       return;
     }
 
     if (id === 'action-report-issue') {
       try {
-        const { GITHUB_ISSUES_URL } = await import('@/utils/constants.js');
+        const { CONSTANTS } = await import('@/utils/constants.js');
         await browser.tabs.create({
-          url: GITHUB_ISSUES_URL,
+          url: CONSTANTS.GITHUB_ISSUES_URL,
         });
       } catch (e) {
         logError('Failed to open GitHub issues', e);
@@ -562,7 +713,7 @@ function setupContextMenu() {
       try {
         await browser.action.openPopup();
       } catch (e) {
-        // openPopup often requires user gesture / may be unavailable — fall back to app
+        // openPopup often requires user gesture / may be unavailable - fall back to app
         try {
           const getURL = (browser.runtime as unknown as { getURL: (p: string) => string }).getURL;
           await browser.tabs.create({ url: getURL('/popup.html') });
@@ -602,9 +753,6 @@ function setupContextMenu() {
         const win = await browser.windows.getCurrent();
         if (win.id != null && openFn) {
           await openFn({ windowId: win.id });
-          // Track side-panel open state so the app page can detect the conflict
-          // and show its "close side panel to unlock" overlay.
-          await browser.storage.local.set({ sidePanelOpen: true });
         }
       } catch (e) {
         logError('Failed to open side panel', e);
@@ -627,10 +775,10 @@ function setupContextMenu() {
         const mapRes = (await browser.storage.session.get(['actionAddressMenuMap'])) as {
           actionAddressMenuMap?: Record<string, string>;
         };
-        const inboxId = mapRes.actionAddressMenuMap?.[id] || '';
-        if (!inboxId) return;
-        await browser.storage.local.set({
-          activeInboxId: inboxId,
+        const addressId = mapRes.actionAddressMenuMap?.[id] || '';
+        if (!addressId) return;
+        await writeWithRetry({
+          activeAddressId: addressId,
           openView: 'mailbox',
           openViewAt: Date.now(),
         });
@@ -650,66 +798,62 @@ function setupContextMenu() {
         if (!targetTab?.url) return;
         const url = new URL(targetTab.url);
         const domain = url.hostname;
-        const blocklist = await getAutofillBlocklist();
-        const isBlocked = blocklist.includes(domain);
+        const toggle = await toggleAutofillBlocklist(domain);
 
-        if (isBlocked) {
-          await removeFromAutofillBlocklist(domain);
-          browser.notifications
-            .create(`unblocked_${domain}`, {
-              type: 'basic',
-              iconUrl: 'icons/icon128.png',
-              title: 'Autofill Re-enabled',
-              message: `Autofill is now enabled for ${domain}`,
-            })
-            .catch(() => {});
-        } else {
-          await addToAutofillBlocklist(domain);
-          browser.notifications
-            .create(`blocked_${domain}`, {
-              type: 'basic',
-              iconUrl: 'icons/icon128.png',
-              title: 'Autofill Excluded',
-              message: `Autofill is now disabled for ${domain}`,
-            })
-            .catch(() => {});
+        if (toggle.changed) {
+          createBrowserNotification(toggle.blocked ? `blocked_${domain}` : `unblocked_${domain}`, {
+            type: 'basic',
+            iconUrl: 'icons/icon128.png',
+            title: toggle.blocked
+              ? tSync('notifications.autofillExcludedTitle')
+              : tSync('notifications.autofillReenabledTitle'),
+            message: toggle.blocked
+              ? tSync('notifications.autofillExcludedMessage', { domain })
+              : tSync('notifications.autofillReenabledMessage', { domain }),
+          });
+          if (targetTab.id) {
+            await browser.tabs
+              .sendMessage(targetTab.id, {
+                type: 'autofillBlocklistChanged',
+              })
+              .catch(() => {
+                // Restricted pages and tabs without the content script are expected.
+              });
+          }
         }
 
         if (targetTab.id) await updateContextMenuForTab(targetTab.id);
-        if (targetTab.id) {
-          await browser.tabs
-            .sendMessage(targetTab.id, { type: 'autofillBlocklistChanged' })
-            .catch(() => {});
-        }
         // Refresh action menu title for exclude item
         try {
-          const stillBlocked = (await getAutofillBlocklist()).includes(domain);
           await browser.contextMenus.update('action-exclude-autofill', {
-            title: stillBlocked
-              ? `Remove "${domain}" from Autofill Blocklist`
-              : 'Exclude from Autofill',
+            title: toggle.blocked
+              ? tSync('contextMenu.removeFromAutofillBlocklist', { domain })
+              : tSync('contextMenu.excludeFromAutofill'),
           });
-        } catch {
-          /* ignore */
+        } catch (e) {
+          logDebug('action-exclude-autofill menu update failed', e);
         }
       } catch (e) {
-        if (DEBUG) log(`Context menu blocklist error: ${e}`);
+        if (CONSTANTS.DEBUG) log(`Context menu blocklist error: ${e}`);
       }
     }
   });
 }
 
-/** Omnibox keyword "1c" — search signup credentials / open Autofill manager (PM-style address bar). */
+/** Omnibox keyword "1c" - search signup credentials / open Autofill manager (PM-style address bar). */
 function setupOmnibox() {
-  try {
-    browser.omnibox.setDefaultSuggestion({
-      description:
-        '1Click · Search signup credentials or type: fill | profiles | mailbox | settings',
-    });
-  } catch (e) {
-    logDebug('omnibox.setDefaultSuggestion unavailable', e);
-    return;
-  }
+  // Preload the locale pack before any user-visible omnibox copy is rendered;
+  // listener registration below stays synchronous (MV3 requirement).
+  void (async () => {
+    try {
+      await preloadTranslations(await getStoredLocaleAsync());
+      browser.omnibox.setDefaultSuggestion({
+        description: tSync('omnibox.defaultSuggestion'),
+      });
+    } catch (e) {
+      logDebug('omnibox.setDefaultSuggestion unavailable', e);
+    }
+  })();
 
   browser.omnibox.onInputChanged.addListener((text, suggest) => {
     void (async () => {
@@ -719,55 +863,106 @@ function setupOmnibox() {
       if (!q || 'fill'.startsWith(q) || 'autofill'.startsWith(q)) {
         suggestions.push({
           content: 'fill',
-          description: 'Autofill signup form on the current tab',
+          description: tSync('omnibox.autofillForm'),
         });
       }
       if (!q || 'profiles'.startsWith(q) || 'profile'.startsWith(q)) {
         suggestions.push({
           content: 'profiles',
-          description: 'Open Autofill manager → Profiles',
+          description: tSync('omnibox.openProfiles'),
+        });
+      }
+      if (!q || 'addresses'.startsWith(q) || 'address'.startsWith(q)) {
+        suggestions.push({
+          content: 'addresses',
+          description: tSync('omnibox.openAddresses'),
         });
       }
       if (!q || 'credentials'.startsWith(q) || 'cred'.startsWith(q)) {
         suggestions.push({
           content: 'credentials',
-          description: 'Open Autofill manager → Credentials (signup)',
+          description: tSync('omnibox.openCredentials'),
         });
       }
       if (!q || 'mailbox'.startsWith(q) || 'mail'.startsWith(q)) {
         suggestions.push({
           content: 'mailbox',
-          description: 'Open Mailbox',
+          description: tSync('omnibox.openMailbox'),
         });
       }
       if (!q || 'settings'.startsWith(q)) {
         suggestions.push({
           content: 'settings',
-          description: 'Open Settings',
+          description: tSync('omnibox.openSettings'),
         });
       }
 
       try {
-        const { loginInfo = [] } = (await browser.storage.local.get(['loginInfo'])) as {
+        const {
+          addresses = [],
+          loginInfo = [],
+          identities = [],
+        } = (await browser.storage.local.get(['addresses', 'loginInfo', 'identities'])) as {
+          addresses?: Address[];
           loginInfo?: Array<{ email?: string; website?: string; domain?: string; id?: string }>;
+          identities?: Identity[];
         };
-        const hits = (loginInfo || [])
-          .filter((row) => {
-            if (!q) return false;
-            const hay = `${row.email || ''} ${row.website || ''} ${row.domain || ''}`.toLowerCase();
-            return hay.includes(q);
-          })
-          .slice(0, 5);
-        for (const row of hits) {
-          const site = row.website || row.domain || 'site';
-          const email = row.email || '';
-          suggestions.push({
-            content: `cred:${row.id || email}`,
-            description: `Credential · ${email} · ${site}`,
-          });
+
+        if (q) {
+          // 1) Match active addresses
+          const matchedAddresses = (addresses || [])
+            .filter((i) => {
+              const hay = `${i.address || ''} ${i.provider || ''}`.toLowerCase();
+              return hay.includes(q);
+            })
+            .slice(0, 3);
+          for (const record of matchedAddresses) {
+            suggestions.push({
+              content: `inbox:${record.id || record.address}`,
+              description: tSync('omnibox.inbox', {
+                address: record.address,
+                provider: record.provider || 'default',
+              }),
+            });
+          }
+
+          // 2) Match identity profiles
+          const matchedIdentities = (identities || [])
+            .filter((id) => {
+              const hay =
+                `${id.name || ''} ${id.username || ''} ${id.firstNames || ''} ${id.lastNames || ''}`.toLowerCase();
+              return hay.includes(q);
+            })
+            .slice(0, 3);
+          for (const id of matchedIdentities) {
+            suggestions.push({
+              content: `profile:${id.id}`,
+              description: tSync('omnibox.profile', {
+                name: id.name,
+                username: id.username || '',
+              }),
+            });
+          }
+
+          // 3) Match saved credentials
+          const hits = (loginInfo || [])
+            .filter((row) => {
+              const hay =
+                `${row.email || ''} ${row.website || ''} ${row.domain || ''}`.toLowerCase();
+              return hay.includes(q);
+            })
+            .slice(0, 3);
+          for (const row of hits) {
+            const site = row.website || row.domain || 'site';
+            const email = row.email || '';
+            suggestions.push({
+              content: `cred:${row.id || email}`,
+              description: tSync('omnibox.credential', { email, site }),
+            });
+          }
         }
-      } catch {
-        /* ignore */
+      } catch (e) {
+        logDebug('omnibox credential search failed', e);
       }
 
       suggest(suggestions.slice(0, 8));
@@ -775,20 +970,66 @@ function setupOmnibox() {
   });
 
   browser.omnibox.onInputEntered.addListener((text, disposition) => {
-    browser.storage.session.set({ _last_vault_activity: Date.now() }).catch(() => {});
+    void recordVaultActivity().catch((error) =>
+      logError('Failed to record omnibox vault activity', error)
+    );
     void (async () => {
       const cmd = (text || '').trim().toLowerCase();
       if (cmd === 'fill' || cmd === 'autofill') {
-        await autofillActiveTab();
+        await runAutofillActiveTabAndNotify();
         return;
       }
       if (cmd === 'profiles' || cmd === 'profile') {
-        await browser.storage.local.set({ openView: 'autofill', autofillTab: 'profiles' });
+        await writeWithRetry({
+          openView: 'autofill',
+          openViewAt: Date.now(),
+          autofillTab: 'profiles',
+        });
+        await openExtensionView('autofill');
+        return;
+      }
+      if (cmd === 'addresses' || cmd === 'address') {
+        await writeWithRetry({ openView: 'addresses', openViewAt: Date.now() });
+        await openExtensionView('addresses');
+        return;
+      }
+      if (cmd.startsWith('inbox:')) {
+        const addressKey = (text || '').trim().slice(6);
+        const { addresses = [] } = (await browser.storage.local.get(['addresses'])) as {
+          addresses?: Address[];
+        };
+        const found = addresses.find(
+          (i) => i.id === addressKey || i.address.toLowerCase() === addressKey.toLowerCase()
+        );
+        if (found) {
+          await writeWithRetry({
+            selectedEmail: found.address,
+            openView: 'mailbox',
+            openViewAt: Date.now(),
+          });
+        } else {
+          await writeWithRetry({ openView: 'mailbox', openViewAt: Date.now() });
+        }
+        await openExtensionView('mailbox');
+        return;
+      }
+      if (cmd.startsWith('profile:')) {
+        const profileId = (text || '').trim().slice(8);
+        await writeWithRetry({
+          openView: 'autofill',
+          openViewAt: Date.now(),
+          autofillTab: 'profiles',
+          selectedIdentityId: profileId,
+        });
         await openExtensionView('autofill');
         return;
       }
       if (cmd === 'credentials' || cmd === 'cred' || cmd.startsWith('cred:')) {
-        await browser.storage.local.set({ openView: 'autofill', autofillTab: 'credentials' });
+        await writeWithRetry({
+          openView: 'autofill',
+          openViewAt: Date.now(),
+          autofillTab: 'credentials',
+        });
         await openExtensionView('autofill');
         return;
       }
@@ -801,7 +1042,7 @@ function setupOmnibox() {
         return;
       }
       // Default: open autofill hub
-      await browser.storage.local.set({ openView: 'autofill' });
+      await writeWithRetry({ openView: 'autofill', openViewAt: Date.now() });
       await openExtensionView('autofill');
       void disposition;
     })();
@@ -821,12 +1062,16 @@ function setupOmnibox() {
 function setupStorageSyncMirror(): void {
   const syncKeysSet = new Set(SETTINGS_SYNC_KEYS);
 
+  // Timestamp-stamped: a mirror interrupted by service-worker termination
+  // (the finally-remove never ran) self-heals after the TTL instead of
+  // suppressing every future mirror until browser restart.
   async function isMirroringLocked(): Promise<boolean> {
     try {
       const res = await browser.storage.session.get('_sync_mirroring_lock');
-      return !!res._sync_mirroring_lock;
-    } catch {
-      /* ignore */
+      const ts = res._sync_mirroring_lock;
+      return typeof ts === 'number' && Date.now() - ts < PERSISTENT_LOCK_TTL_MS;
+    } catch (e) {
+      logDebug('isMirroringLocked failed', e);
       return false;
     }
   }
@@ -834,114 +1079,213 @@ function setupStorageSyncMirror(): void {
   async function setMirroringLock(locked: boolean): Promise<void> {
     try {
       if (locked) {
-        await browser.storage.session.set({ _sync_mirroring_lock: true });
+        await browser.storage.session.set({ _sync_mirroring_lock: Date.now() });
       } else {
         await browser.storage.session.remove('_sync_mirroring_lock');
       }
-    } catch {
-      /* ignore session storage lock errors */
+    } catch (e) {
+      logDebug('setMirroringLock failed', e);
     }
   }
 
-  // local → sync: when a setting changes locally, push it to sync
-  browser.storage.onChanged.addListener((changes, areaName) => {
-    if (areaName !== 'local') return;
-    void (async () => {
-      if (await isMirroringLocked()) return;
-      const toSync: Record<string, unknown> = {};
-      for (const key of Object.keys(changes)) {
-        if (syncKeysSet.has(key)) {
-          toSync[key] = changes[key].newValue;
-        }
-      }
-      if (Object.keys(toSync).length > 0) {
+  // Mirror one direction; the flag check runs INSIDE the mutex so the
+  // previously racy check-then-set is atomic: concurrent onChanged events
+  // serialize on the queue (no double-write / no lost customNavOrder), while
+  // the echo of our own write still sees the flag and bails.
+  async function mirrorWithGuard(apply: () => Promise<void>): Promise<void> {
+    try {
+      await withLock(LOCKS.SYNC_MIRRORING, async () => {
+        if (await isMirroringLocked()) return;
         await setMirroringLock(true);
-        await browser.storage.sync
-          .set(toSync)
-          .catch((e: unknown) => logError('storage.sync mirror (local→sync) failed', e))
-          .finally(async () => {
-            await setMirroringLock(false);
-          });
-      }
-    })();
-  });
+        try {
+          await apply();
+        } finally {
+          await setMirroringLock(false);
+        }
+      });
+    } catch (e) {
+      logError('storage.sync mirror lock failed', e);
+    }
+  }
+
+  // Shared local↔sync mirror: the two directions differ only in source area,
+  // target write, and log label - one helper so filter/guard semantics can't
+  // drift between directions.
+  function setupSyncMirror(
+    fromArea: string,
+    apply: (items: Record<string, unknown>) => Promise<void>,
+    directionLabel: string
+  ): void {
+    browser.storage.onChanged.addListener((changes, areaName) => {
+      if (areaName !== fromArea) return;
+      void (async () => {
+        const pending: Record<string, unknown> = {};
+        for (const key of Object.keys(changes)) {
+          if (syncKeysSet.has(key)) {
+            pending[key] = changes[key].newValue;
+          }
+        }
+        if (Object.keys(pending).length === 0) return;
+        await mirrorWithGuard(async () => {
+          try {
+            await apply(pending);
+          } catch (e: unknown) {
+            logError(`storage.sync mirror (${directionLabel}) failed`, e);
+          }
+        });
+      })();
+    });
+  }
+
+  // local → sync: when a setting changes locally, push it to sync
+  setupSyncMirror('local', (items) => browser.storage.sync.set(items), 'local→sync');
 
   // sync → local: when a setting arrives from another device, apply it locally
-  browser.storage.onChanged.addListener((changes, areaName) => {
-    if (areaName !== 'sync') return;
-    void (async () => {
-      if (await isMirroringLocked()) return;
-      const toLocal: Record<string, unknown> = {};
-      for (const key of Object.keys(changes)) {
-        if (syncKeysSet.has(key)) {
-          toLocal[key] = changes[key].newValue;
-        }
-      }
-      if (Object.keys(toLocal).length > 0) {
-        await setMirroringLock(true);
-        await browser.storage.local
-          .set(toLocal)
-          .catch((e: unknown) => logError('storage.sync mirror (sync→local) failed', e))
-          .finally(async () => {
-            await setMirroringLock(false);
-          });
-      }
-    })();
+  // (through the retry wrapper - a hiccup must not silently drop a synced setting)
+  setupSyncMirror('sync', (items) => writeWithRetry(items), 'sync→local');
+}
+
+const VAULT_IDLE_ALARM = 'vault_idle_autolock_check';
+
+async function recordVaultActivity(): Promise<void> {
+  await withLock(LOCKS.VAULT_ACTIVITY, async () => {
+    await browser.storage.session.set({ _last_vault_activity: Date.now() });
   });
 }
 
-function setupVaultAutoLockCheck(): void {
-  // Avoid resetting the alarm's interval if it is already scheduled (restarting MV3 service worker)
+function ensureVaultIdleAlarm(active: boolean): void {
+  if (!active) {
+    // Mode switched to standard (or never protected): idle auto-lock is
+    // meaningless there (the raw key lives in local storage), so retire the
+    // alarm instead of letting it poll storage.session every 5 minutes forever.
+    browser.alarms.clear(VAULT_IDLE_ALARM).catch(() => {});
+    return;
+  }
+  // Avoid resetting the alarm's interval if it is already scheduled
+  // (restarting MV3 service worker).
   browser.alarms
-    .get('vault_idle_autolock_check')
+    .get(VAULT_IDLE_ALARM)
     .then((alarm) => {
       if (!alarm) {
-        browser.alarms.create('vault_idle_autolock_check', { periodInMinutes: 5 });
+        browser.alarms.create(VAULT_IDLE_ALARM, { periodInMinutes: 5 });
       }
     })
     .catch((e) => logError('alarms.get failed', e));
+}
+
+function setupVaultAutoLockCheck(): void {
+  void (async () => {
+    try {
+      const cfg = await getVaultConfig();
+      ensureVaultIdleAlarm(cfg.mode === 'password' || cfg.mode === 'biometrics');
+    } catch {
+      // Conservative default: behave like the old always-on schedule.
+      ensureVaultIdleAlarm(true);
+    }
+  })();
+
+  // Track vault mode changes so a password→standard downgrade retires the
+  // alarm and a standard→password upgrade re-arms it.
+  browser.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local') return;
+    const configChange = changes.vault_security_config;
+    if (!configChange) return;
+    const mode = (configChange.newValue as { mode?: string } | undefined)?.mode;
+    ensureVaultIdleAlarm(mode === 'password' || mode === 'biometrics');
+  });
 
   browser.alarms.onAlarm.addListener((alarm) => {
-    if (alarm.name === 'vault_idle_autolock_check') {
-      void (async () => {
-        try {
-          const sessionRes = (await browser.storage.session.get(['_last_vault_activity'])) as {
-            _last_vault_activity?: number;
-          };
-          if (
-            sessionRes._last_vault_activity &&
-            Date.now() - sessionRes._last_vault_activity > 15 * 60 * 1000
-          ) {
-            await lockVault();
-            logInfo('Vault auto-locked due to 15 minutes of inactivity.');
-          }
-        } catch (err) {
-          logError('Failed during vault auto-lock check', err);
+    if (alarm.name !== VAULT_IDLE_ALARM) return;
+    void withLock(LOCKS.VAULT_ACTIVITY, async () => {
+      try {
+        const config = await getVaultConfig();
+        // Standard mode keeps the raw key in local: there is nothing to lock,
+        // and lockVault() would broadcast a spurious vaultLocked toast.
+        if (config.mode === 'standard') return;
+        const sessionRes = (await browser.storage.session.get(['_last_vault_activity'])) as {
+          _last_vault_activity?: number;
+        };
+        const timeoutMs = getVaultAutoLockTimeoutMs(config.autoLockTimeout);
+        if (
+          timeoutMs > 0 &&
+          Number.isFinite(timeoutMs) &&
+          sessionRes._last_vault_activity &&
+          Date.now() - sessionRes._last_vault_activity > timeoutMs
+        ) {
+          await lockVault();
+          logInfo(`Vault auto-locked due to ${config.autoLockTimeout || '15m'} of inactivity.`);
         }
-      })();
+      } catch (err) {
+        logError('Failed during vault auto-lock check', err);
+      }
+    }).catch((err) => logError('Failed during vault auto-lock lock', err));
+  });
+}
+
+/**
+ * Background clipboard purge fallback. The queue owns absolute deadlines; the
+ * worker keeps one one-shot alarm at the earliest deadline instead of waking
+ * once per minute when there is nothing due.
+ */
+function setupClipboardPurgeAlarm(): void {
+  void scheduleNextClipboardPurgeAlarm();
+  browser.storage.onChanged.addListener((changes, area) => {
+    if (area === 'local' && changes.clipboardPurgeQueue) {
+      void scheduleNextClipboardPurgeAlarm();
+    }
+  });
+
+  browser.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name === CLIPBOARD_PURGE_ALARM) {
+      void processClipboardPurgeQueue();
     }
   });
 }
 
 /**
- * Background alarm that periodically checks the clipboard-purge queue
- * and clears sensitive clipboard data. This is a fallback for when the
- * page/context that initiated a copy is destroyed before its page-scoped
- * setTimeout fires (e.g., popup closed, tab navigated).
+ * Scheduled WebDAV auto-backup: keeps a `webdav_auto_backup` alarm in sync
+ * with the persisted settings (created when auto-backup + URL are configured,
+ * cleared otherwise, rescheduled when the interval changes), and on each tick
+ * uploads the backup and records `lastWebDAVSyncAt` for the Settings indicator.
  */
-function setupClipboardPurgeAlarm(): void {
-  browser.alarms
-    .get('clipboard_purge_check')
-    .then((alarm) => {
-      if (!alarm) {
-        browser.alarms.create('clipboard_purge_check', { periodInMinutes: 1 });
-      }
-    })
-    .catch((e) => logError('alarms.get failed', e));
+const WEBDAV_AUTO_BACKUP_ALARM = 'webdav_auto_backup';
+
+function setupWebDAVAutoBackupAlarm(): void {
+  const syncAlarm = () => {
+    browser.alarms
+      .get(WEBDAV_AUTO_BACKUP_ALARM)
+      .then(async (alarm) => {
+        const settings = await loadWebDAVSettings();
+        const enabled = isWebDAVEnabled(settings) && settings.autoBackup === true && !!settings.url;
+        const minutes = Math.max(60, Math.round((settings.autoBackupIntervalDays || 1) * 24 * 60));
+        if (enabled) {
+          if (alarm && alarm.periodInMinutes === minutes) return;
+          if (alarm) await browser.alarms.clear(WEBDAV_AUTO_BACKUP_ALARM);
+          browser.alarms.create(WEBDAV_AUTO_BACKUP_ALARM, { periodInMinutes: minutes });
+        } else if (alarm) {
+          await browser.alarms.clear(WEBDAV_AUTO_BACKUP_ALARM);
+        }
+      })
+      .catch((e) => logError('webdav auto-backup alarm sync failed', e));
+  };
+
+  // Re-arm whenever the settings change (toggle on/off, interval edit, URL).
+  browser.storage.onChanged.addListener((changes, area) => {
+    if (area === 'local' && changes.webdavConfig) syncAlarm();
+  });
+  syncAlarm();
 
   browser.alarms.onAlarm.addListener((alarm) => {
-    if (alarm.name === 'clipboard_purge_check') {
-      void processClipboardPurgeQueue();
+    if (alarm.name === WEBDAV_AUTO_BACKUP_ALARM) {
+      void (async () => {
+        try {
+          const res = await runAutoWebDAVBackup();
+          if (res.success) logInfo('WebDAV auto-backup uploaded successfully.');
+          else logWarn('WebDAV auto-backup skipped:', res.error?.key);
+        } catch (err) {
+          logError('WebDAV auto-backup failed', err);
+        }
+      })();
     }
   });
 }
@@ -1001,12 +1345,12 @@ async function updateUserAgentSessionRule(): Promise<void> {
           >[number],
         ],
       });
-      if (DEBUG) logDebug(`DeclarativeNetRequest rule added for UA: ${customUA}`);
+      if (CONSTANTS.DEBUG) logDebug(`DeclarativeNetRequest rule added for UA: ${customUA}`);
     } else {
       await browser.declarativeNetRequest.updateSessionRules({
         removeRuleIds: [ruleId],
       });
-      if (DEBUG) logDebug('DeclarativeNetRequest rule cleared for UA (using default)');
+      if (CONSTANTS.DEBUG) logDebug('DeclarativeNetRequest rule cleared for UA (using default)');
     }
   } catch (err) {
     logError('declarativeNetRequest UA spoofing rule failed', err);
@@ -1016,7 +1360,8 @@ async function updateUserAgentSessionRule(): Promise<void> {
 /**
  * Toolbar click must open the POPUP, never the side panel by default.
  * Side panel stays available via action context menu ("Open Side Panel").
- * Uses chrome.* first — WXT's browser polyfill can lag behind sidePanel APIs.
+ * The Chrome-only sidePanel API is optional in other browsers. Feature-detect
+ * it before use because WXT's browser export does not polyfill missing APIs.
  */
 async function configureToolbarDefaultUi(opts?: { enableSidePanel?: boolean }): Promise<void> {
   const enableSidePanel = opts?.enableSidePanel !== false;
@@ -1063,22 +1408,59 @@ async function configureToolbarDefaultUi(opts?: { enableSidePanel?: boolean }): 
   // Re-assert after setOptions (some Chrome builds reset behavior)
   try {
     await sidePanel?.setPanelBehavior?.({ openPanelOnActionClick: false });
-  } catch {
-    /* ignore */
+  } catch (e) {
+    logDebug('sidePanel.setPanelBehavior failed', e);
   }
 }
 
+/**
+ * Run autofill on the active tab and surface the outcome as a desktop
+ * notification. Shared by the context-menu and omnibox "fill" commands so
+ * they report the same failures - including the blocklist case, which would
+ * otherwise fall through to the generic "could not autofill" message.
+ */
+async function runAutofillActiveTabAndNotify(): Promise<void> {
+  const result = await autofillActiveTab();
+  if (result.ok) return;
+  const msg =
+    result.reason === 'no_form'
+      ? tSync('notifications.autofillNoForm')
+      : result.reason === 'need_refresh'
+        ? tSync('notifications.autofillNeedRefresh')
+        : result.reason === 'blocked'
+          ? tSync('notifications.autofillBlocked')
+          : tSync('notifications.autofillFailedGeneric');
+  await createBrowserNotification('af', {
+    type: 'basic',
+    iconUrl: 'icons/icon128.png',
+    title: tSync('notifications.autofillTitle'),
+    message: msg,
+  });
+}
+
 export default defineBackground(() => {
+  const swStart = perfStart('bg.swStart');
   // Synchronous-first attempt so the first icon click after SW wake is correct
   void configureToolbarDefaultUi();
 
   // Load user provider JSON overrides before any create/check calls
   void (async () => {
     try {
-      const { loadProviderOverridesFromStorage } = await import('@/utils/email-service.js');
+      const { loadProviderOverridesFromStorage } = await import('@/utils/email/email-service.js');
       await loadProviderOverridesFromStorage(browser);
-    } catch {
-      /* bundled providers remain */
+    } catch (e) {
+      logDebug('loadProviderOverridesFromStorage failed - bundled providers remain', e);
+    }
+  })();
+  // Warm the {clientIp} template cache on every SW wake (module state is lost
+  // when the worker is killed), so inbox creation sends the real public IP
+  // instead of the 127.0.0.1 placeholder.
+  void (async () => {
+    try {
+      const { refreshClientIp } = await import('@/utils/security/client-ip.js');
+      await refreshClientIp();
+    } catch (e) {
+      logDebug('refreshClientIp failed - resolver falls back to 127.0.0.1', e);
     }
   })();
   // ── Register all event listeners SYNCHRONOUSLY first ───────────────
@@ -1087,23 +1469,38 @@ export default defineBackground(() => {
   // arrives. Per Chrome guidance, register top-level event listeners
   // synchronously, then perform async initialization below.
   registerMessageHandler();
+  setupOnboardingPreparation();
   setupPeriodicEmailCheck(checkNewEmails);
-  setupInboxExpiryCheck();
+  setupAddressExpiryCheck();
   setupUnreadBadge();
   setupContextMenu();
   setupOmnibox();
   setupStorageSyncMirror();
   setupVaultAutoLockCheck();
   setupClipboardPurgeAlarm();
+  setupWebDAVAutoBackupAlarm();
 
   browser.runtime.onInstalled.addListener((details: { reason: string }) => {
-    if (DEBUG) logDebug(`Extension installed/updated: ${details.reason}`);
+    if (CONSTANTS.DEBUG) logDebug(`Extension installed/updated: ${details.reason}`);
     void configureToolbarDefaultUi();
-    if (details.reason === 'install') {
-      browser.storage.local.clear().then(() => {
-        if (DEBUG) log('Storage cleared on install');
-      });
-    }
+    const isInstall = details.reason === 'install';
+    void (async () => {
+      try {
+        if (isInstall) {
+          await browser.storage.local.clear();
+          if (CONSTANTS.DEBUG) log('Storage cleared on install');
+        }
+      } catch (error) {
+        logError('Failed to clear storage during install initialization', error);
+      }
+      try {
+        // The old default was true. Preserve it for upgrades that never
+        // persisted a choice, while fresh installs explicitly opt out.
+        await initializeSmartAutofillSettings(isInstall ? 'install' : 'update');
+      } catch (error) {
+        logError('Failed to initialize smart autofill settings', error);
+      }
+    })();
     // Existing tabs won't have content scripts until inject/refresh
     void (async () => {
       try {
@@ -1117,6 +1514,13 @@ export default defineBackground(() => {
       } catch (e) {
         logDebug('onInstalled tab autofill ensure failed', e);
       }
+      if (details.reason === 'update') {
+        try {
+          await markOpenTabsForReload();
+        } catch (error) {
+          logError('Failed to mark existing tabs for reload after extension update', error);
+        }
+      }
     })();
   });
 
@@ -1124,26 +1528,28 @@ export default defineBackground(() => {
     browser.runtime.onStartup.addListener(() => {
       void configureToolbarDefaultUi();
     });
-  } catch {
-    /* onStartup may be unavailable */
+  } catch (e) {
+    logDebug('runtime.onStartup unavailable', e);
   }
 
   // Commands: open autofill manager, quick generate, copy latest OTP
   try {
     browser.commands.onCommand.addListener((command) => {
-      browser.storage.session.set({ _last_vault_activity: Date.now() }).catch(() => {});
+      void recordVaultActivity().catch((error) =>
+        logError('Failed to record command vault activity', error)
+      );
       if (command === 'open-autofill-manager') {
         void openExtensionView('autofill');
       } else if (command === 'quick-generate-inbox') {
         void (async () => {
           try {
-            const acc = (await createInbox()) as Account;
+            const acc = (await createAddress()) as Address;
             if (acc?.address) {
-              await browser.notifications.create(`quick_gen_${Date.now()}`, {
+              createBrowserNotification('quick_gen', {
                 type: 'basic',
                 iconUrl: 'icons/icon48.png',
-                title: 'Temp Mail Generated',
-                message: `Created: ${acc.address}`,
+                title: tSync('notifications.tempMailGenerated'),
+                message: tSync('notifications.tempMailGeneratedMessage', { address: acc.address }),
               });
             }
           } catch (e) {
@@ -1151,22 +1557,9 @@ export default defineBackground(() => {
           }
         })();
       } else if (command === 'copy-latest-otp') {
-        void (async () => {
-          try {
-            const res = await browser.storage.session.get(['_latest_otp_code']);
-            const otp = (res._latest_otp_code as string) || '';
-            if (otp) {
-              await browser.notifications.create(`otp_copied_${Date.now()}`, {
-                type: 'basic',
-                iconUrl: 'icons/icon48.png',
-                title: 'Latest OTP',
-                message: `OTP Code: ${otp}`,
-              });
-            }
-          } catch (e) {
-            logError('Failed copy latest OTP shortcut', e);
-          }
-        })();
+        // The handler reads the authoritative `latestOtp` cache (storage.local)
+        // maintained by the email-storage writers - see latest-otp-shortcut.ts.
+        void handleCopyLatestOtpCommand();
       }
     });
   } catch {
@@ -1175,34 +1568,82 @@ export default defineBackground(() => {
 
   // Handle notification clicks - open extension or direct Magic Link tab
   browser.notifications.onClicked.addListener(async (notificationId: string) => {
-    browser.storage.session.set({ _last_vault_activity: Date.now() }).catch(() => {});
-    if (DEBUG) log(`Notification clicked: ${notificationId}`);
+    void recordVaultActivity().catch((error) =>
+      logError('Failed to record notification vault activity', error)
+    );
+    if (CONSTANTS.DEBUG) log(`Notification clicked: ${notificationId}`);
 
     if (notificationId.startsWith('magiclink:')) {
-      const parts = notificationId.split(':');
-      if (parts.length >= 4) {
-        const rawUrl = parts.slice(3).join(':');
-        const magicUrl = decodeURIComponent(rawUrl);
-        if (magicUrl.startsWith('http')) {
-          await browser.tabs.create({ url: magicUrl });
+      // Format: magiclink:{emailId}:{addressId} - emailId may itself contain
+      // ":", so the address id is the last segment. The URL is resolved from
+      // the stored message rather than embedded in the id (embedding breaches
+      // Chrome's 500-char notification-id limit on long SSO/magic URLs).
+      const rest = notificationId.slice('magiclink:'.length);
+      const parts = rest.split(':');
+      if (parts.length >= 2) {
+        const addressId = parts[parts.length - 1] as string;
+        const emailId = parts.slice(0, -1).join(':');
+        if (emailId && addressId) {
+          try {
+            const emails = await getStoredEmailsForAddress(addressId);
+            const msg = emails.find((m) => String(m.id) === emailId);
+            // magicLinks[] is the validated path (detector hard-rejects
+            // non-https destinations). The legacy flat `magicLinkUrl` field
+            // is written by NOTHING in the codebase; as an unvalidated
+            // string it would have bypassed the detector - removed. The
+            // scheme gate is anchored: plain `http:` must not pass.
+            const magicUrl = msg?.magicLinks?.[0]?.url;
+            if (/^https:\/\//.test(magicUrl || '')) {
+              await openSignupVerificationLink(magicUrl as string, addressId);
+              return;
+            }
+          } catch (error) {
+            logError(
+              'Failed to resolve magic link for notification',
+              { notificationId },
+              error instanceof Error ? error : new Error(String(error))
+            );
+          }
+          // Message or URL gone (deleted/expired) - fall back to the mailbox
+          // with the message selected, same as the email: branch below.
+          await writeWithRetry({
+            pendingEmailOpen: {
+              emailId,
+              addressId,
+              expiresAt: Date.now() + 5 * 60 * 1000,
+            },
+          });
+          await browser.tabs.create({
+            url: 'app.html',
+          });
           return;
         }
       }
     }
 
+    // Clipboard-purge stuck alert (review-2-glm §10.3): open Settings, where
+    // the Privacy card shows how many purge records keep failing.
+    if (notificationId.startsWith('clipboard-purge-alert:')) {
+      await openExtensionView('settings');
+      return;
+    }
+
     // Parse notification ID to extract email ID and inbox ID
-    // Format: email:{emailId}:{inboxId}
+    // Format: email:{emailId}:{addressId} - emailId may itself contain ":", so
+    // re-join the middle segments like the adjacent magiclink: branch does.
     if (notificationId.startsWith('email:')) {
       const parts = notificationId.split(':');
-      if (parts.length === 3) {
-        const emailId = parts[1];
-        const inboxId = parts[2];
+      if (parts.length >= 3) {
+        const addressId = parts[parts.length - 1] as string;
+        const emailId = parts.slice(1, -1).join(':');
+        if (!emailId || !addressId) return;
 
         // Store the selected email to open
-        await browser.storage.local.set({
+        await writeWithRetry({
           pendingEmailOpen: {
             emailId,
-            inboxId,
+            addressId,
+            expiresAt: Date.now() + 5 * 60 * 1000,
           },
         });
 
@@ -1221,6 +1662,30 @@ export default defineBackground(() => {
         const v = changes.otpDetectionMode.newValue as OtpDetectionMode | undefined;
         if (v) setOtpDetectionMode(v);
       }
+      if (changes.otpDetectionEnabled) {
+        setOtpDetectionEnabled(changes.otpDetectionEnabled.newValue !== false);
+      }
+      if (changes.magicLinkDetectionEnabled) {
+        setMagicLinkDetectionEnabled(changes.magicLinkDetectionEnabled.newValue !== false);
+      }
+      if (changes.otpDetectionProvider) {
+        const v = changes.otpDetectionProvider.newValue as OtpDetectionProvider | undefined;
+        if (v === 'algorithm' || v === 'ai') setOtpDetectionProvider(v);
+      }
+      if (changes.aiBaseUrl || changes.aiApiKey || changes.aiModel) {
+        browser.storage.local
+          .get(['aiBaseUrl', 'aiApiKey', 'aiModel'])
+          .then(async (cfg) => {
+            const key = (cfg as { aiApiKey?: string }).aiApiKey || '';
+            const apiKey = key ? await decryptSecret(key) : '';
+            setAiConfig(
+              (cfg as { aiBaseUrl?: string }).aiBaseUrl || '',
+              apiKey,
+              (cfg as { aiModel?: string }).aiModel || ''
+            );
+          })
+          .catch((err) => logError('sync AI config failed', err));
+      }
       if (changes.selectedIdentityId || changes.identities) {
         updateUserAgentSessionRule().catch((err) =>
           logError('updateUserAgentSessionRule failed', err)
@@ -1232,15 +1697,21 @@ export default defineBackground(() => {
   // ── Async initialization (does not block event delivery) ───────────
   (async () => {
     try {
-      await initLogger().catch(() => {});
-      if (DEBUG) log('=== BACKGROUND SCRIPT STARTED ===');
+      await initLogger().catch((error) =>
+        logError('Background logger initialization failed', error)
+      );
+      if (CONSTANTS.DEBUG) log('=== BACKGROUND SCRIPT STARTED ===');
       await syncOtpDetectionMode();
       await updateUserAgentSessionRule().catch((err) =>
         logError('updateUserAgentSessionRule startup failed', err)
       );
 
-      initializeAnalytics();
-      initializeDefaultProvider();
+      void initializeAnalytics().catch((err) =>
+        logError('initializeAnalytics startup failed', err)
+      );
+      void initializeDefaultProvider().catch((err) =>
+        logError('initializeDefaultProvider startup failed', err)
+      );
 
       // Preload translations for current locale (async, non-blocking for events)
       const locale = await getStoredLocaleAsync();
@@ -1250,9 +1721,24 @@ export default defineBackground(() => {
         await preloadTranslations('en');
       }
 
-      if (DEBUG) logDebug('=== BACKGROUND SCRIPT INITIALIZED ===');
-    } catch (_e) {
-      // Safe logging fallback
+      if (CONSTANTS.DEBUG) logDebug('=== BACKGROUND SCRIPT INITIALIZED ===');
+    } catch (error) {
+      logError('Background initialization failed', error);
+    } finally {
+      perfEnd('bg.swStart', swStart);
     }
   })();
+
+  // Dev-only wake telemetry: every alarm, message and SW cold start lands in
+  // the perf ring so the Diagnostics report can show what wakes the worker.
+  browser.alarms.onAlarm.addListener((alarm) => {
+    perfMark('bg.alarmWake', { name: alarm.name });
+  });
+  browser.runtime.onMessage.addListener((message: unknown) => {
+    const type =
+      typeof message === 'object' && message !== null && 'type' in message
+        ? String((message as { type: unknown }).type)
+        : 'unknown';
+    perfMark('bg.message', { type });
+  });
 });

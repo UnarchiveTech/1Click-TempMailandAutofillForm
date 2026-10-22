@@ -1,5 +1,5 @@
 /**
- * SVG markup for icons — single source for Icon.svelte and content scripts.
+ * SVG markup for icons - single source for Icon.svelte and content scripts.
  * Content scripts cannot mount Svelte; they import string builders from here.
  */
 
@@ -19,7 +19,7 @@ export type IconSvgName =
   | 'check';
 
 /** Extension logo mark (simplified envelope) for in-page Autofill chips */
-export function logoMarkSvg(size = 14, color = 'currentColor'): string {
+function logoMarkSvg(size = 14, color = 'currentColor'): string {
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="${size}" height="${size}" fill="${color}" style="pointer-events:none" aria-hidden="true"><path d="M12.01 21.49L2.39 9.75C2.14 9.45 2 9.07 2 8.67V3.5c0-.83.67-1.5 1.5-1.5h17c.83 0 1.5.67 1.5 1.5v5.17c0 .4-.14.78-.39 1.08l-9.6 11.74zm-8.01-18v5.06l8 9.77 8-9.77V3.49H4zm8 11.06l-4.89-5.97h9.78L12 14.55z"/></svg>`;
 }
 

@@ -1,6 +1,7 @@
 <script lang="ts">
 import type { Snippet } from 'svelte';
-import Icon, { type IconName } from '@/ui/components/icons/Icon.svelte';
+import Icon from '@/ui/components/icons/Icon.svelte';
+import type { KnownIconName } from '@/ui/components/icons/icon-names.js';
 import Btn from '@/ui/components/primitives/Btn.svelte';
 
 let {
@@ -17,8 +18,8 @@ let {
   class: className = '',
   children,
 }: {
-  icon?: IconName;
-  iconName?: IconName;
+  icon?: KnownIconName;
+  iconName?: KnownIconName;
   title?: string;
   description?: string;
   actionLabel?: string;
@@ -34,7 +35,7 @@ const displayIcon = $derived(iconName || icon);
 </script>
 
 <div
-  class="flex flex-col items-center justify-center px-4 text-center select-none {compact
+  class="flex flex-col items-center justify-center text-center select-none {compact
     ? 'py-8'
     : 'py-12'} {fillParent ? 'h-full min-h-full' : ''} {className}"
 >

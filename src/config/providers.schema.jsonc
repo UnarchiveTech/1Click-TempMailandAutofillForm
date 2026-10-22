@@ -16,7 +16,7 @@
   "type": "array",
   "items": {
     "type": "object",
-    "required": ["id", "name", "apiUrl", "auth", "operations", "expiry"],
+    "required": ["id", "name", "displayName", "apiUrl", "auth", "retry", "operations", "expiry"],
     "properties": {
       "id": {
         "type": "string",
@@ -25,6 +25,14 @@
       "name": {
         "type": "string",
         "description": "Human-readable name of the provider"
+      },
+      "displayName": {
+        "type": "string",
+        "description": "Short display name for the UI"
+      },
+      "websiteUrl": {
+        "type": "string",
+        "description": "Provider website URL"
       },
       "apiUrl": {
         "type": "string",
@@ -72,6 +80,11 @@
             "type": "number",
             "description": "Default inbox expiry duration in milliseconds"
           },
+          "lifetime": {
+            "type": "string",
+            "enum": ["finite", "never", "unknown"],
+            "description": "Provider-reported address lifetime capability. Descriptive only until runtime lifecycle support is added."
+          },
           "messageRetentionDuration": {
             "type": "number",
             "description": "Individual email message server retention duration in milliseconds"
@@ -79,6 +92,11 @@
           "renewable": {
             "type": "boolean",
             "description": "Whether inboxes can be renewed"
+          },
+          "renewalLabel": {
+            "type": "string",
+            "enum": ["autoRenew", "autoExtend"],
+            "description": "Localized status wording for the renewal operation"
           },
           "renewalMethod": {
             // Runtime allows null for non-renewable providers (Burner).
@@ -98,6 +116,30 @@
               "createdAt": { "type": "string" },
               "expiresAt": { "type": "string" },
               "ttl": { "type": "string" }
+            }
+          },
+          "renewal": {
+            "type": "object",
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": ["manual", "automatic", "providerManaged", "unknown"],
+                "description": "How renewal is initiated; omitted means the provider behavior is not known."
+              },
+              "afterExpiry": {
+                "type": "string",
+                "enum": ["supported", "unsupported", "unknown"],
+                "description": "Whether the provider accepts a renewal after expiry."
+              },
+              "recoveryWindowMs": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "description": "Known post-expiry recovery window in milliseconds; omit when unknown."
+              },
+              "apiCallCount": { "type": "number" },
+              "createApiCallCount": { "type": "number" },
+              "minPreExpiryWindowMs": { "type": "number" },
+              "safetyBufferRatio": { "type": "number" }
             }
           }
         }
@@ -359,7 +401,7 @@
       "properties": {
         "method": {
           "type": "string",
-          "enum": ["GET", "POST", "PUT", "DELETE"],
+          "enum": ["GET", "POST", "PUT", "DELETE", "PATCH"],
           "description": "HTTP method"
         },
         "function": {

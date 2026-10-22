@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { formatDobForField } from '@/entrypoints/content/autofill/form-filler.js';
 
-/** Minimal input stub — no full DOM required for type/placeholder paths */
+/** Minimal input stub - no full DOM required for type/placeholder paths */
 function fakeInput(partial: {
   type?: string;
   placeholder?: string;

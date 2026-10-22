@@ -3,9 +3,12 @@ import { onDestroy, tick } from 'svelte';
 import { t } from 'svelte-i18n';
 import type { ProductTourStep, TourPlacement } from '@/features/product-tour/tour-types.js';
 import type { View } from '@/features/types/view-types.js';
-import Icon from '@/ui/components/icons/Icon.svelte';
 import Btn from '@/ui/components/primitives/Btn.svelte';
-import { portalToBody } from '@/utils/portal-layers.js';
+import IconButton from '@/ui/components/primitives/IconButton.svelte';
+import { beginDialogLifecycle } from '@/utils/ui/dialog-lifecycle.js';
+import { ELEVATION } from '@/utils/ui/elevation.js';
+import { PORTAL_Z_CLASS, portalToBody } from '@/utils/ui/portal-layers.js';
+import { responsiveButtonLayout } from '@/utils/ui/responsive-button-layout.js';
 
 let {
   open = false,
@@ -14,14 +17,14 @@ let {
   onNavigate = async (_view: View) => {},
   onComplete = () => {},
   onSkip = () => {},
-} = $props<{
+}: {
   open?: boolean;
   steps?: ProductTourStep[];
   currentView?: View;
   onNavigate?: (view: View) => void | Promise<void>;
   onComplete?: () => void;
   onSkip?: () => void;
-}>();
+} = $props();
 
 let stepIndex = $state(0);
 let hole = $state({ left: 0, top: 0, width: 0, height: 0, visible: false });
@@ -29,6 +32,8 @@ let tip = $state({ left: 0, top: 0, placement: 'bottom' as TourPlacement });
 let measuring = $state(false);
 let panelEl = $state<HTMLElement | null>(null);
 let overlayEl = $state<HTMLElement | null>(null);
+let measurementGeneration = 0;
+let pendingMeasurementFrame: number | null = null;
 
 $effect(() => {
   if (open && overlayEl) {
@@ -65,21 +70,35 @@ function resolvePlacement(
 }
 
 async function measure() {
-  if (!open || !step) return;
+  const generation = ++measurementGeneration;
+  if (pendingMeasurementFrame !== null) {
+    cancelAnimationFrame(pendingMeasurementFrame);
+    pendingMeasurementFrame = null;
+  }
+  if (!open) return;
+  const isCurrent = () => open && generation === measurementGeneration;
+  // Capture the derived step once, synchronously, so the awaits and the
+  // requestAnimationFrame below never read a destroyed component's $derived
+  // (which would trigger Svelte's `derived_inert` warning).
+  const s = step;
+  if (!s) return;
   measuring = true;
 
   // Navigate if needed
-  if (step.view && step.view !== currentView) {
-    await onNavigate(step.view);
+  if (s.view && s.view !== currentView) {
+    await onNavigate(s.view);
+    if (!isCurrent()) return;
     await tick();
     // Allow view content to paint
     await new Promise((r) => setTimeout(r, 80));
+    if (!isCurrent()) return;
   }
 
   await tick();
+  if (!isCurrent()) return;
 
-  const pad = step.padding ?? 6;
-  const targetSel = step.target;
+  const pad = s.padding ?? 6;
+  const targetSel = s.target;
   let el: Element | null = null;
   if (targetSel) {
     el = document.querySelector(targetSel);
@@ -104,6 +123,7 @@ async function measure() {
     /* ignore */
   }
   await new Promise((r) => setTimeout(r, 60));
+  if (!isCurrent()) return;
 
   const rect = el.getBoundingClientRect();
   hole = {
@@ -117,7 +137,7 @@ async function measure() {
   // Estimate tip size (before bind) then refine next frame
   const tipW = panelEl?.offsetWidth || 280;
   const tipH = panelEl?.offsetHeight || 160;
-  const placement = resolvePlacement(step.placement, rect, tipW, tipH);
+  const placement = resolvePlacement(s.placement, rect, tipW, tipH);
 
   let left = rect.left + rect.width / 2;
   let top = rect.bottom + 12;
@@ -143,14 +163,15 @@ async function measure() {
   measuring = false;
 
   // Second pass once panel is measured
-  requestAnimationFrame(() => {
-    if (!panelEl || !step?.target) return;
-    const el2 = document.querySelector(step.target);
+  pendingMeasurementFrame = requestAnimationFrame(() => {
+    pendingMeasurementFrame = null;
+    if (!isCurrent() || !panelEl || !s.target) return;
+    const el2 = document.querySelector(s.target);
     if (!el2) return;
     const r2 = el2.getBoundingClientRect();
     const w = panelEl.offsetWidth;
     const h = panelEl.offsetHeight;
-    const p = resolvePlacement(step.placement, r2, w, h);
+    const p = resolvePlacement(s.placement, r2, w, h);
     let L = r2.left + r2.width / 2 - w / 2;
     let T = r2.bottom + 12;
     if (p === 'top') T = r2.top - 12 - h;
@@ -185,7 +206,15 @@ function onResize() {
 }
 
 $effect(() => {
-  if (!open) return;
+  if (!open) {
+    measurementGeneration += 1;
+    if (pendingMeasurementFrame !== null) {
+      cancelAnimationFrame(pendingMeasurementFrame);
+      pendingMeasurementFrame = null;
+    }
+    measuring = false;
+    return;
+  }
   window.addEventListener('resize', onResize);
   window.addEventListener('scroll', onResize, true);
   return () => {
@@ -212,6 +241,17 @@ function handleKey(e: KeyboardEvent) {
     e.preventDefault();
     onSkip();
   } else if (e.key === 'ArrowRight' || e.key === 'Enter') {
+    // A focused button already activates on Enter natively - handling it here
+    // too would advance the tour TWICE from the trap's default-focused Next
+    // button. Buttons handle their own Enter; the window handler only covers
+    // presses that land outside interactive elements.
+    if (
+      e.key === 'Enter' &&
+      e.target instanceof HTMLElement &&
+      e.target.closest('button, a, [role="button"]')
+    ) {
+      return;
+    }
     e.preventDefault();
     next();
   } else if (e.key === 'ArrowLeft') {
@@ -226,7 +266,21 @@ $effect(() => {
   return () => window.removeEventListener('keydown', handleKey);
 });
 
+// Keep Tab cycling inside the tour panel while it is open (the tour is a
+// modal dialog - keyboard focus must not escape into the page behind it).
+$effect(() => {
+  if (!open) return;
+  const lifecycle = beginDialogLifecycle({ lockBodyScroll: false });
+  void tick().then(() => lifecycle.attach(overlayEl, panelEl));
+  return () => lifecycle.cleanup();
+});
+
 onDestroy(() => {
+  measurementGeneration += 1;
+  if (pendingMeasurementFrame !== null) {
+    cancelAnimationFrame(pendingMeasurementFrame);
+    pendingMeasurementFrame = null;
+  }
   window.removeEventListener('keydown', handleKey);
   window.removeEventListener('resize', onResize);
   window.removeEventListener('scroll', onResize, true);
@@ -236,7 +290,7 @@ onDestroy(() => {
 {#if open && step}
   <div
     bind:this={overlayEl}
-    class="fixed inset-0 z-[10050]"
+    class="fixed inset-0 {PORTAL_Z_CLASS.tour}"
     role="dialog"
     aria-modal="true"
     aria-labelledby="product-tour-title"
@@ -244,26 +298,26 @@ onDestroy(() => {
     <!-- Full-screen dim; cutout via box-shadow on hole -->
     {#if hole.visible}
       <div
-        class="absolute rounded-xl pointer-events-none transition-all duration-200 ease-out ring-2 ring-md-primary/80"
+        class="absolute rounded-xl pointer-events-none motion-safe:transition-all motion-safe:duration-200 ease-out ring-2 ring-md-primary/80"
         style="
           left: {hole.left}px;
           top: {hole.top}px;
           width: {hole.width}px;
           height: {hole.height}px;
-          box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.62);
+          box-shadow: 0 0 0 9999px var(--color-md-scrim-modal);
         "
       ></div>
       <!-- Block clicks outside hole -->
       <div class="absolute inset-0" style="pointer-events: auto"></div>
       <!-- Allow interaction with hole area (optional - keep blocked for guided feel) -->
     {:else}
-      <div class="absolute inset-0 bg-black/55 backdrop-blur-[2px]"></div>
+      <div class="absolute inset-0 bg-md-scrim-modal backdrop-blur-[2px]"></div>
     {/if}
 
     <!-- Tooltip / step card -->
     <div
       bind:this={panelEl}
-      class="absolute z-[10051] w-[min(300px,calc(100vw-24px))] rounded-2xl border border-md-outline-variant/30 bg-md-surface shadow-2xl p-4 text-md-on-surface transition-all duration-200"
+      class="dialog-padding absolute z-10 w-[min(300px,calc(100vw-24px))] rounded-2xl border border-md-outline-variant/30 bg-md-surface {ELEVATION.level3} text-md-on-surface motion-safe:transition-all motion-safe:duration-200"
       style={tip.placement === 'center'
         ? `left: 50%; top: 50%; transform: translate(-50%, -50%);`
         : `left: ${tip.left}px; top: ${tip.top}px;`}
@@ -273,7 +327,7 @@ onDestroy(() => {
           <div class="flex gap-1 flex-wrap">
             {#each steps as _, i (i)}
               <div
-                class="h-1.5 rounded-full transition-all {i === stepIndex
+                class="h-1.5 rounded-full motion-safe:transition-all {i === stepIndex
                   ? 'w-4 bg-md-primary'
                   : i < stepIndex
                     ? 'w-1.5 bg-md-primary/50'
@@ -281,31 +335,21 @@ onDestroy(() => {
               ></div>
             {/each}
           </div>
-          <span class="text-xs text-md-on-surface/45 shrink-0"
+          <span class="text-xs text-md-on-surface-variant shrink-0"
             >{stepIndex + 1} / {total}</span
           >
         </div>
-        <button
-          type="button"
-          class="w-7 h-7 flex items-center justify-center rounded-full hover:bg-md-surface-variant/60 shrink-0"
-          aria-label={$t('productTour.skip')}
-          onclick={(e) => {
-            e.stopPropagation();
-            onSkip();
-          }}
-        >
-          <Icon name="x" class="w-4 h-4 text-md-on-surface/50" />
-        </button>
+        <IconButton icon="close" ariaLabel={$t('productTour.skip')} title={$t('productTour.skip')} onclick={onSkip} />
       </div>
 
-      <h3 id="product-tour-title" class="text-sm font-bold tracking-tight mb-1">
+      <h2 id="product-tour-title" class="dialog-heading mb-2">
         {$t(step.titleKey)}
-      </h3>
-      <p class="text-xs text-md-on-surface/70 leading-relaxed mb-4">
+      </h2>
+      <p class="dialog-description mb-3">
         {$t(step.bodyKey)}
       </p>
 
-      <div class="flex gap-2">
+      <div class="flex flex-nowrap gap-3" use:responsiveButtonLayout data-action-tier="S">
         {#if !isFirst}
           <Btn
             variant="outline"
@@ -329,7 +373,7 @@ onDestroy(() => {
 
       <button
         type="button"
-        class="w-full mt-2 text-xs text-md-on-surface/45 hover:text-md-on-surface/70 py-1"
+        class="md-action w-full min-h-10 mt-2 rounded-xl text-sm text-md-on-surface-variant py-1"
         onclick={(e) => {
           e.stopPropagation();
           onSkip();

@@ -1,77 +1,73 @@
-import { describe, expect, test } from 'bun:test';
-import { hashPassword, verifyPassword } from '@/utils/crypto';
+import { afterAll, describe, expect, mock, test } from 'bun:test';
+
+mock.module('wxt/browser', () => ({
+  browser: {
+    storage: {
+      onChanged: { addListener: () => {} },
+      local: { get: async () => ({}) },
+    },
+    runtime: { onMessage: { addListener: () => {} } },
+  },
+}));
+const { ARGON2ID_KDF, hashPassword, verifyPassword } = await import('@/utils/security/crypto');
+afterAll(() => mock.restore());
 
 describe('hashPassword', () => {
-  test('returns salt:iterations:key format with hex chars only', async () => {
+  test('stores a versioned Argon2id profile, salt, and 256-bit output', async () => {
     const hash = await hashPassword('hello');
-    expect(hash).toMatch(/^[0-9a-f]+:\d+:[0-9a-f]+$/);
+    expect(hash).toMatch(/^argon2id\$format=1\$v=19\$m=19456,t=2,p=1\$[0-9a-f]{32}\$[0-9a-f]{64}$/);
   });
 
-  test('salt and key segments have correct lengths', async () => {
-    const hash = await hashPassword('hello');
-    const [salt, iterations, key] = hash.split(':');
-    expect(salt.length).toBe(32); // 16 bytes × 2
-    expect(Number(iterations)).toBeGreaterThan(0);
-    expect(key.length).toBe(64); // 32 bytes × 2
-  });
-
-  test('produces different hashes for same input (random salt)', async () => {
+  test('produces different hashes for the same input with random salts', async () => {
     const h1 = await hashPassword('password123');
     const h2 = await hashPassword('password123');
-    expect(h1).not.toBe(h2); // Different salt each time
+    expect(h1).not.toBe(h2);
   });
 
   test('produces different hashes for different inputs', async () => {
-    const [, , k1] = (await hashPassword('abc')).split(':');
-    const [, , k2] = (await hashPassword('def')).split(':');
-    expect(k1).not.toBe(k2);
+    const h1 = await hashPassword('abc');
+    const h2 = await hashPassword('def');
+    const h1Parts = h1.split('$');
+    const h2Parts = h2.split('$');
+    expect(h1Parts[h1Parts.length - 1]).not.toBe(h2Parts[h2Parts.length - 1]);
   });
 
-  test('is deterministic when same salt is supplied', async () => {
+  test('is deterministic when the same salt is supplied', async () => {
     const first = await hashPassword('hello');
-    const [saltHex] = first.split(':');
-    const second = await hashPassword('hello', saltHex);
-    expect(first).toBe(second);
+    const saltHex = first.split('$')[4];
+    expect(await hashPassword('hello', saltHex)).toBe(first);
   });
 
-  test('handles empty string', async () => {
-    const hash = await hashPassword('');
-    expect(hash).toMatch(/^[0-9a-f]+:\d+:[0-9a-f]+$/);
+  test('handles empty, unicode, and long passwords', async () => {
+    for (const password of ['', 'héllo wörld', 'x'.repeat(10000)]) {
+      await expect(hashPassword(password)).resolves.toMatch(/^argon2id\$/);
+    }
   });
 
-  test('handles unicode characters', async () => {
-    const hash = await hashPassword('héllo wörld');
-    expect(hash).toMatch(/^[0-9a-f]+:\d+:[0-9a-f]+$/);
-  });
-
-  test('handles long input', async () => {
-    const hash = await hashPassword('x'.repeat(10000));
-    expect(hash).toMatch(/^[0-9a-f]+:\d+:[0-9a-f]+$/);
+  test('rejects non-current profiles and malformed salts', async () => {
+    await expect(hashPassword('secret', 'abc')).rejects.toThrow('Invalid salt hex');
+    expect(
+      await verifyPassword(
+        'secret',
+        `argon2id$format=1$v=19$m=19456,t=2,p=1$${'a'.repeat(32)}$${'b'.repeat(64)}`
+      )
+    ).toBe(false);
+    expect(ARGON2ID_KDF.algorithm).toBe('argon2id');
   });
 });
 
 describe('verifyPassword', () => {
-  test('correct password verifies', async () => {
+  test('correct password verifies and wrong password fails', async () => {
     const hash = await hashPassword('secret');
     expect(await verifyPassword('secret', hash)).toBe(true);
-  });
-
-  test('wrong password fails', async () => {
-    const hash = await hashPassword('secret');
     expect(await verifyPassword('wrong', hash)).toBe(false);
   });
 
-  test('verifies a legacy salt:key hash (pre-iteration-embedding)', async () => {
-    // Legacy hashes were `salt:key` derived with the old 210k iteration count.
-    const legacySalt = 'a'.repeat(32);
-    const full = await hashPassword('legacy-pass', legacySalt, 210_000);
-    const legacyHash = `${legacySalt}:${full.split(':')[2]}`;
-    expect(legacyHash.split(':')).toHaveLength(2);
-    expect(await verifyPassword('legacy-pass', legacyHash)).toBe(true);
-    expect(await verifyPassword('wrong', legacyHash)).toBe(false);
-  });
-
-  test('returns false for malformed hash', async () => {
+  test('rejects old and malformed formats without deriving a key', async () => {
     expect(await verifyPassword('anything', 'notahash')).toBe(false);
+    expect(await verifyPassword('secret', `${'a'.repeat(32)}:${'b'.repeat(64)}`)).toBe(false);
+    expect(await verifyPassword('secret', 'argon2id$format=1$v=19$m=999999999,t=2,p=1$x$y')).toBe(
+      false
+    );
   });
 });

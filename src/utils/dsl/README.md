@@ -1,15 +1,23 @@
-# DSL (Domain Specific Language) Documentation
+# DSL (JSON-driven email fetching)
 
-This directory contains the modular DSL engine components for the JSON-driven EmailService.
+The JSON-driven EmailService engine lives in this directory as a single
+module, **email-fetcher.ts**. Older revisions of this document described a
+planned multi-file split (`template-resolver.ts`, `path-extractor.ts`,
+`request-builder.ts`, `response-parser.ts`) that was never shipped - those
+files do not exist, and all import paths in this document point at
+`@/utils/dsl/email-fetcher.js`.
 
-## Architecture
+## Responsibilities
 
-The DSL engine is split into focused, testable modules:
-
-- **template-resolver.ts** - Resolves template variables like `{auth.token}`, `{timestamp}`, `{random}`
-- **path-extractor.ts** - Extracts values from nested objects using dot notation
-- **request-builder.ts** - Builds HTTP requests based on operation configuration
-- **response-parser.ts** - Parses API responses based on configuration
+- **Template resolution** - template variables (`{auth.token}`, `{timestamp}`,
+  `{random}`, `{instanceUrl}`, custom `context.variables`) are resolved inline
+  by `resolveTemplateValue`/`resolveTemplateParams`.
+- **Request building** - `buildRequest` composes URL, auth, query params,
+  headers, body, and cache options from the operation config.
+- **Response parsing** - dot-notation extraction (`extractPath`) and success/
+  data/field mapping (`parseResponse`, `checkForErrors`) run on the response.
+- **Email orchestration** - `fetchEmails` ties the above together with
+  multi-step detail fetching, pagination, and optional raw-source retrieval.
 
 ## Template Variables
 
@@ -17,7 +25,7 @@ Supported template variables in parameter values:
 
 - `{auth.token}` - Authentication token from context
 - `{timestamp}` - Current Unix timestamp
-- `{random}` - Random string (9 characters)
+- `{random}` - Random string (**8** characters, from `randomToken(8)`)
 - `{instanceUrl}` - Dynamic instance URL for multi-instance providers
 - `{variableName}` - Custom variable from context.variables
 
@@ -164,7 +172,7 @@ Configuration for cache-busting and forcing new sessions:
 Some providers serve a server-filtered `mail_body` (stripped `<style>`/`@media`,
 rewritten image URLs) but expose the untouched raw MIME source via a separate
 operation. Configure `emailFetching.rawSource` to fetch it per message and store
-it on `Email.raw_source` — rendering then prefers the original HTML part and
+it on `Email.raw_source` - rendering then prefers the original HTML part and
 `.eml` export emits the raw source verbatim.
 
 ```json
@@ -188,7 +196,7 @@ it on `Email.raw_source` — rendering then prefers the original HTML part and
 - `sourcePath` - dot-notation path of the raw source string in the response
 
 The raw-source call is best-effort: on failure the message still stores with the
-provider's filtered `body_html`. Nothing in the DSL is provider-specific — all
+provider's filtered `body_html`. Nothing in the DSL is provider-specific - all
 values come from `providers.jsonc`.
 
 ## Error Handling
@@ -204,67 +212,17 @@ Configuration for error detection:
 }
 ```
 
-## Using the DSL Components
+## Usage
 
-### Template Resolver
-
-```typescript
-import { resolveTemplateValue } from '@/services/dsl/template-resolver.js';
-
-const value = resolveTemplateValue('{auth.token}', {
-  auth: { token: 'abc123' }
-});
-// Returns: 'abc123'
-```
-
-### Path Extractor
+Everything is exported from the single module:
 
 ```typescript
-import { extractPath } from '@/services/dsl/path-extractor.js';
-
-const data = { result: { email: { address: 'test@example.com' } } };
-const value = extractPath(data, 'result.email.address');
-// Returns: 'test@example.com'
+import {
+  buildRequest,
+  fetchEmails,
+  resolveTemplateValue,
+} from '@/utils/dsl/email-fetcher.js';
 ```
 
-### Request Builder
-
-```typescript
-import { buildRequest } from '@/services/dsl/request-builder.js';
-
-const { url, options } = buildRequest(config, operation, context);
-```
-
-### Response Parser
-
-```typescript
-import { parseResponse, checkForErrors } from '@/services/dsl/response-parser.js';
-
-checkForErrors(data, operation.errorHandling);
-const result = parseResponse(data, operation.response);
-```
-
-## Testing
-
-Each module is designed to be easily unit testable:
-
-```typescript
-import { resolveTemplateValue } from '@/services/dsl/template-resolver.js';
-
-describe('resolveTemplateValue', () => {
-  it('should resolve {auth.token}', () => {
-    const result = resolveTemplateValue('{auth.token}', {
-      auth: { token: 'test' }
-    });
-    expect(result).toBe('test');
-  });
-});
-```
-
-## Benefits of Modular DSL
-
-1. **Testability** - Each module can be tested independently
-2. **Maintainability** - Changes to one aspect don't affect others
-3. **Reusability** - Modules can be used in other contexts
-4. **Clarity** - Each module has a single, well-defined responsibility
-5. **Performance** - Smaller modules can be tree-shaken if needed
+All configuration comes from `providers.jsonc`; nothing here is
+provider-specific.

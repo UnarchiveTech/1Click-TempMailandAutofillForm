@@ -1,36 +1,41 @@
+import type { browser } from 'wxt/browser';
+
 import disallowedDomains from '@/config/domain-policy.jsonc';
-import { DEFAULT_PROVIDER, loadProviderConfig } from '@/utils/email-service.js';
+import { normalizeKeybindings } from '@/features/keyboard-shortcuts/shortcuts.js';
+import { DEFAULT_PROVIDER, loadProviderConfig } from '@/utils/email/email-service.js';
 import { ApiError, getErrorMessage, ValidationError } from '@/utils/errors.js';
-import { t } from '@/utils/i18n-utils.js';
+import { t, tSync } from '@/utils/i18n/i18n-utils.js';
+import { logError } from '@/utils/logger.js';
 import {
   getEnabledInstances,
   setProviderInstance as setProviderInstanceStorage,
-} from '@/utils/instance-manager.js';
+} from '@/utils/provider/instance-manager.js';
 import {
   validateCustomInstanceName,
   validateCustomInstanceUrl,
-} from '@/utils/instance-validation.js';
-import { logError } from '@/utils/logger.js';
-import { defaultDomainKey } from '@/utils/storage-keys.js';
-import { debounce } from '@/utils/time.js';
-import type { Keybindings, ProviderInstance } from '@/utils/types.js';
-import { DEFAULT_KEYBINDINGS } from '@/utils/types.js';
-import {
-  ALL_BACKUP_CATEGORIES,
-  type BackupCategory,
-  exportBackup,
-  importBackup,
-  parseBackupFile,
-  resolveBackupPayload,
-} from './backup-actions.js';
+} from '@/utils/provider/instance-validation.js';
+import { DEFAULT_PRE_EXPIRY_WINDOW_MINUTES } from '@/utils/provider/provider-expiry.js';
+import { defaultDomainKey } from '@/utils/storage/storage-keys.js';
+import { writeWithRetry } from '@/utils/storage/storage-write.js';
+import { debounce } from '@/utils/time/time.js';
+import type {
+  AutoRenewScope,
+  EmailPreviewMode,
+  Keybindings,
+  ProviderInstance,
+} from '@/utils/types.js';
 
 export interface SettingsState {
   autoCopy: boolean;
   autoRenew: boolean;
+  autoRenewScope: AutoRenewScope;
+  /** Auto-renew lead time in minutes before expiry (1-30). */
+  autoRenewWindowMinutes: number;
   selectedProvider: string;
   providerInstances: ProviderInstance[];
   selectedProviderInstance: string | null;
   customColor: string;
+  globalZoomEnabled: boolean;
   showDeveloperSettings: boolean;
   enableLogging: boolean;
   savingSettings: boolean;
@@ -42,17 +47,20 @@ export interface SettingsState {
   expiryWarningThreshold: number;
   keybindings: Keybindings;
   autoRefreshInterval: number;
-  emailPreviewEnabled: boolean;
+  emailPreviewMode: EmailPreviewMode;
   defaultDomain: string;
 }
 
 export interface SettingsSetters {
   setAutoCopy: (value: boolean) => void;
   setAutoRenew: (value: boolean) => void;
+  setAutoRenewScope: (value: AutoRenewScope) => void;
+  setAutoRenewWindowMinutes: (value: number) => void;
   setSelectedProvider: (value: string) => void;
   setProviderInstances: (instances: ProviderInstance[]) => void;
   setSelectedProviderInstance: (instanceId: string | null) => void;
   setCustomColor: (value: string) => void;
+  setGlobalZoomEnabled: (value: boolean) => void;
   setShowDeveloperSettings: (value: boolean) => void;
   setEnableLogging: (value: boolean) => void;
   setSavingSettings: (value: boolean) => void;
@@ -64,10 +72,10 @@ export interface SettingsSetters {
   setExpiryWarningThreshold: (value: number) => void;
   setKeybindings: (value: Keybindings) => void;
   setAutoRefreshInterval: (value: number) => void;
-  setEmailPreviewEnabled: (value: boolean) => void;
+  setEmailPreviewMode: (value: EmailPreviewMode) => void;
   setDefaultDomain: (value: string) => void;
   setShowToast: (message: string, type: 'success' | 'error' | 'warning') => void;
-  loadInboxes: () => Promise<void>;
+  loadAddresses: () => Promise<void>;
   /** Optional confirm dialog before sensitive actions (e.g. host permission). */
   confirmAsync?: (message: string) => Promise<boolean>;
 }
@@ -87,21 +95,31 @@ export async function loadSettings(
     const result = (await ext.storage.local.get([
       'autoCopy',
       'autoRenew',
+      'autoRenewScope',
       'selectedProvider',
       'customColor',
+      'globalZoomEnabled',
       'developerSettings',
       'emailRetentionDays',
       'faviconCaching',
       'notificationSettings',
       'keybindings',
       'autoRefreshInterval',
-      'emailPreviewEnabled',
+      'emailPreviewMode',
+      'preExpiryWindowMinutes',
     ])) as {
       autoCopy?: boolean;
       autoRenew?: boolean;
+      autoRenewScope?: AutoRenewScope;
+      /** User-configurable auto-renew lead time in minutes (1-30). */
+      preExpiryWindowMinutes?: number;
       selectedProvider?: string;
       customColor?: string;
-      developerSettings?: { showDeveloperSettings: boolean; enableLogging: boolean };
+      globalZoomEnabled?: boolean;
+      developerSettings?: {
+        showDeveloperSettings: boolean;
+        enableLogging: boolean;
+      };
       emailRetentionDays?: number;
       faviconCaching?: 'direct' | 'local';
       notificationSettings?: {
@@ -111,12 +129,19 @@ export async function loadSettings(
       };
       keybindings?: Keybindings;
       autoRefreshInterval?: number;
-      emailPreviewEnabled?: boolean;
+      emailPreviewMode?: EmailPreviewMode;
     };
     if (result.autoCopy !== undefined) setters.setAutoCopy(result.autoCopy);
     if (result.autoRenew !== undefined) setters.setAutoRenew(result.autoRenew);
+    if (result.autoRenewScope !== undefined) setters.setAutoRenewScope(result.autoRenewScope);
+    if (result.preExpiryWindowMinutes !== undefined) {
+      setters.setAutoRenewWindowMinutes(result.preExpiryWindowMinutes);
+    } else {
+      setters.setAutoRenewWindowMinutes(DEFAULT_PRE_EXPIRY_WINDOW_MINUTES);
+    }
     if (result.selectedProvider) setters.setSelectedProvider(result.selectedProvider);
     if (result.customColor) setters.setCustomColor(result.customColor);
+    setters.setGlobalZoomEnabled(result.globalZoomEnabled === true);
     if (result.developerSettings) {
       setters.setShowDeveloperSettings(result.developerSettings.showDeveloperSettings || false);
       setters.setEnableLogging(result.developerSettings.enableLogging || false);
@@ -142,21 +167,20 @@ export async function loadSettings(
       setters.setSoundEnabled(true);
       setters.setExpiryWarningThreshold(60 * 60 * 1000);
     }
-    if (result.keybindings) {
-      // Merge with defaults so newly added shortcuts appear for existing users
-      setters.setKeybindings({ ...DEFAULT_KEYBINDINGS, ...result.keybindings });
-    } else {
-      setters.setKeybindings(DEFAULT_KEYBINDINGS);
-    }
+    // Merge new defaults and repair collisions/bare printable shortcuts left
+    // by older recorder versions before the dispatcher reads user settings.
+    setters.setKeybindings(normalizeKeybindings(result.keybindings));
     if (result.autoRefreshInterval !== undefined) {
-      setters.setAutoRefreshInterval(result.autoRefreshInterval);
+      setters.setAutoRefreshInterval(normalizeAutoRefreshInterval(result.autoRefreshInterval));
     } else {
       setters.setAutoRefreshInterval(30000);
     }
-    if (result.emailPreviewEnabled !== undefined) {
-      setters.setEmailPreviewEnabled(result.emailPreviewEnabled);
+    // Clamp at the storage boundary: only the two known modes are accepted,
+    // anything stale/corrupt falls back to the floating-tooltip default.
+    if (result.emailPreviewMode === 'tooltip' || result.emailPreviewMode === 'expanded') {
+      setters.setEmailPreviewMode(result.emailPreviewMode);
     } else {
-      setters.setEmailPreviewEnabled(true);
+      setters.setEmailPreviewMode('tooltip');
     }
     // Load default domain from per-provider scoped key
     const provider = result.selectedProvider || DEFAULT_PROVIDER;
@@ -177,17 +201,20 @@ export async function loadSettings(
  * @param setters - Settings setter functions
  */
 export async function saveSettings(
-  ext: typeof browser,
+  _ext: typeof browser,
   state: SettingsState,
   setters: SettingsSetters
 ) {
   setters.setSavingSettings(true);
   try {
-    await ext.storage.local.set({
+    await writeWithRetry({
       autoCopy: state.autoCopy,
       autoRenew: state.autoRenew,
+      autoRenewScope: state.autoRenewScope,
+      preExpiryWindowMinutes: state.autoRenewWindowMinutes,
       selectedProvider: state.selectedProvider,
       customColor: state.customColor,
+      globalZoomEnabled: state.globalZoomEnabled,
       developerSettings: {
         showDeveloperSettings: state.showDeveloperSettings,
         enableLogging: state.enableLogging,
@@ -199,16 +226,17 @@ export async function saveSettings(
         soundEnabled: state.soundEnabled,
         expiryWarningThreshold: state.expiryWarningThreshold,
       },
+      // NOTE: state.keybindings must already be detached from Svelte 5 deep
+      // proxies before it reaches here (see settingsState() in AppLayout) -
+      // Firefox's structured-clone rejects Proxy objects (DataCloneError).
       keybindings: state.keybindings,
-      autoRefreshInterval: state.autoRefreshInterval,
-      emailPreviewEnabled: state.emailPreviewEnabled,
+      autoRefreshInterval: normalizeAutoRefreshInterval(state.autoRefreshInterval),
+      emailPreviewMode: state.emailPreviewMode,
     });
     // Save default domain to per-provider scoped key
-    if (state.defaultDomain) {
-      await ext.storage.local.set({
-        [defaultDomainKey(state.selectedProvider)]: state.defaultDomain,
-      });
-    }
+    await writeWithRetry({
+      [defaultDomainKey(state.selectedProvider)]: state.defaultDomain,
+    });
     setters.setShowToast(await t('toasts.settingsSaved'), 'success');
   } catch (e: unknown) {
     logError('saveSettings error:', undefined, e instanceof Error ? e : new Error(String(e)));
@@ -221,13 +249,17 @@ export async function saveSettings(
 // Centralized write queue cache to prevent storage write thrashing
 let pendingSettings: Record<string, unknown> = {};
 
-const flushSettingsWrite = debounce(async (ext: typeof browser) => {
+const flushSettingsWrite = debounce(async (_ext: typeof browser) => {
   if (Object.keys(pendingSettings).length === 0) return;
   const toWrite = { ...pendingSettings };
   pendingSettings = {};
   try {
-    await ext.storage.local.set(toWrite);
+    await writeWithRetry(toWrite);
   } catch (e) {
+    // The snapshot was already cleared - re-queue it UNDER any writes that
+    // arrived while the flush was in flight, so a failed flush retries its
+    // keys instead of dropping them (newer values still win per key).
+    pendingSettings = { ...toWrite, ...pendingSettings };
     logError(
       'Failed flushing debounced settings write:',
       undefined,
@@ -236,9 +268,24 @@ const flushSettingsWrite = debounce(async (ext: typeof browser) => {
   }
 }, 400);
 
-export function queueSettingsWrite(ext: typeof browser, key: string, value: unknown) {
+function queueSettingsWrite(ext: typeof browser, key: string, value: unknown) {
   pendingSettings[key] = value;
   flushSettingsWrite(ext);
+}
+
+/**
+ * Synchronously dispatch any pending debounced settings write (e.g. on page
+ * hide / teardown) so queued keys are not stranded by an unload that arrives
+ * before the debounce window elapses. The underlying write stays
+ * fire-and-forget; on failure it re-queues itself via the flush catch above
+ * and is picked up by the next toggle or flush call (no auto-retry timer, so
+ * a persistent storage failure cannot spin a 400ms retry loop).
+ */
+export function flushPendingSettingsWrites(ext: typeof browser): void {
+  if (Object.keys(pendingSettings).length > 0) {
+    flushSettingsWrite(ext);
+  }
+  flushSettingsWrite.flush();
 }
 
 /**
@@ -277,11 +324,14 @@ export async function toggleEnableLogging(
     showDeveloperSettings: state.showDeveloperSettings,
     enableLogging: newValue,
   });
-  setters.setShowToast(`Logging ${newValue ? 'enabled' : 'disabled'}`, 'success');
+  setters.setShowToast(
+    await t(newValue ? 'toasts.loggingEnabled' : 'toasts.loggingDisabled'),
+    'success'
+  );
 }
 
 /**
- * Handle provider change and reload inboxes
+ * Handle provider change and reload addresses
  * @param _ext - Browser extension API (unused)
  * @param provider - New provider to select
  * @param setters - Settings setter functions
@@ -292,7 +342,7 @@ export async function handleProviderChange(
   setters: SettingsSetters
 ) {
   setters.setSelectedProvider(provider);
-  await setters.loadInboxes();
+  await setters.loadAddresses();
 }
 
 /**
@@ -314,21 +364,27 @@ export async function saveAutoRenew(ext: typeof browser, value: boolean) {
 }
 
 /**
- * Save email retention days setting to browser storage
+ * Save auto-renew scope setting to browser storage
  * @param ext - Browser extension API
- * @param value - Number of days to retain emails
+ * @param value - Scope: backfill all addresses, default for new only, or ask
  */
-export async function saveEmailRetentionDays(ext: typeof browser, value: number) {
-  queueSettingsWrite(ext, 'emailRetentionDays', value);
+export async function saveAutoRenewScope(ext: typeof browser, value: AutoRenewScope) {
+  queueSettingsWrite(ext, 'autoRenewScope', value);
 }
 
 /**
- * Save favicon caching setting to browser storage
+ * Save auto-renew lead time (minutes before expiry) to browser storage
  * @param ext - Browser extension API
- * @param value - Favicon caching mode ('direct' or 'local')
+ * @param value - Minutes before expiry (1-30)
  */
-export async function saveFaviconCaching(ext: typeof browser, value: 'direct' | 'local') {
-  queueSettingsWrite(ext, 'faviconCaching', value);
+export async function saveAutoRenewWindowMinutes(ext: typeof browser, value: number) {
+  queueSettingsWrite(ext, 'preExpiryWindowMinutes', value);
+}
+
+function normalizeAutoRefreshInterval(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 30_000;
+  if (value === 0) return 0;
+  return Math.max(10_000, Math.min(3_600_000, value));
 }
 
 /**
@@ -346,36 +402,41 @@ export async function handleColorChange(ext: typeof browser, color: string) {
  * @param provider - Provider to switch to
  * @param setters - Settings setter functions
  */
-export async function switchProvider(
-  ext: typeof browser,
-  provider: string,
-  setters: SettingsSetters
-) {
+async function switchProvider(ext: typeof browser, provider: string, setters: SettingsSetters) {
   setters.setSelectedProvider(provider);
-  await ext.storage.local.set({ selectedProvider: provider });
+  await writeWithRetry({ selectedProvider: provider });
   const config = loadProviderConfig(provider);
   if (config.ui?.multiInstance) {
     await loadProviderInstances(ext, setters);
   }
-  await setters.loadInboxes();
-  setters.setShowToast(`Switched to ${config.displayName}`, 'success');
+  await setters.loadAddresses();
+  setters.setShowToast(
+    // `t` here is the flat-vars translator (`Record<string, string|number>`),
+    // not svelte-i18n's `$t` - passing `{ values: … }` left `{name}` unfilled.
+    await t('toasts.switchedProvider', { name: config.displayName }),
+    'success'
+  );
 }
-
-export const changeProvider = switchProvider;
 
 /**
  * Load provider instances from storage
  * @param ext - Browser extension API
  * @param setters - Settings setter functions
  */
+export const changeProvider = switchProvider;
+
 export async function loadProviderInstances(ext: typeof browser, setters: SettingsSetters) {
   try {
-    const { selectedProvider } = await ext.storage.local.get(['selectedProvider']);
+    const { selectedProvider } = (await ext.storage.local.get(['selectedProvider'])) as {
+      selectedProvider?: string;
+    };
     const provider = selectedProvider || DEFAULT_PROVIDER;
-    const response = await ext.runtime.sendMessage({ type: 'getProviderInstances', provider });
+    const response = await ext.runtime.sendMessage({
+      type: 'getProviderInstances',
+      provider,
+    });
     if (response?.success) setters.setProviderInstances(response.instances || []);
-    // Selection is derived from the enabled/disabled instance pool (the
-    // blacklist) — the legacy selectedInstance_<provider> pin is retired.
+    // Selection is derived from the enabled/disabled instance pool.
     // Exactly one enabled instance ≈ a pin; several ≈ random pool selection.
     const enabled = await getEnabledInstances(provider);
     if (enabled.length === 1) {
@@ -403,7 +464,9 @@ export async function setProviderInstance(
   ext: typeof browser,
   setters: SettingsSetters
 ) {
-  const { selectedProvider } = await ext.storage.local.get(['selectedProvider']);
+  const { selectedProvider } = (await ext.storage.local.get(['selectedProvider'])) as {
+    selectedProvider?: string;
+  };
   const provider = selectedProvider || DEFAULT_PROVIDER;
   await setProviderInstanceStorage(provider, instanceId);
   if (instanceId === 'random') {
@@ -411,7 +474,7 @@ export async function setProviderInstance(
   } else {
     setters.setShowToast(await t('toasts.instanceUpdated'), 'success');
   }
-  await setters.loadInboxes();
+  await setters.loadAddresses();
 }
 
 export async function addCustomInstance(
@@ -425,7 +488,14 @@ export async function addCustomInstance(
     await validateCustomInstanceUrl(url);
   } catch (e) {
     if (e instanceof ValidationError) {
-      setters.setShowToast(e.message, 'error');
+      // `e.message` is either a descriptive English log string or the leaf of a
+      // translation key - never render it. The mapped key is what the user sees.
+      setters.setShowToast(
+        e.translationKey.startsWith('errors.')
+          ? tSync(e.translationKey)
+          : await t('toasts.validationFailed'),
+        'error'
+      );
       return;
     }
     setters.setShowToast(await t('toasts.validationFailed'), 'error');
@@ -437,9 +507,10 @@ export async function addCustomInstance(
 
   // JSON-driven disallowed-suffix policy (src/config/domain-policy.jsonc).
   const blacklistedPatterns: string[] = disallowedDomains;
-  const isBlacklisted = blacklistedPatterns.some(
-    (pattern) => domain === pattern.replace(/^\./, '') || domain.endsWith(pattern)
-  );
+  const isBlacklisted = blacklistedPatterns.some((pattern) => {
+    const suffix = pattern.trim().toLowerCase().replace(/^\.+/, '');
+    return !!suffix && (domain === suffix || domain.endsWith(`.${suffix}`));
+  });
 
   if (isBlacklisted) {
     setters.setShowToast(await t('toasts.domainNotAllowed'), 'error');
@@ -448,8 +519,15 @@ export async function addCustomInstance(
 
   const originPattern = `${parsedUrl.protocol}//${parsedUrl.host}/*`;
   try {
-    const hasOrigin = await ext.permissions.contains({ origins: [originPattern] });
-    if (!hasOrigin) {
+    const [hasOrigin, hasDnsOrigin] = await Promise.all([
+      ext.permissions.contains({ origins: [originPattern] }),
+      ext.permissions.contains({ origins: ['https://dns.google/*'] }),
+    ]);
+    const missingOrigins = [
+      ...(!hasOrigin ? [originPattern] : []),
+      ...(!hasDnsOrigin ? ['https://dns.google/*'] : []),
+    ];
+    if (missingOrigins.length > 0) {
       const origin = `${parsedUrl.protocol}//${parsedUrl.host}`;
       if (setters.confirmAsync) {
         const confirmed = await setters.confirmAsync(
@@ -457,7 +535,9 @@ export async function addCustomInstance(
         );
         if (!confirmed) return;
       }
-      const granted = await ext.permissions.request({ origins: [originPattern] });
+      const granted = await ext.permissions.request({
+        origins: missingOrigins,
+      });
       if (!granted) {
         setters.setShowToast(await t('errors.permissionDenied'), 'error');
         return;
@@ -474,8 +554,11 @@ export async function addCustomInstance(
 
   const response = await ext.runtime.sendMessage({
     type: 'addCustomInstance',
-    action: 'addCustomProviderInstance',
-    instance: { name: name.toLowerCase().replace(/\s+/g, '-'), displayName: name, apiUrl: url },
+    instance: {
+      name: name.toLowerCase().replace(/\s+/g, '-'),
+      displayName: name,
+      apiUrl: url,
+    },
   });
   if (response?.success) {
     setters.setShowToast(await t('toasts.customInstanceAdded'), 'success');
@@ -488,83 +571,31 @@ export async function hardReset(ext: typeof browser, setters: SettingsSetters) {
     // Send message to background script FIRST so it can reset alarms and caches before storage is cleared
     const response = await ext.runtime.sendMessage({ type: 'hardReset' });
 
-    // Now clear UI storage
+    if (!response?.success) {
+      throw new ApiError(response?.error || (await t('toasts.hardResetFailed')), { response });
+    }
+
+    // Clear UI storage only after the background reset succeeds, then restore
+    // the invalidation marker returned by the background handler. Without this
+    // step local.clear() erases forceNewSessions before providers can observe it.
     await ext.storage.local.clear();
     if ('sync' in ext.storage && ext.storage.sync) {
       await ext.storage.sync.clear();
     }
+    await writeWithRetry({
+      lastHardReset:
+        typeof response.lastHardReset === 'number' ? response.lastHardReset : Date.now(),
+      forceNewSessions: true,
+    });
 
-    if (response?.success) {
-      setters.setShowToast(await t('toasts.hardResetCompleted'), 'success');
-      setTimeout(() => window.location.reload(), 1000);
-    } else throw new ApiError(response?.error || (await t('toasts.hardResetFailed')), { response });
-  } catch (_e) {
+    setters.setShowToast(await t('toasts.hardResetCompleted'), 'success');
+    setTimeout(() => window.location.reload(), 1000);
+  } catch (error) {
+    logError(
+      'hardReset error:',
+      undefined,
+      error instanceof Error ? error : new Error(String(error))
+    );
     setters.setShowToast(await t('toasts.hardResetFailed'), 'error');
   }
-}
-
-// ── Backup export/import (UI uses ExportBackupDialog / ImportBackupDialog) ──
-// Thin wrappers kept for programmatic / legacy callers.
-
-export type { BackupCategory };
-export type ExportCategory = BackupCategory | 'all';
-
-/** Export full backup (all categories). Prefer ExportBackupDialog in UI. */
-export async function exportData(ext: typeof browser) {
-  try {
-    await exportBackup(ext, { categories: [...ALL_BACKUP_CATEGORIES] });
-  } catch {
-    /* ignore */
-    throw new Error('Export failed');
-  }
-}
-
-/** Export a single category (or all). Prefer ExportBackupDialog in UI. */
-export async function exportCategory(ext: typeof browser, category: ExportCategory): Promise<void> {
-  try {
-    const categories =
-      category === 'all' ? [...ALL_BACKUP_CATEGORIES] : [category as BackupCategory];
-    await exportBackup(ext, { categories });
-  } catch {
-    /* ignore */
-    throw new Error(`Export of ${category} failed`);
-  }
-}
-
-/**
- * Legacy one-shot import: pick file and import everything present (including expired).
- * Prefer ImportBackupDialog in UI for selective import.
- */
-export function importData(ext: typeof browser, loadInboxes: () => Promise<void>) {
-  const input = document.createElement('input');
-  input.type = 'file';
-  input.accept = '.json';
-  input.style.display = 'none';
-  document.body.appendChild(input);
-
-  input.onchange = async (e) => {
-    document.body.removeChild(input);
-    const file = (e.target as HTMLInputElement).files?.[0];
-    if (!file) return;
-    try {
-      const parsed = await parseBackupFile(file);
-      if (parsed.kind === 'encrypted') {
-        throw new Error('Password-protected backup requires the Import dialog');
-      }
-      const payload = await resolveBackupPayload(parsed);
-      await importBackup(
-        ext,
-        payload,
-        {
-          categories: [...ALL_BACKUP_CATEGORIES],
-          includeEmails: true,
-          expiredMode: 'all',
-        },
-        loadInboxes
-      );
-    } catch (err: unknown) {
-      throw new Error(`Import failed: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  };
-  input.click();
 }

@@ -4,7 +4,7 @@ import {
   parseSearchShortcuts,
   reconcileBooleanPill,
   reconcileSavedFilterQuery,
-} from '@/utils/search-shortcuts.js';
+} from '@/utils/search/search-shortcuts.js';
 
 describe('parseSearchShortcuts', () => {
   test('returns empty defaults for empty queries', () => {
@@ -210,5 +210,11 @@ describe('reconcileSavedFilterQuery', () => {
 
   test('keeps non-boolean pills untouched', () => {
     expect(reconcileSavedFilterQuery('from:github.com', false, false)).toBe('from:github.com');
+  });
+
+  test('preserves the saved unread toggle and honors explicit negation', () => {
+    expect(reconcileSavedFilterQuery('invoices', false, false, true)).toBe('is:unread invoices');
+    expect(reconcileSavedFilterQuery('!is:unread invoices', false, false)).toBe('invoices');
+    expect(reconcileSavedFilterQuery('is:unread invoices', false, false, false)).toBe('invoices');
   });
 });

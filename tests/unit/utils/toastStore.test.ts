@@ -1,8 +1,43 @@
-// biome-ignore-all lint/suspicious/noExplicitAny: test typings
 import { describe, expect, mock, test } from 'bun:test';
-import { toastStore } from '@/utils/toastStore.js';
+import type { Toast } from '@/ui/blocks/feedback/toast-types.js';
+import { toastStore } from '@/utils/ui/toastStore.js';
 
 describe('toastStore', () => {
+  test('a focused Undo survives new messages while the stack stays bounded', () => {
+    toastStore.clear();
+    let current: Toast[] = [];
+    const unsubscribe = toastStore.subscribe((toasts) => {
+      current = toasts;
+    });
+    const undo = () => {};
+    const focused = toastStore.success('Archived', 8000, undo);
+    toastStore.setFocused(focused, true);
+    for (let i = 0; i < 5; i++) toastStore.info(`New ${i}`);
+    expect(current).toHaveLength(3);
+    expect(current[0].id).toBe(focused);
+    expect(current[0].undoAction).toBe(undo);
+    toastStore.setFocused(focused, false);
+    toastStore.info('After leaving Undo');
+    expect(current.some((toast) => toast.id === focused)).toBe(false);
+    unsubscribe();
+  });
+
+  test('dedupe preserves a focused control and does not discard an existing Undo', () => {
+    toastStore.clear();
+    let current: Toast[] = [];
+    const unsubscribe = toastStore.subscribe((toasts) => {
+      current = toasts;
+    });
+    const id = toastStore.info('Copied');
+    toastStore.setFocused(id, true);
+    expect(toastStore.info('Copied')).toBe(id);
+    const undo = () => {};
+    const actionId = toastStore.success('Archived', 8000, undo);
+    expect(toastStore.info('Archived')).toBe(actionId);
+    expect(current.find((toast) => toast.id === actionId)?.undoAction).toBe(undo);
+    toastStore.clear();
+    unsubscribe();
+  });
   test('adds and removes toasts correctly', () => {
     toastStore.clear();
 
@@ -27,7 +62,7 @@ describe('toastStore', () => {
   test('different toast types (success, error, warning, info) call add method', () => {
     toastStore.clear();
 
-    let currentToasts: any[] = [];
+    let currentToasts: Toast[] = [];
     const unsubscribe = toastStore.subscribe((toasts) => {
       currentToasts = toasts;
     });
@@ -54,7 +89,7 @@ describe('toastStore', () => {
   test('caps the maximum number of toasts at 3', () => {
     toastStore.clear();
 
-    let currentToasts: any[] = [];
+    let currentToasts: Toast[] = [];
     const unsubscribe = toastStore.subscribe((toasts) => {
       currentToasts = toasts;
     });
@@ -75,7 +110,7 @@ describe('toastStore', () => {
   test('dedupes identical messages within the dedupe window', () => {
     toastStore.clear();
 
-    let currentToasts: any[] = [];
+    let currentToasts: Toast[] = [];
     const unsubscribe = toastStore.subscribe((toasts) => {
       currentToasts = toasts;
     });

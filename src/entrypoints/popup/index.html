@@ -1,24 +1,14 @@
 <!DOCTYPE html>
-<html lang="en" style="width:360px;height:600px;margin:0;padding:0;overflow:hidden;">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=360, initial-scale=1.0">
-  <title>1Click: Temp Mail & Autofill Form</title>
-  <style>
-    /* Chrome sizes the action popup to document size; kill UA margin/padding so 360px is fully visible */
-    html, body, #app {
-      width: 360px;
-      height: 600px;
-      margin: 0;
-      padding: 0;
-      overflow: hidden;
-      box-sizing: border-box;
-    }
-    body {
-      min-width: 360px;
-      max-width: 360px;
-    }
-  </style>
+  <!-- WXT lifts this <title> into the manifest's `action.default_title`, so it must
+       stay a `__MSG_*__` placeholder - Chrome resolves placeholders in the
+       manifest (and CSS), never in HTML. A popup renders no title bar, so the
+       literal placeholder is never shown; the live document.title is set to the
+       localized name at runtime by AppLayout (actionTitle.tempMailAndAutofill). -->
+  <title>__MSG_extName__</title>
 </head>
 <body>
   <div id="app"></div>

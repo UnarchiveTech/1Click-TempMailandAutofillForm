@@ -86,10 +86,10 @@ export function collectInputsDeep(
     /* intentional: hostile DOM may reject querySelectorAll */
   }
 
-  // Find shadow roots by targeting custom elements instead of all elements (*)
+  // Find shadow roots by checking elements with shadowRoot attached
   try {
-    const hosts = root.querySelectorAll('*-*');
-    for (const el of Array.from(hosts)) {
+    const all = root.querySelectorAll('*');
+    for (const el of Array.from(all)) {
       try {
         const sr = (el as HTMLElement).shadowRoot;
         if (sr) out.push(...collectInputsDeep(sr, _depth + 1, visited));

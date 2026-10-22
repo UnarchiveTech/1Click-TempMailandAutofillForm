@@ -1,0 +1,171 @@
+# safari-smoke.yml
+#
+# Real-Safari smoke suite for the 1Click Temp Mail extension (Safari Web
+# Extension / MV3). Kept SEPARATE from pr-validation.yml on purpose:
+#   - GitHub Actions cannot dispatch a single job, so putting this here makes
+#     the macOS cost opt-in (workflow_dispatch + weekly schedule) instead of
+#     dragging the whole audit + e2e suite along on every manual trigger.
+#   - Real Safari only exists on macOS; every other e2e job runs on ubuntu.
+#   - A job that never runs on PRs does not belong in the "PR validation"
+#     workflow (pr-validation.yml) or the release pipeline (release.yml).
+#
+# Why Selenium/safaridriver and not Playwright:
+#   - Playwright cannot launch real Safari and cannot load extensions outside
+#     its Chromium builds. The repo's WebKit engine coverage lives in
+#     tests/e2e-webkit/ (playwright.webkit.config.ts) and runs on Linux as a
+#     cheap proxy - this workflow is the REAL-browser complement.
+#   - Selenium's Safari driver talks to Apple's `safaridriver` (WebDriver),
+#     the same automation wall Firefox hit: no extension-install API and no
+#     navigation into extension UI pages. Scope therefore mirrors the Firefox
+#     Selenium suite (scripts/e2e-firefox.ts): wrapper app boots, extension
+#     content scripts inject into a real page, autofill command pipeline runs.
+#
+# Status: SCAFFOLD. The deterministic half (packaging -> xcodebuild -> app
+# boot) is implemented and fails closed, so the first dispatched run validates
+# the toolchain on a hosted runner for free. The assertion half (driving the
+# extension in Safari) still needs `scripts/safari-smoke.ts` - see the
+# placeholder step at the bottom and docs/TEST_COVERAGE_PLAN.md.
+#
+# Run: gh workflow run safari-smoke.yml   (or GitHub UI -> Actions -> Safari smoke)
+# Schedule: weekly Monday 06:00 UTC.
+
+name: Safari smoke (real browser, macOS)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1" # weekly: Monday 06:00 UTC
+
+concurrency:
+  group: safari-smoke
+  cancel-in-progress: true
+
+permissions:
+  # Read-only: this workflow never writes to the repo or uploads artifacts.
+  contents: read
+
+jobs:
+  safari-smoke:
+    name: Safari real-browser smoke
+    runs-on: macos-latest # Safari extensions run only inside real Safari (macOS)
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - name: Cache Bun dependencies
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.bun/install/cache
+            node_modules
+          key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock', '**/package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Build Safari extension bundle
+        # WXT stops at the raw web-extension bundle (.output/safari-mv3);
+        # Safari cannot load it directly - the packager step below wraps it.
+        run: bun run build:safari
+
+      - name: Enable Safari remote automation
+        # WebDriver for real Safari. safaridriver --enable needs root on a
+        # fresh runner; the defaults make Safari accept automation + unsigned
+        # local extensions for development.
+        run: |
+          sudo safaridriver --enable
+          defaults write com.apple.Safari IncludeDevelopMenu -bool true
+          defaults write com.apple.Safari AllowRemoteAutomation -bool true
+          # Best-effort: the unsigned-extension allowance is primarily a
+          # Develop-menu toggle. Harmless no-op if the key is unsupported.
+          defaults write com.apple.Safari AllowUnsignedExtensions -bool true || true
+          safaridriver --version
+
+      - name: Convert web extension to Xcode wrapper (Apple packager)
+        # README Option B - local Xcode wrapper. Flags match the documented
+        # command exactly (they were validated for store packaging).
+        env:
+          APP_NAME: "1Click Temp Mail"
+          BUNDLE_ID: "com.unarchivetech.1click-temp-mail"
+        run: |
+          set -euo pipefail
+          rm -rf .scratch/safari-wrapper
+          mkdir -p .scratch/safari-wrapper
+          cd .scratch/safari-wrapper
+          xcrun safari-web-extension-packager ../../.output/safari-mv3 \
+            --app-name "$APP_NAME" \
+            --bundle-identifier "$BUNDLE_ID" \
+            --macos-only --no-open --force
+          cd ../..
+          PROJ=$(ls -d .scratch/safari-wrapper/*.xcodeproj | head -1)
+          test -n "$PROJ" || { echo "::error::Packager produced no Xcode project"; exit 1; }
+          echo "wrapper project: $PROJ"
+          echo "PROJ=$PROJ" >> "$GITHUB_ENV"
+
+      - name: Build wrapper app (unsigned Debug)
+        env:
+          PROJ: ${{ env.PROJ }}
+        run: |
+          set -euo pipefail
+          xcodebuild -project "$PROJ" -list
+          # Discover the scheme instead of assuming it matches the app name.
+          SCHEME=$(xcodebuild -project "$PROJ" -list | sed -n '/Schemes:/,$p' | tail -n +2 | sed -n '1s/^ *//p')
+          test -n "$SCHEME" || { echo "::error::Could not discover a scheme in $PROJ"; exit 1; }
+          echo "scheme: $SCHEME"
+          # No signing team on a CI runner - unsigned Debug is enough to boot
+          # locally with "Allow Unsigned Extensions" enabled above.
+          xcodebuild -project "$PROJ" -scheme "$SCHEME" -configuration Debug \
+            -derivedDataPath .scratch/safari-derived build CODE_SIGNING_ALLOWED=NO
+          APP_PATH=$(find .scratch/safari-derived/Build/Products/Debug -maxdepth 1 -name '*.app' | head -1)
+          test -n "$APP_PATH" || { echo "::error::xcodebuild produced no .app"; exit 1; }
+          echo "built app: $APP_PATH"
+          echo "APP_PATH=$APP_PATH" >> "$GITHUB_ENV"
+
+      - name: Launch wrapper app and probe extension boot
+        # Mirrors the Firefox smoke's first assertion: the packaged bundle
+        # actually starts. Opening the wrapper app is what registers the
+        # embedded .appex with Safari for development.
+        env:
+          APP_NAME: "1Click Temp Mail"
+          APP_PATH: ${{ env.APP_PATH }}
+        run: |
+          set -euo pipefail
+          open "$APP_PATH"
+          sleep 6
+          pgrep -f "$APP_NAME" >/dev/null || {
+            echo "::error::$APP_NAME is not running after launch"
+            exit 1
+          }
+          echo "wrapper app is running"
+          PLUGIN=$(find "$APP_PATH/Contents" -name '*.appex' 2>/dev/null | head -1 || true)
+          if [ -n "$PLUGIN" ]; then
+            echo "embedded extension present: $PLUGIN"
+          else
+            # Structure differs by Xcode/Safari version - warn, do not fail.
+            echo "::warning::No .appex found under $APP_PATH/Contents (structure may differ)"
+          fi
+
+      # ── Placeholder: the assertion half ─────────────────────────────────────
+      # The extension toggle in Safari has NO WebDriver/CLI API. On a real
+      # runner it must be flipped once per profile (Safari -> Settings ->
+      # Extensions) or via AppleScript/System Events - script that here before
+      # the suite runs. Then land scripts/safari-smoke.ts mirroring
+      # scripts/e2e-firefox.ts (Selenium -> safaridriver) asserting:
+      #   - the extension is enabled and its background event page boots
+      #   - content scripts inject into a real page (host element + form padding)
+      #   - the Alt+Shift+F autofill pipeline runs without errors
+      # docs/TEST_COVERAGE_PLAN.md tracks this as the remaining gap.
+      - name: Extension enable + smoke suite (manual / not yet implemented)
+        run: |
+          echo "::notice::Toolchain verified (packaging, xcodebuild, app boot)."
+          echo "::notice::Remaining (manual first time): enable the extension in"
+          echo "::notice::Safari -> Settings -> Extensions, then land scripts/safari-smoke.ts"
+          echo "::warning::Safari extension behavior is NOT yet asserted by this job"

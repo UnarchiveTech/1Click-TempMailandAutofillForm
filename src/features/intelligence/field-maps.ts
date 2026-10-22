@@ -1,10 +1,17 @@
 /**
- * Per-site field maps — remember which selectors worked for each field kind.
+ * Per-site field maps - remember which selectors worked for each field kind.
  */
 
 import { browser } from 'wxt/browser';
+import { buildSelectorHint } from '@/utils/dom/selector-hint.js';
+import { LOCKS, withLock } from '@/utils/mutex.js';
+import { writeWithRetry } from '@/utils/storage/storage-write.js';
 import { normalizeDomain } from './storage.js';
 import type { FormFieldKind } from './types.js';
+
+// Re-exported for the existing `features/intelligence/index.ts` barrel and any
+// other importer; the implementation lives in the dependency-free leaf module.
+export { buildSelectorHint };
 
 export interface FieldMapEntry {
   kind: FormFieldKind;
@@ -44,25 +51,40 @@ export async function getFieldMap(domain: string): Promise<SiteFieldMap | null> 
   return all[d] || null;
 }
 
-/** Build a stable-ish selector for an element (id > name > autocomplete > path). */
-export function buildSelectorHint(el: Element): string {
-  if (!(el instanceof HTMLElement)) return el.tagName.toLowerCase();
-  const tag = el.tagName.toLowerCase();
-  if (el.id) return `${tag}#${CSS.escape(el.id)}`;
-  const name = el.getAttribute('name');
-  if (name) return `${tag}[name="${CSS.escape(name)}"]`;
-  const ac = el.getAttribute('autocomplete');
-  if (ac) return `${tag}[autocomplete="${CSS.escape(ac)}"]`;
-  const aria = el.getAttribute('aria-label');
-  if (aria && aria.length < 40) return `${tag}[aria-label="${CSS.escape(aria)}"]`;
-  // Short path from form
-  const form = el.closest('form');
-  if (form) {
-    const inputs = Array.from(form.querySelectorAll(tag));
-    const idx = inputs.indexOf(el);
-    if (idx >= 0) return `form ${tag}:nth-of-type(${idx + 1})`;
-  }
-  return tag;
+async function recordFieldMapHitInternal(
+  domain: string,
+  kind: string,
+  selector: string
+): Promise<void> {
+  const d = normalizeDomain(domain);
+  if (!d || kind === 'unknown') return;
+
+  await withLock(LOCKS.FIELD_MAPS, async () => {
+    const all = await loadAllFieldMaps();
+    const now = Date.now();
+    const map: SiteFieldMap = all[d] || { domain: d, entries: [], updatedAt: now };
+    const existing = map.entries.find(
+      (entry) => entry.kind === kind && entry.selector === selector
+    );
+
+    if (existing) {
+      existing.hits += 1;
+      existing.lastUsedAt = now;
+    } else {
+      map.entries.push({ kind: kind as FormFieldKind, selector, hits: 1, lastUsedAt: now });
+    }
+
+    map.entries.sort((a, b) => b.hits - a.hits || b.lastUsedAt - a.lastUsedAt);
+    map.entries = map.entries.slice(0, MAX_ENTRIES);
+    map.updatedAt = now;
+    all[d] = map;
+
+    // Cap domains by recency.
+    const sorted = Object.values(all).sort((a, b) => b.updatedAt - a.updatedAt);
+    const trimmed: Record<string, SiteFieldMap> = {};
+    for (const entry of sorted.slice(0, MAX_DOMAINS)) trimmed[entry.domain] = entry;
+    await writeWithRetry({ [KEY]: trimmed });
+  });
 }
 
 export async function recordFieldMapHit(
@@ -70,55 +92,42 @@ export async function recordFieldMapHit(
   kind: FormFieldKind,
   el: Element
 ): Promise<void> {
-  const d = normalizeDomain(domain);
-  if (!d || kind === 'unknown') return;
-  const selector = buildSelectorHint(el);
-  const all = await loadAllFieldMaps();
-  const map: SiteFieldMap = all[d] || { domain: d, entries: [], updatedAt: Date.now() };
-  const existing = map.entries.find((e) => e.kind === kind && e.selector === selector);
-  if (existing) {
-    existing.hits += 1;
-    existing.lastUsedAt = Date.now();
-  } else {
-    map.entries.push({ kind: kind as FormFieldKind, selector, hits: 1, lastUsedAt: Date.now() });
-  }
-  map.entries.sort((a, b) => b.hits - a.hits || b.lastUsedAt - a.lastUsedAt);
-  map.entries = map.entries.slice(0, MAX_ENTRIES);
-  map.updatedAt = Date.now();
-  all[d] = map;
-  // Cap domains by recency
-  const sorted = Object.values(all).sort((a, b) => b.updatedAt - a.updatedAt);
-  const trimmed: Record<string, SiteFieldMap> = {};
-  for (const m of sorted.slice(0, MAX_DOMAINS)) trimmed[m.domain] = m;
-  await browser.storage.local.set({ [KEY]: trimmed });
+  await recordFieldMapHitInternal(domain, kind, buildSelectorHint(el));
 }
 
-/** Record a field map hit by selector string (for background handler — no DOM access needed). */
+/** Record a field map hit by selector string (for background handler - no DOM access needed). */
 export async function recordFieldMapHitBySelector(
   domain: string,
   kind: string,
   selector: string
 ): Promise<void> {
+  await recordFieldMapHitInternal(domain, kind, selector);
+}
+
+/** Replace the learned selector for a kind after an explicit user correction. */
+export async function setFieldMapCorrectionBySelector(
+  domain: string,
+  kind: FormFieldKind,
+  selector: string
+): Promise<void> {
   const d = normalizeDomain(domain);
-  if (!d || kind === 'unknown') return;
-  const all = await loadAllFieldMaps();
-  const map: SiteFieldMap = all[d] || { domain: d, entries: [], updatedAt: Date.now() };
-  const existing = map.entries.find((e) => e.kind === kind && e.selector === selector);
-  if (existing) {
-    existing.hits += 1;
-    existing.lastUsedAt = Date.now();
-  } else {
-    map.entries.push({ kind: kind as FormFieldKind, selector, hits: 1, lastUsedAt: Date.now() });
-  }
-  map.entries.sort((a, b) => b.hits - a.hits || b.lastUsedAt - a.lastUsedAt);
-  map.entries = map.entries.slice(0, MAX_ENTRIES);
-  map.updatedAt = Date.now();
-  all[d] = map;
-  // Cap domains by recency
-  const sorted = Object.values(all).sort((a, b) => b.updatedAt - a.updatedAt);
-  const trimmed: Record<string, SiteFieldMap> = {};
-  for (const m of sorted.slice(0, MAX_DOMAINS)) trimmed[m.domain] = m;
-  await browser.storage.local.set({ [KEY]: trimmed });
+  if (!d || kind === 'unknown' || !selector || selector.length > 512) return;
+
+  await withLock(LOCKS.FIELD_MAPS, async () => {
+    const all = await loadAllFieldMaps();
+    const now = Date.now();
+    const map: SiteFieldMap = all[d] || { domain: d, entries: [], updatedAt: now };
+    map.entries = map.entries.filter((entry) => entry.kind !== kind);
+    map.entries.unshift({ kind, selector, hits: 1_000_000, lastUsedAt: now });
+    map.entries = map.entries.slice(0, MAX_ENTRIES);
+    map.updatedAt = now;
+    all[d] = map;
+
+    const sorted = Object.values(all).sort((a, b) => b.updatedAt - a.updatedAt);
+    const trimmed: Record<string, SiteFieldMap> = {};
+    for (const entry of sorted.slice(0, MAX_DOMAINS)) trimmed[entry.domain] = entry;
+    await writeWithRetry({ [KEY]: trimmed });
+  });
 }
 
 /** Resolve best known element for a kind on this domain within a root. */

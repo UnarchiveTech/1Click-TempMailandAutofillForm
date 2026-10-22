@@ -1,0 +1,58 @@
+/* Shared state layers for action buttons. Paint over the container with its
+ * own ink; changing opacity or brightness would also alter the icon and label.
+ * Geometry stays with each component and the responsive action-row fitter. */
+.md-action:not(:disabled):not([aria-disabled="true"]):hover {
+  background-image: linear-gradient(
+    color-mix(in srgb, currentColor 8%, transparent),
+    color-mix(in srgb, currentColor 8%, transparent)
+  );
+}
+
+.md-action:not(:disabled):not([aria-disabled="true"]):active {
+  background-image: linear-gradient(
+    color-mix(in srgb, currentColor 12%, transparent),
+    color-mix(in srgb, currentColor 12%, transparent)
+  );
+}
+
+.md-action:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: -2px;
+}
+
+/* Native inputs own activation; their adjacent, decorative state disc supplies
+ * the same hover, pressed and keyboard cues for checkboxes and radio buttons. */
+.md-choice-input:not(:disabled):hover + .md-choice-state {
+  background-color: color-mix(in srgb, currentColor 8%, transparent);
+}
+
+.md-choice-input:not(:disabled):active + .md-choice-state,
+.md-choice-input:not(:disabled):focus-visible + .md-choice-state {
+  background-color: color-mix(in srgb, currentColor 12%, transparent);
+}
+
+.md-choice-input:not(:disabled):focus-visible + .md-choice-state {
+  outline: 2px solid var(--md-primary);
+  outline-offset: -2px;
+}
+
+/* MD3 checkbox state colors differ for selected and unselected controls. */
+.md-choice-input[type="checkbox"]:not(:disabled):not(:checked):hover + .md-choice-state {
+  background-color: color-mix(in srgb, var(--md-on-surface) 8%, transparent);
+}
+.md-choice-input[type="checkbox"]:not(:disabled):not(:checked):focus-visible + .md-choice-state {
+  background-color: color-mix(in srgb, var(--md-on-surface) 12%, transparent);
+}
+.md-choice-input[type="checkbox"]:not(:disabled):not(:checked):active + .md-choice-state {
+  background-color: color-mix(in srgb, var(--md-primary) 12%, transparent);
+}
+.md-choice-input[type="checkbox"]:not(:disabled):checked:active + .md-choice-state {
+  background-color: color-mix(in srgb, var(--md-on-surface) 12%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .md-action,
+  .md-choice-state {
+    transition: none;
+  }
+}

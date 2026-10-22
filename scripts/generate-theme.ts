@@ -8,7 +8,7 @@ import {
   MaterialDynamicColors,
   SchemeTonalSpot,
   TonalPalette,
-} from '@material/material-color-utilities';
+} from '../src/utils/theme/material-color-utils.js';
 
 // ─── CONFIG ─────────────────────────────────────────────────────────────────
 // Change this seed color to regenerate the entire palette

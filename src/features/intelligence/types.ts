@@ -1,5 +1,5 @@
 /**
- * Intelligence layer types — local memory only (not a password vault).
+ * Intelligence layer types - local memory only (not a password vault).
  * Site profiles, provider health, inbox lifecycle, notification policy.
  */
 
@@ -26,7 +26,7 @@ export type FormFieldKind =
 /** Scored field on a form (content-script FormScore pipeline). */
 export interface ScoredField {
   kind: FormFieldKind;
-  confidence: number; // 0–1
+  confidence: number; // 0-1
   /** CSS selector or rough path for debugging only */
   hint?: string;
 }
@@ -34,7 +34,7 @@ export interface ScoredField {
 export interface FormScore {
   domain: string;
   fields: ScoredField[];
-  /** Overall “this looks like a signup form” 0–1 */
+  /** Overall “this looks like a signup form” 0-1 */
   signupLikelihood: number;
   hasEmail: boolean;
   hasPassword: boolean;
@@ -46,7 +46,7 @@ export interface FormScore {
 export interface SiteProfile {
   domain: string;
   lastIdentityId?: string;
-  lastInboxId?: string;
+  lastAddressId?: string;
   lastEmail?: string;
   lastSuccessAt?: number;
   lastFailureAt?: number;
@@ -77,8 +77,8 @@ export interface ProviderHealth {
   updatedAt: number;
 }
 
-export interface InboxLifecycleStats {
-  inboxId: string;
+export interface AddressLifecycleStats {
+  addressId: string;
   address: string;
   /** Domains this address was used on (autofill / logins) */
   sitesUsed: string[];
@@ -86,7 +86,9 @@ export interface InboxLifecycleStats {
   magicLinkCount: number;
   autofillCount: number;
   lastActivityAt: number;
-  /** 0–100 higher = more valuable / keep longer */
+  /** Set only when a real autofill or stored-message activity is observed. */
+  hasObservedActivity?: boolean;
+  /** 0-100 higher = more valuable / keep longer */
   valueScore: number;
   updatedAt: number;
 }
@@ -99,7 +101,7 @@ export type LifecycleSuggestionKind =
 
 export interface LifecycleSuggestion {
   kind: LifecycleSuggestionKind;
-  inboxId: string;
+  addressId: string;
   address: string;
   reasonKey: string;
   score: number;
@@ -109,7 +111,7 @@ export interface NotificationIntelligenceSettings {
   /** Only notify for OTP / magic-link mail (skip plain newsletters) */
   otpAndMagicOnly: boolean;
   quietHoursEnabled: boolean;
-  /** Local hour 0–23 */
+  /** Local hour 0-23 */
   quietHoursStart: number;
   quietHoursEnd: number;
   /** Sender domains to never notify for */
@@ -145,6 +147,6 @@ export interface AutofillPlan {
 export const INTELLIGENCE_CAPS = {
   maxSiteProfiles: 80,
   maxLatencySamples: 12,
-  maxSitesPerInbox: 40,
+  maxSitesPerAddress: 40,
   maxProviderEntries: 40,
 } as const;

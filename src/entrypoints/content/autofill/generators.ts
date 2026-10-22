@@ -1,6 +1,7 @@
 /**
  * Random data generators for form autofill
  */
+
 import {
   PASSWORD_MAX_LENGTH,
   PASSWORD_MIN_LENGTH,
@@ -12,8 +13,13 @@ import {
   PHONE_PART_MIN,
   USERNAME_MAX_LENGTH,
   USERNAME_MIN_LENGTH,
-} from '@/utils/content-constants.js';
-import { randomInt, randomIntBetween, randomItem, randomToken } from '@/utils/secure-random.js';
+} from '@/utils/content/content-constants.js';
+import {
+  randomInt,
+  randomIntBetween,
+  randomItem,
+  randomToken,
+} from '@/utils/security/secure-random.js';
 
 export function generateUsername(): string {
   const adj = [
@@ -47,7 +53,7 @@ export function generateUsername(): string {
   const a = randomItem(adj) || 'cool';
   const n = randomItem(noun) || 'user';
   const digits = String(randomIntBetween(10, 9999));
-  // Keep within common site limits (3–20)
+  // Keep within common site limits (3-20)
   let u = `${a}${n}${digits}`;
   if (u.length > USERNAME_MAX_LENGTH) u = u.slice(0, USERNAME_MAX_LENGTH);
   if (u.length < USERNAME_MIN_LENGTH) u = `${u}${randomIntBetween(10, 99)}`;
@@ -208,15 +214,18 @@ export function detectPasswordRules(
 
   const minMatch = blob.match(/(?:at least|minimum|min(?:imum)?\.?\s*(?:of)?|≥|>=)\s*(\d{1,2})/);
   if (minMatch) rules.minLength = Math.max(rules.minLength, Number(minMatch[1]));
-  const between = blob.match(/(\d{1,2})\s*(?:to|-|–)\s*(\d{1,2})\s*(?:char|character)/);
+  const between = blob.match(/(\d{1,2})\s*(?:to|-|-)\s*(\d{1,2})\s*(?:char|character)/);
   if (between) {
     rules.minLength = Math.max(rules.minLength, Number(between[1]));
     rules.maxLength = Math.min(rules.maxLength, Number(between[2]));
   }
 
-  if (/upper|capital|majuscule|groß|mayúsc|大文字/.test(blob)) rules.requireUpper = true;
-  if (/lower|minuscule|klein|minúsc|小文字/.test(blob)) rules.requireLower = true;
-  if (/number|digit|numérique|zahl|número|数字/.test(blob)) rules.requireDigit = true;
+  const upperMention = /upper|capital|majuscule|groß|mayúsc|大文字/.test(blob);
+  const lowerMention = /lower|minuscule|klein|minúsc|小文字/.test(blob);
+  const digitMention = /number|digit|numérique|zahl|número|数字/.test(blob);
+  if (upperMention) rules.requireUpper = true;
+  if (lowerMention) rules.requireLower = true;
+  if (digitMention) rules.requireDigit = true;
   if (
     /special|symbol|punctuation|symbole|sonder|especial|記号|特殊/.test(blob) ||
     /[!@#$%^&*]/.test(blob)
@@ -227,6 +236,30 @@ export function detectPasswordRules(
   if (/no special|without special|special characters? not|記号不要|keine sonder/.test(blob)) {
     rules.requireSpecial = false;
   }
+  if (
+    /no (?:uppercase|capital)|without (?:uppercase|capital)|(?:uppercase|capital) (?:not allowed|not required)/.test(
+      blob
+    )
+  ) {
+    rules.requireUpper = false;
+  }
+  if (/no lowercase|without lowercase|lowercase (?:not allowed|not required)/.test(blob)) {
+    rules.requireLower = false;
+  }
+  if (
+    /no (?:numbers?|digits?)|without (?:numbers?|digits?)|(?:numbers?|digits?) (?:not allowed|not required)/.test(
+      blob
+    )
+  ) {
+    rules.requireDigit = false;
+  }
+  if (/only lowercase|lowercase.{0,24}only|only.{0,24}lowercase/.test(blob)) {
+    rules.requireUpper = false;
+    rules.requireSpecial = false;
+  }
+  if (/letters? and numbers? only|numbers? and letters? only/.test(blob)) {
+    rules.requireSpecial = false;
+  }
 
   // Pattern-based hints
   const pattern = field?.getAttribute('pattern') || '';
@@ -235,7 +268,59 @@ export function detectPasswordRules(
     if (pattern.includes('a-z') || pattern.includes('[:lower:]')) rules.requireLower = true;
     if (pattern.includes('0-9') || pattern.includes('\\d')) rules.requireDigit = true;
     if (/[!@#$%^&*_\-\\[\]{}]/.test(pattern)) rules.requireSpecial = true;
+
+    // When a pattern is a single repeated character class, it is an allowlist
+    // (e.g. ^[a-z0-9]{8,}$), not a set of lookahead requirements. Match its
+    // permitted classes so generation cannot add characters the site rejects.
+    const allowlist = pattern.match(/^\^?\[([^\]]+)\](?:(?:[+*?])|(?:\{\d+(?:,\d*)?\}))*\$?$/);
+    if (allowlist) {
+      const chars = allowlist[1];
+      rules.requireUpper = /A-Z/.test(chars);
+      rules.requireLower = /a-z/.test(chars);
+      rules.requireDigit = /0-9|\\d/.test(chars);
+      rules.requireSpecial =
+        [...DEFAULT_SPECIAL].some((char) => char !== '-' && chars.includes(char)) ||
+        chars.includes('\\-');
+    }
   }
+
+  // Explicit exclusions and allow-list wording override conservative defaults.
+  const onlyLowerAndDigit =
+    /(?:only\s+)?(?:lowercase|lower\s+case|small\s+letters?)[^.!?;]{0,32}(?:and|\+|,)\s*(?:digits?|numbers?)[^.!?;]{0,16}only/.test(
+      blob
+    ) ||
+    /only\s+(?:lowercase|lower\s+case|small\s+letters?)[^.!?;]{0,32}(?:and|\+|,)\s*(?:digits?|numbers?)/.test(
+      blob
+    ) ||
+    /(?:digits?|numbers?)[^.!?;]{0,32}(?:and|\+|,)\s*(?:lowercase|lower\s+case|small\s+letters?)[^.!?;]{0,16}only/.test(
+      blob
+    );
+  const upperExcluded =
+    /(?:no|without|exclude|excluding)\s+(?:uppercase|upper\s+case|capital\s+letters?)|(?:uppercase|upper\s+case|capital\s+letters?)[^.!?;]{0,20}(?:not\s+(?:required|allowed|needed)|optional)/.test(
+      blob
+    );
+  const lowerExcluded =
+    /(?:no|without|exclude|excluding)\s+(?:lowercase|lower\s+case)|(?:lowercase|lower\s+case)[^.!?;]{0,20}(?:not\s+(?:required|allowed|needed)|optional)/.test(
+      blob
+    );
+  const digitExcluded =
+    /(?:no|without|exclude|excluding)\s+(?:digits?|numbers?)|(?:digits?|numbers?)[^.!?;]{0,20}(?:not\s+(?:required|allowed|needed)|optional)/.test(
+      blob
+    );
+  const specialExcluded =
+    /no\s+special|without\s+special|special\s+characters?[^.!?;]{0,20}(?:not\s+(?:required|allowed|needed)|optional)|記号不要|keine\s+sonder/.test(
+      blob
+    );
+  if (onlyLowerAndDigit) {
+    rules.requireUpper = false;
+    rules.requireLower = true;
+    rules.requireDigit = true;
+    rules.requireSpecial = false;
+  }
+  if (upperExcluded) rules.requireUpper = false;
+  if (lowerExcluded) rules.requireLower = false;
+  if (digitExcluded) rules.requireDigit = false;
+  if (specialExcluded) rules.requireSpecial = false;
 
   if (rules.minLength > rules.maxLength) rules.maxLength = rules.minLength + 4;
   rules.minLength = Math.min(Math.max(rules.minLength, 6), 64);
@@ -268,19 +353,30 @@ export function generatePassword(rules?: Partial<PasswordRules>): string {
   if (r.requireSpecial) pool += special;
   if (!pool) pool = lowercase + uppercase + numbers;
 
-  const length = randomIntBetween(r.minLength, Math.max(r.minLength, Math.min(r.maxLength, 20)));
+  // One char per required class (up to 4) must never push the password past
+  // maxLength - e.g. {minLength: 3, maxLength: 3} with all four classes would
+  // otherwise produce a 4-char password. Clamp the required set to maxLength
+  // and never let the target length drop below the required count.
+  const maxLength = Math.max(r.minLength, r.maxLength);
   const required: string[] = [];
-  if (r.requireLower) required.push(lowercase[randomInt(lowercase.length)]);
-  if (r.requireUpper) required.push(uppercase[randomInt(uppercase.length)]);
-  if (r.requireDigit) required.push(numbers[randomInt(numbers.length)]);
-  if (r.requireSpecial) required.push(special[randomInt(special.length)]);
+  if (r.requireLower && required.length < maxLength)
+    required.push(lowercase[randomInt(lowercase.length)]);
+  if (r.requireUpper && required.length < maxLength)
+    required.push(uppercase[randomInt(uppercase.length)]);
+  if (r.requireDigit && required.length < maxLength)
+    required.push(numbers[randomInt(numbers.length)]);
+  if (r.requireSpecial && required.length < maxLength)
+    required.push(special[randomInt(special.length)]);
+
+  const minLength = Math.max(r.minLength, required.length);
+  const length = randomIntBetween(minLength, Math.max(minLength, Math.min(maxLength, 20)));
 
   const chars = [...required];
   while (chars.length < length) {
     chars.push(pool[randomInt(pool.length)]);
   }
 
-  // Fisher–Yates shuffle
+  // Fisher-Yates shuffle
   for (let i = chars.length - 1; i > 0; i--) {
     const j = randomInt(i + 1);
     [chars[i], chars[j]] = [chars[j], chars[i]];
@@ -298,5 +394,5 @@ export function generateSmartPassword(
 
 /**
  * Human-readable username (not password-like).
- * Pattern: word + word + 2–4 digits, no special chars.
+ * Pattern: word + word + 2-4 digits, no special chars.
  */

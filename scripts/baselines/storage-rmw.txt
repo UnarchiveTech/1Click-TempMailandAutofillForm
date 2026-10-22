@@ -1,0 +1,11 @@
+# Whole-key read-modify-write baseline - a ratchet: rows may only disappear.
+# Format: <path><TAB><key>
+# Each row is a storage key a file READS, mutates and writes back whole, with no
+# serialization around the pair - so two concurrent flows can lose one of the
+# writes (see scripts/check-storage-rmw.ts). Rows are pre-existing debt: route
+# the pair through updateStoredObject (one JS context) or hold withLock across
+# it (the background's cross-context lock), then drop the row. A new row is never
+# a fix, because any finding not listed here fails the gate.
+# Refresh (after shrinking) with:
+#   bun scripts/check-storage-rmw.ts --update
+

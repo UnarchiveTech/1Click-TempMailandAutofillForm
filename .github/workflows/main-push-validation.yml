@@ -1,0 +1,72 @@
+name: Main Push Validation
+
+on:
+  # Closes the pre-commit-bypass hole: `git commit --no-verify` pushed straight
+  # to main previously skipped ALL validation (PR validation only fires on
+  # pull_request, release.yml only on tags/dispatch). Every direct push to main
+  # now runs the exact same audit chain + typecheck + unit tests that PRs get,
+  # so gate regressions can't reach the tree silently even without a PR.
+  push:
+    branches:
+      - main
+      - master
+    # Docs/README-only pushes skip the heavy suite, matching pr-validation.yml.
+    # NOTE: keep the ignored list tight - anything touching code, locales,
+    # package.json, or .github must still trigger full validation.
+    paths-ignore:
+      - 'docs/**'
+      - 'docs-site/**'
+      - '**/*.md'
+  workflow_dispatch:
+
+# A rapid burst of pushes to main validates the same final tree multiple times.
+# Only the newest push's run matters - cancel the in-flight one to save minutes.
+concurrency:
+  group: main-push-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  # Read-only: validation never writes anything (no releases, no artifacts).
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - name: Cache Bun dependencies
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.bun/install/cache
+            node_modules
+          key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock', '**/package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: "Run lightweight checks (audit: biome + all check-* scripts)"
+        run: bun run audit
+
+      - name: Run TypeScript type check
+        run: bun run typecheck
+
+      - name: Run automated tests
+        # `--isolate` is REQUIRED (Bun does not honour the `[test] isolate`
+        # bunfig key); without it files share a module registry and global.
+        run: bun test --isolate
+      # NOTE: the extension build (build:all) is intentionally NOT run here -
+      # it's covered by pr-validation.yml on PRs and release.yml on tags, and
+      # this workflow exists to catch gate regressions from hook-bypassing
+      # commits, not to re-verify browser compilation on every push.

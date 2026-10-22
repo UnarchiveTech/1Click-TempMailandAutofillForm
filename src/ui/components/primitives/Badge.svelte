@@ -2,6 +2,8 @@
 import type { Snippet } from 'svelte';
 import { t } from 'svelte-i18n';
 import Icon from '@/ui/components/icons/Icon.svelte';
+import type { KnownIconName } from '@/ui/components/icons/icon-names.js';
+import { getContrastColor } from '@/utils/theme/color-utils.js';
 
 export type BadgeVariant =
   | 'primary'
@@ -17,7 +19,7 @@ let {
   size = 'md',
   customColor = '',
   label = '',
-  icon = '',
+  icon = undefined as KnownIconName | undefined,
   onRemove,
   class: className = '',
   children,
@@ -26,28 +28,16 @@ let {
   size?: 'sm' | 'md';
   customColor?: string;
   label?: string;
-  icon?: string;
+  icon?: KnownIconName;
   onRemove?: () => void;
   class?: string;
   children?: Snippet;
 } = $props();
 
-function getContrastColor(hex: string): string {
-  try {
-    const cleanHex = hex.replace('#', '');
-    const r = parseInt(cleanHex.slice(0, 2), 16);
-    const g = parseInt(cleanHex.slice(2, 4), 16);
-    const b = parseInt(cleanHex.slice(4, 6), 16);
-    return r * 299 + g * 587 + b * 114 > 128000 ? '#1a1c16' : '#ffffff';
-  } catch {
-    return '#ffffff';
-  }
-}
-
 const variantClasses: Record<BadgeVariant, string> = {
   primary: 'bg-md-primary/15 text-md-primary border-md-primary/20',
-  success: 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/20',
-  warning: 'bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/20',
+  success: 'bg-md-success/15 text-md-success border-md-success/20',
+  warning: 'bg-md-warning/15 text-md-warning border-md-warning/20',
   error: 'bg-md-error/15 text-md-error border-md-error/20',
   neutral: 'bg-md-surface-variant/40 text-md-on-surface/75 border-md-outline-variant/20',
   outline: 'border border-md-outline-variant/40 text-md-on-surface/80 bg-transparent',
@@ -68,12 +58,12 @@ let inlineStyle = $derived(
   class="inline-flex items-center font-medium rounded-full border transition-colors select-none {sizeClasses[size]} {customColor ? '' : variantClasses[variant]} {className}"
   style={inlineStyle}
 >
-  {#if icon}
+  {#if icon && variant !== 'tag'}
     <Icon name={icon} class={size === 'sm' ? 'w-3 h-3 shrink-0' : 'w-3.5 h-3.5 shrink-0'} />
   {/if}
 
   {#if label}
-    <span>{label}</span>
+    <span class="inline-flex items-center min-w-0">{#if variant === 'tag'}<span aria-hidden="true">#</span>{/if}<span>{label}</span></span>
   {:else if children}
     {@render children()}
   {/if}
@@ -81,14 +71,14 @@ let inlineStyle = $derived(
   {#if onRemove}
     <button
       type="button"
-      class="hover:opacity-75 focus:outline-none shrink-0"
+      class="flex items-center justify-center hover:opacity-75 focus:outline-none shrink-0"
       onclick={(e) => {
         e.stopPropagation();
         onRemove();
       }}
       aria-label={$t('common.remove')}
     >
-      <Icon name="x" class={size === 'sm' ? 'w-3 h-3' : 'w-3.5 h-3.5'} />
+      <Icon name="close" class={size === 'sm' ? 'w-3 h-3' : 'w-3.5 h-3.5'} />
     </button>
   {/if}
 </span>

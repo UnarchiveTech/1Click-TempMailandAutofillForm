@@ -1,0 +1,14 @@
+{
+  "extName": { "message": "1Click: Correo Temp y Autofill" },
+  "extDescription": {
+    "message": "Genera direcciones de correo temporales y autorrellena códigos OTP y formularios de inicio de sesión con un solo clic."
+  },
+  "cmdAutofillForm": { "message": "Autorrellenar el formulario de registro de la página actual" },
+  "cmdOpenAutofillManager": {
+    "message": "Abrir el gestor de autorrelleno (perfiles y credenciales)"
+  },
+  "cmdQuickGenerateInbox": {
+    "message": "Generar rápidamente una nueva dirección de correo temporal"
+  },
+  "cmdCopyLatestOtp": { "message": "Copiar el último código OTP al portapapeles" }
+}

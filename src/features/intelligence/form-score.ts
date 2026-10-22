@@ -1,8 +1,8 @@
 /**
- * FormScore — classify signup-form fields for the autofill intelligence layer.
+ * FormScore - classify signup-form fields for the autofill intelligence layer.
  */
 
-import { safeId, safeName, safePlaceholder } from '@/utils/dom-safe.js';
+import { safeId, safeName, safePlaceholder } from '@/utils/security/dom-safe.js';
 import { normalizeDomain } from '@/utils/validation.js';
 import { classifyFieldA11y } from './a11y-fields.js';
 import type { FormFieldKind, FormScore, ScoredField } from './types.js';

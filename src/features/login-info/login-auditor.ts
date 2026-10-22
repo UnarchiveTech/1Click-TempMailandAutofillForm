@@ -5,11 +5,16 @@
  * - Password reuse across domains
  * - Stale credentials (> 180 days)
  */
-import type { Account, CredentialsHistoryItem } from '@/utils/types.js';
+import { isDeleted, isTimeExpired } from '@/utils/address/address-status.js';
+import type { Address, CredentialsHistoryItem } from '@/utils/types.js';
+
+export type LoginHealthIssueKind = 'expired_mailbox' | 'reused_password' | 'stale_login';
+
+export type LoginHealthSeverity = 'high' | 'medium' | 'low';
 
 export type LoginHealthIssue = {
-  kind: 'expired_mailbox' | 'reused_password' | 'stale_login';
-  severity: 'high' | 'medium' | 'low';
+  kind: LoginHealthIssueKind;
+  severity: LoginHealthSeverity;
   messageKey: string;
 };
 
@@ -21,18 +26,18 @@ export type LoginHealthReport = {
 export function auditLoginHealth(
   login: CredentialsHistoryItem,
   allLogins: CredentialsHistoryItem[],
-  allAccounts: Account[]
+  allAddresses: Address[]
 ): LoginHealthReport {
   const issues: LoginHealthIssue[] = [];
   let score = 100;
 
   // 1. Check if associated email belongs to an expired or deleted temp mailbox
   if (login.email) {
-    const matchedAccount = allAccounts.find(
+    const matchedAddress = allAddresses.find(
       (a) => a.address?.toLowerCase() === login.email?.toLowerCase()
     );
-    if (matchedAccount) {
-      if (matchedAccount.status === 'expired' || matchedAccount.status === 'deleted') {
+    if (matchedAddress) {
+      if (isDeleted(matchedAddress) || isTimeExpired(matchedAddress)) {
         issues.push({
           kind: 'expired_mailbox',
           severity: 'high',

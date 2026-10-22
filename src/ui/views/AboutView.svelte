@@ -1,23 +1,55 @@
 <script lang="ts">
 import { onDestroy, onMount, tick, untrack } from 'svelte';
+import { cubicOut } from 'svelte/easing';
+import { SvelteSet } from 'svelte/reactivity';
+import { slide } from 'svelte/transition';
 import { locale, t } from 'svelte-i18n';
 import { browser } from 'wxt/browser';
+import ButtonGroup from '@/ui/components/composites/ButtonGroup.svelte';
+import FloatingAction from '@/ui/components/composites/FloatingAction.svelte';
+import ModalDialog from '@/ui/components/composites/ModalDialog.svelte';
 import Icon from '@/ui/components/icons/Icon.svelte';
+import type { KnownIconName } from '@/ui/components/icons/icon-names.js';
+import Avatar from '@/ui/components/primitives/Avatar.svelte';
 import Badge from '@/ui/components/primitives/Badge.svelte';
-import { avatarColor } from '@/utils/avatar-color.js';
-import { GITHUB_ISSUES_URL, GITHUB_REPO_URL } from '@/utils/constants.js';
+import Btn from '@/ui/components/primitives/Btn.svelte';
+import { CONSTANTS } from '@/utils/constants.js';
+import { writeWithRetry } from '@/utils/storage/storage-write.js';
+import { AVATAR_BOX } from '@/utils/ui/avatar-size.js';
+import { useReducedMotion } from '@/utils/ui/reduced-motion.svelte.js';
 
 interface Props {
-  context?: 'popup' | 'sidepanel' | 'app';
   version: string;
+  /** Contextual FAB back action → navigate to the page shown before About. */
+  onBack?: () => void;
   onStartProductTour?: () => void;
+  onOpenKeyboardShortcuts?: () => void;
+  onOpenDiagnostics?: () => void;
 }
-let { context = 'popup', version, onStartProductTour }: Props = $props();
+let {
+  version,
+  onBack = () => {},
+  onStartProductTour,
+  onOpenKeyboardShortcuts,
+  onOpenDiagnostics,
+}: Props = $props();
+let sourceCodeOpen = $state(false);
 
-const FAQ_IDS = ['otp', 'autofill', 'export', 'privacy', 'renew', 'tour'] as const;
+const FAQ_IDS = [
+  'otp',
+  'autofill',
+  'export',
+  'privacy',
+  'renew',
+  'tour',
+  'autofillHelp',
+  'identityRouting',
+  'loginExport',
+] as const;
 let openFaq = $state<string | null>('otp');
 /** When true, every FAQ answer is expanded */
 let faqExpandAll = $state(false);
+const motionPreference = useReducedMotion();
 
 function isFaqOpen(id: string): boolean {
   return faqExpandAll || openFaq === id;
@@ -39,12 +71,18 @@ function setExpandAllFaqs(expand: boolean) {
 }
 
 /**
- * FAQ grid columns (1–3). Chosen by measuring each localized question’s
+ * FAQ grid columns (1-3). Chosen by measuring each localized question’s
  * natural single-line width (padding + label + expand icon) against the
- * container — language-agnostic, no font shrinking / wrapping / ellipsis.
+ * container - language-agnostic, no font shrinking / wrapping / ellipsis.
  */
 /** Number of FAQ columns that fit (1 … N); no hard cap at 3 */
 let faqCols = $state(1);
+/**
+ * The grid starts at 1 column until the first measurement lands; painting that
+ * state would flash a 1-column layout that immediately reflows to N (a visible
+ * shift). The grid stays invisible until the measured count is applied.
+ */
+let faqLayoutReady = $state(false);
 let faqGridEl = $state<HTMLElement | null>(null);
 let faqMeasureRowEl = $state<HTMLElement | null>(null);
 let faqMeasureTextEl = $state<HTMLElement | null>(null);
@@ -58,16 +96,21 @@ type GhContributor = { login: string; html_url: string; avatar_url: string; cont
 const CONTRIBUTORS_CACHE_KEY = 'githubContributorsCache_v1';
 const CACHE_MS = 7 * 24 * 60 * 60 * 1000; // 1 week
 
-/** Fallback when API is unavailable */
+/**
+ * Fallback when the API is unavailable. Logins are real GitHub handles (they
+ * key the avatar URL and resolve to the same profile as html_url), not
+ * display names - an avatar built from 'Tejas Mate' hashes differently from
+ * github.com/tejas-mate's own.
+ */
 const FALLBACK_CONTRIBUTORS: GhContributor[] = [
   {
-    login: 'Tejas Mate',
+    login: 'tejas-mate',
     html_url: 'https://github.com/tejas-mate',
     avatar_url: '',
     contributions: 0,
   },
   {
-    login: 'Enzo Davico',
+    login: 'enzo-davico',
     html_url: 'https://github.com/enzo-davico',
     avatar_url: '',
     contributions: 0,
@@ -75,7 +118,14 @@ const FALLBACK_CONTRIBUTORS: GhContributor[] = [
 ];
 
 let contributors = $state<GhContributor[]>(FALLBACK_CONTRIBUTORS);
-let installationType = $state('—');
+/**
+ * Resolves async (chrome.management.getSelf). Null until known - the badge is
+ * hidden in the meantime so no placeholder ever paints. detectInstallType
+ * always resolves to at least 'Other', so the badge always appears.
+ */
+let installationType = $state<string | null>(null);
+/** GitHub avatars can fail (rate-limit placeholder / offline); recover by falling back to the letter avatar. */
+let brokenAvatars = $state(new SvelteSet<string>());
 
 /**
  * Measure natural width of one FAQ question row using a hidden probe that
@@ -133,6 +183,7 @@ async function recomputeFaqColumns() {
 
   const next = pickFaqColumns(containerWidth, widths);
   if (next !== faqCols) faqCols = next;
+  faqLayoutReady = true;
 }
 
 function scheduleFaqRecompute() {
@@ -199,84 +250,154 @@ async function detectInstallType(): Promise<string> {
   return mapInstallType(undefined);
 }
 
-/** Real Chrome Web Store listing; Firefox / Safari / Edge stay ghost until published. */
+/**
+ * Real Chrome Web Store listing. Firefox / Safari / Edge are not published
+ * yet, so their buttons are rendered DISABLED (no href) instead of linking to
+ * ghost URLs that 404 - the '(coming soon)' label already says why.
+ */
 const CHROME_WEB_STORE_URL =
   'https://chromewebstore.google.com/detail/1click-temp-mail-with-aut/oilafkncmnboohnekbnokkifjbnjeecn';
-const FIREFOX_STORE_GHOST = 'https://addons.mozilla.org/firefox/addon/1click-temp-mail/'; // ghost — not published yet
-const SAFARI_STORE_GHOST = 'https://apps.apple.com/app/1click-temp-mail'; // ghost — not published yet
-const EDGE_STORE_GHOST =
-  'https://microsoftedge.microsoft.com/addons/detail/1click-temp-mail/placeholder'; // ghost
 
-function storeUrl(): { label: string; href: string } {
+function storeUrl(): { label: string; href: string | null; icon: KnownIconName } {
   const ua = typeof navigator !== 'undefined' ? navigator.userAgent : '';
   if (/Edg\//i.test(ua)) {
     return {
       label: $t('about.storeEdge') as string,
-      href: EDGE_STORE_GHOST,
+      href: null,
+      icon: 'edge',
     };
   }
   if (/Firefox\//i.test(ua)) {
     return {
       label: $t('about.storeFirefox') as string,
-      href: FIREFOX_STORE_GHOST,
+      href: null,
+      icon: 'firefox',
     };
   }
   // Safari (extension page in Safari UI often still uses WebKit UA)
   if (/Safari\//i.test(ua) && !/Chrome\//i.test(ua) && !/Chromium\//i.test(ua)) {
     return {
       label: $t('about.storeSafari') as string,
-      href: SAFARI_STORE_GHOST,
+      href: null,
+      icon: 'safari',
     };
   }
   return {
     label: $t('about.storeChrome') as string,
     href: CHROME_WEB_STORE_URL,
+    icon: 'chrome',
   };
 }
 
+interface ContributorsCacheEntry {
+  at: number;
+  list: GhContributor[];
+  /** GitHub cache validators from the last successful response. */
+  etag?: string;
+  lastModified?: string;
+}
+
+async function fetchContributors(repoPath: string): Promise<GhContributor[]> {
+  const url = `https://api.github.com/repos/${repoPath}/contributors?per_page=12`;
+  const cached = (await browser.storage.local.get([CONTRIBUTORS_CACHE_KEY])) as {
+    [CONTRIBUTORS_CACHE_KEY]?: ContributorsCacheEntry;
+  };
+  const entry = cached[CONTRIBUTORS_CACHE_KEY];
+  const validators: Record<string, string> = { Accept: 'application/vnd.github+json' };
+  if (entry?.etag) validators['If-None-Match'] = entry.etag;
+  if (entry?.lastModified) validators['If-Modified-Since'] = entry.lastModified;
+
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) {
+      // Linear backoff; 403/429 responses honor Retry-After when present.
+      const retryAfter =
+        lastError instanceof GithubRateLimitedError ? lastError.retryAfterMs : null;
+      await new Promise((r) => setTimeout(r, retryAfter ?? attempt * 1000));
+    }
+    try {
+      const res = await fetch(url, { headers: validators });
+      if (res.status === 304) {
+        if (entry?.list?.length) return entry.list;
+        // 304 without a usable cache - treat as a miss and fall through.
+        lastError = new Error('304 without cached list');
+        continue;
+      }
+      if (res.status === 403 || res.status === 429) {
+        const retryAfterHeader = res.headers.get('Retry-After');
+        const retryAfterMs = retryAfterHeader ? Number(retryAfterHeader) * 1000 : null;
+        lastError = new GithubRateLimitedError(retryAfterMs);
+        continue;
+      }
+      if (!res.ok) {
+        lastError = new Error(String(res.status));
+        continue;
+      }
+      const data = (await res.json()) as Array<{
+        login: string;
+        html_url: string;
+        avatar_url: string;
+        contributions: number;
+      }>;
+      if (!Array.isArray(data) || data.length === 0) {
+        lastError = new Error('empty contributors response');
+        continue;
+      }
+      // Persist the validators so next launch can revalidate (304 = free).
+      const fresh: ContributorsCacheEntry = {
+        at: Date.now(),
+        list: data.map((c) => ({
+          login: c.login,
+          html_url: c.html_url,
+          avatar_url: c.avatar_url,
+          contributions: c.contributions,
+        })),
+        etag: res.headers.get('ETag') ?? undefined,
+        lastModified: res.headers.get('Last-Modified') ?? undefined,
+      };
+      try {
+        await writeWithRetry({ [CONTRIBUTORS_CACHE_KEY]: fresh });
+      } catch {
+        /* ignore */
+      }
+      return fresh.list;
+    } catch (err) {
+      // Network/parse failure - retry, then give up.
+      lastError = err;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('contributors fetch failed');
+}
+
+/** Thrown on 403/429 so the backoff can honor GitHub's Retry-After. */
+class GithubRateLimitedError extends Error {
+  retryAfterMs: number | null;
+  constructor(retryAfterMs: number | null) {
+    super('rate limited');
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
 async function loadContributors() {
+  // Serve the cache immediately (stale-while-revalidate), then revalidate.
   try {
     const cached = (await browser.storage.local.get([CONTRIBUTORS_CACHE_KEY])) as {
-      [CONTRIBUTORS_CACHE_KEY]?: { at: number; list: GhContributor[] };
+      [CONTRIBUTORS_CACHE_KEY]?: ContributorsCacheEntry;
     };
     const entry = cached[CONTRIBUTORS_CACHE_KEY];
     if (entry?.list?.length && Date.now() - entry.at < CACHE_MS) {
       contributors = entry.list;
-      return;
     }
   } catch {
     /* ignore */
   }
 
   try {
-    // Public GitHub API — rate limited; cache for 1 week
-    const repoPath = GITHUB_REPO_URL.replace(/^https?:\/\/github\.com\//, '').replace(/\/$/, '');
-    const res = await fetch(`https://api.github.com/repos/${repoPath}/contributors?per_page=12`, {
-      headers: { Accept: 'application/vnd.github+json' },
-    });
-    if (!res.ok) throw new Error(String(res.status));
-    const data = (await res.json()) as Array<{
-      login: string;
-      html_url: string;
-      avatar_url: string;
-      contributions: number;
-    }>;
-    if (Array.isArray(data) && data.length) {
-      const list = data.map((c) => ({
-        login: c.login,
-        html_url: c.html_url,
-        avatar_url: c.avatar_url,
-        contributions: c.contributions,
-      }));
-      contributors = list;
-      try {
-        await browser.storage.local.set({
-          [CONTRIBUTORS_CACHE_KEY]: { at: Date.now(), list },
-        });
-      } catch {
-        /* ignore */
-      }
-    }
+    const repoPath = CONSTANTS.GITHUB_REPO_URL.replace(/^https?:\/\/github\.com\//, '').replace(
+      /\/$/,
+      ''
+    );
+    contributors = await fetchContributors(repoPath);
   } catch {
     /* ignore */
     contributors = FALLBACK_CONTRIBUTORS;
@@ -287,7 +408,7 @@ onMount(() => {
   void detectInstallType().then((v) => {
     installationType = v;
   });
-  void loadContributors();
+  void loadContributors(); // stale-while-revalidate: cached list renders first, 304 refresh keeps it fresh
   // After fonts load, widths can change (CJK / variable fonts)
   try {
     void document.fonts?.ready?.then(() => scheduleFaqRecompute());
@@ -313,7 +434,7 @@ $effect(() => {
   return () => ro.disconnect();
 });
 
-// Recalculate when language changes — depend on each localized question string
+// Recalculate when language changes - depend on each localized question string
 $effect(() => {
   void $locale;
   for (const id of FAQ_IDS) {
@@ -325,67 +446,84 @@ $effect(() => {
 let store = $derived(storeUrl());
 </script>
 
-<div class="flex flex-col h-full min-h-0 overflow-y-auto">
-    <div class="flex flex-col items-center gap-4 px-3 py-5">
+{#snippet externalLink(label: string, href: string, icon: KnownIconName)}
+  <a
+    {href}
+    target="_blank"
+    rel="noopener noreferrer"
+    class="md-action inline-flex items-center justify-center rounded-xl border border-md-outline bg-transparent text-md-on-surface font-medium transition-colors"
+  >
+    <Icon name={icon} class="shrink-0" />
+    <span class="leading-tight">{label}</span>
+  </a>
+{/snippet}
+
+<div class="scroll-body flex flex-col h-full min-h-0 overflow-y-auto">
+    <div class="flex flex-col items-center gap-4 py-5">
       <h2 class="font-bold text-base text-center">{$t('about.title')}</h2>
       <div class="flex items-center justify-center gap-2 -mt-2 flex-wrap">
         <Badge variant="primary" size="sm">v{version}</Badge>
-        <Badge variant="neutral" size="sm" class="capitalize">
-          {$t('about.installationType')}: {installationType}
-        </Badge>
+        {#if installationType !== null}
+          <Badge variant="neutral" size="sm" class="capitalize">
+            {$t('about.installationType')}: {installationType}
+          </Badge>
+        {/if}
       </div>
       <p class="text-sm text-md-on-surface/60 text-center leading-relaxed">
         {$t('about.description')}
       </p>
 
-      <!-- Single-row toolbar: GitHub · Store · Report -->
-      <div class="flex w-full gap-1.5" role="toolbar" aria-label={$t('about.linksToolbar')}>
-        <a
-          href={GITHUB_REPO_URL}
-          target="_blank"
-          rel="noopener noreferrer"
-          class="flex-1 min-w-0 px-1.5 py-2 text-xs font-semibold rounded-xl border border-md-primary text-md-primary hover:bg-md-primary/10 transition-colors flex flex-col items-center justify-center gap-1"
-        >
-          <Icon name="gitHub" class="w-4 h-4" />
-          <span class="truncate max-w-full">{$t('about.viewOnGitHub')}</span>
-        </a>
-        <a
-          href={store.href}
-          target="_blank"
-          rel="noopener noreferrer"
-          class="flex-1 min-w-0 px-1.5 py-2 text-xs font-semibold rounded-xl border border-md-outline-variant text-md-on-surface hover:bg-md-surface-variant transition-colors flex flex-col items-center justify-center gap-1"
-        >
-          <Icon name="globe" class="w-4 h-4" />
-          <span class="truncate max-w-full">{store.label}</span>
-        </a>
-        <button
-          type="button"
-          class="flex-1 min-w-0 px-1.5 py-2 text-xs font-semibold rounded-xl bg-md-error/10 text-md-error hover:bg-md-error/20 transition-colors flex flex-col items-center justify-center gap-1"
-          onclick={() => browser.tabs.create({ url: GITHUB_ISSUES_URL })}
-        >
-          <Icon name="warning" class="w-4 h-4" />
-          <span class="truncate max-w-full">{$t('about.reportIssue')}</span>
-        </button>
+      <div class="w-full max-w-[520px] mx-auto space-y-2" role="group" aria-label={$t('about.linksToolbar')} data-about-actions>
+        <ButtonGroup>
+          <Btn variant="primaryOutline" icon="info" label={$t('productTour.replay')} disabled={!onStartProductTour} onclick={() => onStartProductTour?.()} />
+          {@render externalLink($t('about.demo'), CONSTANTS.DEMO_URL, 'monitor')}
+        </ButtonGroup>
+        <ButtonGroup>
+          {@render externalLink($t('about.website'), CONSTANTS.WEBSITE_URL, 'globe')}
+          {@render externalLink($t('about.documentation'), CONSTANTS.DOCS_URL, 'description')}
+        </ButtonGroup>
+        <ButtonGroup>
+          {#if store.href}
+            {@render externalLink(store.label, store.href, store.icon)}
+          {:else}
+            <Btn variant="outline" icon={store.icon} label={store.label} disabled />
+          {/if}
+          <Btn variant="outline" icon="code" label={$t('about.sourceCode')} onclick={() => { sourceCodeOpen = true; }} />
+        </ButtonGroup>
+        <ButtonGroup>
+          <Btn variant="outline" icon="analytics" label={$t('diagnostics.title')} disabled={!onOpenDiagnostics} onclick={() => onOpenDiagnostics?.()} />
+          {@render externalLink($t('about.reportIssue'), CONSTANTS.GITHUB_ISSUES_URL, 'warning')}
+        </ButtonGroup>
       </div>
 
-      {#if onStartProductTour}
-        <button
-          type="button"
-          class="w-full px-3 py-1.5 text-sm rounded-lg border border-md-primary text-md-primary hover:bg-md-primary/10 transition-colors flex items-center justify-center gap-2"
-          onclick={() => onStartProductTour?.()}
-        >
-          <Icon name="info" class="w-4 h-4" />
-          {$t('productTour.replay')}
-        </button>
+      {#if onOpenKeyboardShortcuts}
+        <div class="w-full max-w-[520px] mx-auto border-t border-md-outline-variant pt-3">
+          <ButtonGroup>
+            <Btn variant="tonal" icon="key" label={$t('nav.keyboardShortcuts')} onclick={() => onOpenKeyboardShortcuts?.()} />
+          </ButtonGroup>
+        </div>
       {/if}
     </div>
 
+    <ModalDialog open={sourceCodeOpen} title={$t('about.sourceCode')} maxWidth="sm" onClose={() => { sourceCodeOpen = false; }}>
+      <div class="dialog-content-stack" data-source-code-dialog>
+        <ButtonGroup>
+          {@render externalLink('GitHub', CONSTANTS.GITHUB_REPO_URL, 'github')}
+        </ButtonGroup>
+        {#each ['GitLab', 'Codeberg', 'Gitee'] as platform (platform)}
+          <ButtonGroup>
+            <Btn variant="outline" icon="code" label={$t('about.mirrorComingSoon', { values: { platform } })} disabled />
+          </ButtonGroup>
+        {/each}
+      </div>
+    </ModalDialog>
+
     <!--
-      FAQs — CSS Grid with 1/2/3 columns chosen by measuring each localized
+      FAQs - CSS Grid with 1/2/3 columns chosen by measuring each localized
       question’s natural single-line width (no wrap / truncate / font shrink).
     -->
-    <section class="px-2.5 pb-4" aria-label={$t('about.faqTitle')}>
-      <div class="flex items-center justify-between gap-2 px-2 mb-2">
+    <section class="px-0 pb-4" aria-label={$t('about.faqTitle')} data-tour="about-faq">
+      <div class="flex items-center justify-between gap-2 mb-2">
         <h3 class="text-sm font-bold text-md-on-surface">{$t('about.faqTitle')}</h3>
         <button
           type="button"
@@ -405,13 +543,13 @@ let store = $derived(storeUrl());
       </div>
 
       <div
-        class="faq-grid"
+        class="faq-grid {faqLayoutReady ? '' : 'invisible'}"
         bind:this={faqGridEl}
         style="grid-template-columns: repeat({faqCols}, minmax(0, 1fr));"
         data-faq-cols={faqCols}
       >
         {#each FAQ_IDS as id (id)}
-          <div class="faq-item rounded-xl bg-md-primary-container overflow-hidden border border-md-outline-variant/20">
+          <div class="faq-item rounded-xl bg-md-surface-container-low overflow-hidden border border-md-outline-variant/20">
             <button
               type="button"
               class="faq-question w-full flex items-center gap-2 px-3 py-2.5 text-start focus-visible:outline-2 focus-visible:outline-md-primary"
@@ -430,7 +568,8 @@ let store = $derived(storeUrl());
             </button>
             {#if isFaqOpen(id)}
               <div
-                class="px-3 pb-3 text-label-sm text-md-on-surface/70 leading-relaxed border-t border-md-outline-variant/20 pt-2"
+                class="px-3 pb-3 text-sm text-md-on-surface-variant border-t border-md-outline-variant/20 pt-2 faq-answer-justify"
+                transition:slide={{ duration: motionPreference.enabled ? 0 : 180, easing: cubicOut }}
               >
                 {$t(`about.faq.${id}.a`)}
               </div>
@@ -441,23 +580,28 @@ let store = $derived(storeUrl());
     </section>
 
     <!-- Contributors -->
-    <section class="px-2.5 pb-3" aria-label={$t('about.contributors')}>
-      <h3 class="text-sm font-bold text-md-on-surface px-2 mb-2">{$t('about.contributors')}</h3>
-      <div class="flex flex-wrap gap-2 px-1">
+    <section class="px-0 pb-3" aria-label={$t('about.contributors')}>
+      <h3 class="text-sm font-bold text-md-on-surface mb-2">{$t('about.contributors')}</h3>
+      <div class="flex flex-wrap gap-2">
         {#each contributors as c (c.html_url + c.login)}
           <a
             href={c.html_url}
             target="_blank"
             rel="noopener noreferrer"
-            class="inline-flex items-center gap-2 px-2.5 py-1.5 rounded-xl bg-md-surface-variant/60 hover:bg-md-surface-variant text-xs font-medium text-md-on-surface transition-colors"
+            class="inline-flex items-center gap-2 px-2.5 py-1.5 rounded-xl bg-md-surface-variant/60 hover:bg-md-surface-variant active:brightness-95 text-xs font-medium text-md-on-surface transition-colors"
             title={c.login}
           >
-            {#if c.avatar_url}
-              <img src={c.avatar_url} alt="" class="w-5 h-5 rounded-full" width="20" height="20" />
+            {#if c.avatar_url && !brokenAvatars.has(c.login)}
+              <img
+                src={c.avatar_url}
+                alt=""
+                class="{AVATAR_BOX.sm} rounded-full"
+                width="20"
+                height="20"
+                onerror={() => brokenAvatars.add(c.login)}
+              />
             {:else}
-              <span class="w-5 h-5 rounded-full flex items-center justify-center text-xs font-bold {avatarColor(c.login || '?')}">
-                {(c.login || '?')[0].toUpperCase()}
-              </span>
+              <Avatar size="sm" letter={c.login || '?'} email={c.login || '?'} class="shrink-0" />
             {/if}
             <span class="truncate max-w-[8rem]">{c.login}</span>
           </a>
@@ -465,13 +609,16 @@ let store = $derived(storeUrl());
       </div>
     </section>
 
-    <!-- Made with — last -->
+    <!-- Made with - last -->
     <p class="text-xs text-md-on-surface/40 text-center px-3 pb-8 pt-2">{$t('about.madeBy')}</p>
 </div>
 
+<!-- Contextual FAB: back arrow → returns to the page the user was on before About -->
+<FloatingAction kind="ghost" icon="chevronLeft" labelKey="common.back" onclick={() => onBack()} />
+
 <style>
   /*
-   * Off-screen measurement probe — same padding/gap/font/icon as .faq-question.
+   * Off-screen measurement probe - same padding/gap/font/icon as .faq-question.
    * Must NOT use width:0 + overflow:hidden (that would collapse measured width to 0).
    */
   .faq-measure-host {
@@ -485,7 +632,7 @@ let store = $derived(storeUrl());
   .faq-measure-row {
     display: inline-flex;
     align-items: center;
-    gap: 0.5rem; /* gap-2 — matches button */
+    gap: 0.5rem; /* gap-2 - matches button */
     padding: 0.625rem 0.75rem; /* py-2.5 px-3 */
     box-sizing: border-box;
     white-space: nowrap;
@@ -497,14 +644,14 @@ let store = $derived(storeUrl());
     white-space: nowrap;
   }
   .faq-measure-icon {
-    width: 0.875rem; /* w-3.5 — matches chevron */
+    width: 0.875rem; /* w-3.5 - matches chevron */
     height: 0.875rem;
     flex-shrink: 0;
   }
 
   .faq-grid {
     display: grid;
-    gap: 0.5rem; /* gap-2 — pickFaqColumns reads columnGap via getComputedStyle */
+    gap: 0.5rem; /* gap-2 - pickFaqColumns reads columnGap via getComputedStyle */
     width: 100%;
     align-items: start;
   }
@@ -521,5 +668,10 @@ let store = $derived(storeUrl());
 
   .faq-item {
     min-width: 0;
+  }
+
+  .faq-answer-justify {
+    text-align: justify;
+    text-justify: inter-word;
   }
 </style>

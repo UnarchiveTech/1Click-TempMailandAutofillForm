@@ -1,9 +1,3 @@
-/**
- * MD3 color theme tokens (light/dark × contrast).
- * GENERATED/overwritten by: bun scripts/generate-theme.ts
- * Do not put app layout utilities here — use src/styles.css.
- */
-
 :root[data-theme="light-standard"] {
   color-scheme: light;
   --md-primary: #4c662b;
@@ -401,30 +395,4 @@
   --color-md-on-success: var(--md-on-success);
   --color-md-warning: var(--md-warning);
   --color-md-on-warning: var(--md-on-warning);
-}
-
-/* Register --md-primary as typed color so Chrome resolves it in ::-webkit-scrollbar */
-@property --md-primary {
-  syntax: "<color>";
-  inherits: true;
-  initial-value: #4c662b;
-}
-
-/* WebKit Scrollbar Styling for Chrome/Edge/Safari/Firefox */
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-::-webkit-scrollbar-thumb {
-  background: color-mix(in srgb, var(--md-primary, #625b71) 60%, transparent);
-  border-radius: 99px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: var(--md-primary, #625b71);
 }

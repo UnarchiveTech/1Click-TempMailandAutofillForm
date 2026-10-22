@@ -1,0 +1,339 @@
+/**
+ * Row surfaces - the ONE place a list row's state is painted.
+ *
+ * A row has three states and one resting form, and a view supplies none of
+ * their values:
+ *
+ *   .row-surface            resting: the row's hover and pressed wash
+ *   .row-surface-active     the open / current row (the nav item you are on, the
+ *                           result the keyboard sits on, the thread that is open)
+ *   .row-surface-highlighted  the row a search or deep link jumped to
+ *   .row-surface-selected   the row you ticked
+ *
+ * Why the values live here and not in a class string: `bun run
+ * audit-row-surfaces` measures every selection-conditional fill in the app
+ * against the surface it lands on, and in `light-standard` the entire surface
+ * family - `surface` … `surface-container-highest` … `surface-variant` - spans
+ * **1.23:1** (1.98:1 in `dark-standard`) against a 1.8:1 floor. So the fill a
+ * state paints has to be chosen with the palette in mind, and each state is a
+ * FILL and nothing else - no bar, no edge, no rim:
+ *
+ *   selected     `secondary-container`, deepened toward its own ink in the two
+ *                `standard` palettes (1.22:1 → 2.32:1 in the light one), with
+ *                the row's ink re-roled to `on-surface` where the fill moves
+ *   active       `secondary-container/60`, deepened the same way and always a
+ *                step BELOW `selected`, so "open" and "ticked" cannot be
+ *                mistaken for each other when both are on screen
+ *   highlighted  `primary/40` - the one state in a different HUE
+ *
+ * Unlayered on purpose. Tailwind's utilities live in `@layer utilities`, so a
+ * plain `bg-md-tertiary-container` class (or a view's own `bg-md-primary/5`)
+ * would out-rank a layered rule with no error: that is exactly how the identity
+ * row's selected fill came to never paint at all. Unlayered rules beat every
+ * layer, so the state a row is in is decided here and nowhere else. The same
+ * reason makes `.row-surface:not(.row-surface-selected):hover` necessary - a
+ * hover wash that repaints a ticked row reads as "no longer selected".
+ *
+ * Verified by `tests/unit/utils/row-surface.test.ts` (state precedence, one
+ * state class per row, and the six-theme contrast arithmetic parsed from this
+ * file) and by `bun scripts/row-selection-shot.ts`, which drives the built
+ * extension in `light-standard`, `dark-standard` and `ar` (RTL) and reads
+ * computed styles AND pixels.
+ */
+
+.row-surface {
+  transition: background-color 150ms ease;
+}
+
+/* The hover wash is the WEAKEST wash in the set on purpose: a state is a fill,
+ * so a hover that out-paints `active` reads as opening the row. 30% is what
+ * holds that in every palette - in `dark-high` a 50% wash measured 3.50:1
+ * against the row, more than that palette's own `active` fill (2.66:1), i.e. the
+ * inversion the control contract exists to prevent, on rows. */
+.row-surface:not(.row-surface-selected):not(.row-surface-active):not(
+  .row-surface-highlighted
+):hover {
+  background-color: color-mix(in srgb, var(--md-secondary-container) 30%, transparent);
+}
+
+.row-surface:not(.row-surface-selected):not(.row-surface-active):not(
+  .row-surface-highlighted
+):active {
+  background-color: color-mix(in srgb, var(--md-secondary-container) 70%, transparent);
+}
+
+/* ── Selected: the ticked row ─────────────────────────────────────────────── */
+
+/*
+ * The FILL is the whole state: no bar, no edge, no rim between two ticked rows.
+ *
+ * An earlier version drew a 3px bar at the inline start plus a 1px rim, because
+ * in the two `standard` palettes the container it filled with spans the surface
+ * family's own range. That is a palette fact, not a row fact - the fix belongs
+ * in the palette (see the `data-theme` block below), not in every row: the bar
+ * restated the state in a second shape, and the rim drew a line between two
+ * ADJACENT ticked rows that the design never had.
+ *
+ * The ink is a variable set (`--row-ink-*`) rather than the container's ink
+ * directly, for the same reason: where a palette deepens the fill, the ink that
+ * suits it is the palette's strongest ink, not the container's - otherwise
+ * deepening the fill is what breaks legibility on it.
+ */
+
+.row-surface-selected,
+.row-surface-active {
+  /* The derivation lives once; the CORE it starts from is per state, and is the
+     one thing a palette may override - a deepened fill needs the palette's
+     strongest ink, and the sheet is the only place that knows the palette. */
+  --row-ink-primary: var(--row-ink-core);
+  --row-ink-meta: color-mix(in srgb, var(--row-ink-core) 85%, transparent);
+  --row-ink-icon: color-mix(in srgb, var(--row-ink-core) 70%, transparent);
+  color: var(--row-ink-primary);
+}
+
+.row-surface-selected {
+  --row-ink-core: var(--md-on-secondary-container);
+  background-color: var(--md-secondary-container);
+}
+
+.row-surface-selected:hover,
+.row-surface-selected:active {
+  background-color: var(--md-secondary-container);
+}
+
+/* ── Active: the open / current row ───────────────────────────────────────── */
+
+/* Its ink is the app's PLAIN ink (the wash is mostly the surface it sits on), so
+   the active row's own colour matches the lines the contract gives it. */
+.row-surface-active {
+  --row-ink-core: var(--md-on-surface);
+  background-color: color-mix(in srgb, var(--md-secondary-container) 60%, transparent);
+}
+
+/*
+ * The two `standard` palettes, where the surface family spans 1.23:1 (light) and
+ * 1.98:1 (dark): here the container IS the plain row - 1.22:1 in
+ * `light-standard`, the same distance as a hover wash (1.10:1), i.e. "selected"
+ * and "hovered" were one pixel. The fills are therefore deepened toward the
+ * container's own ink, which is the only move available inside the palette: dark
+ * in the light one, light in the dark one, so one rule separates in both.
+ *
+ * Measured against the row's surface, with every ink line over it:
+ *
+ * Each of the two fills has to clear the 1.8:1 floor not only on `surface` but
+ * on every surface a list can rest on, which is what fixes the percentages: a
+ * row on `surface-container-high` has the least room of all three. Measured
+ * worst case across those bases (and on `surface` itself):
+ *
+ *   light-standard  selected 2.20:1 (2.55 on surface, was 1.22:1)
+ *   light-standard  active   1.90:1 (2.20 on surface, was 1.12:1)
+ *   dark-standard   selected 2.07:1 (2.67 on surface, was 1.98:1)
+ *   dark-standard   active   1.90:1 (2.25 on surface, was 1.44:1)
+ *
+ * `dark-standard` is the tight one: its surface family already spans 1.98:1, so
+ * `selected` can only be deepened to 88% before the fill stops being able to
+ * carry a light ink (at 80% the /85 preview line falls to 3.7:1) - which leaves
+ * `active` the 90%…92% band, and `selected` still above it. The percentage is
+ * therefore per palette rather than per state, and the ink follows.
+ *
+ * A deepened fill is a DARKER one in the light palette, so there the row's ink
+ * moves from the container's own ink to `--md-on-surface`: on the 2.45:1 fill the
+ * container ink measures 3.8:1 - under the 4.5:1 body-text floor it has on the
+ * untouched container - while `on-surface` measures 5.57:1 and its /85 4.43:1.
+ * The medium/high palettes separate at 4.91:1…10.49:1 on their own, so they are
+ * deliberately left alone.
+ */
+:root[data-theme="light-standard"] .row-surface-selected {
+  --row-ink-core: var(--md-on-surface);
+  background-color: color-mix(
+    in srgb,
+    var(--md-secondary-container) 56%,
+    var(--md-on-secondary-container)
+  );
+}
+
+:root[data-theme="light-standard"] .row-surface-active {
+  background-color: color-mix(
+    in srgb,
+    var(--md-secondary-container) 64%,
+    var(--md-on-secondary-container)
+  );
+}
+
+:root[data-theme="dark-standard"] .row-surface-selected {
+  background-color: color-mix(
+    in srgb,
+    var(--md-secondary-container) 88%,
+    var(--md-on-secondary-container)
+  );
+}
+
+:root[data-theme="dark-standard"] .row-surface-active {
+  background-color: color-mix(
+    in srgb,
+    var(--md-secondary-container) 92%,
+    var(--md-on-secondary-container)
+  );
+}
+
+/*
+ * `dark-high` is the one palette where the ACTIVE wash has to be weaker than the
+ * `standard` rule rather than stronger: its container is light, so a 60% wash of
+ * it over a near-black row is a mid tone - 3.05:1 of separation, but the row's
+ * own light ink only measures 3.1:1 on it. A 40% wash keeps both (2.31:1 against
+ * the worst surface, 5.5:1 of ink on it).
+ */
+:root[data-theme="dark-high"] .row-surface-active {
+  background-color: color-mix(in srgb, var(--md-secondary-container) 40%, transparent);
+}
+
+/* ── Unread: a modifier, not a selection ─────────────────────────────────── */
+
+/* Deliberately the quietest wash in the set (~1.08:1): unread is a hint on a
+   row you are already scanning, not a state you must be able to FIND. It is
+   emitted only when no other state applies, so it can never compete with a
+   ticked or open row. Hovering it still gives the ordinary hover feedback. */
+.row-surface-unread {
+  background-color: color-mix(in srgb, var(--md-primary) 8%, transparent);
+}
+
+/* ── Highlighted: the row a search or deep link landed on ─────────────────── */
+
+/* The same fill-only rule, and the same reason for the strength: `primary/12`
+ * measured 1.16:1 in `light-standard` and 1.33:1 in `dark-standard` - below the
+ * floor at which a difference stops being an artefact - so the wash is `/50`,
+ * which measures 2.06:1…4.06:1 on the worst surface base in every palette (and
+ * 2.5:1…5:1 on the row's own) while staying the one state in a different HUE. */
+.row-surface-highlighted {
+  background-color: color-mix(in srgb, var(--md-primary) 50%, transparent);
+}
+
+/* ...and `primary` is LIGHT in the dark palettes, where that same strength is a
+ * mid tone: at 50% the row's own /85 line falls to 3.33:1 in `dark-standard` and
+ * 3.31:1 in `dark-high`. 28%, which separates by 2.25:1…2.29:1 against the worst
+ * surface a row can rest on, is the strength those three can afford. */
+:root[data-theme^="dark"] .row-surface-highlighted {
+  background-color: color-mix(in srgb, var(--md-primary) 28%, transparent);
+}
+
+/* ── Selected controls: filter chips, toggle buttons, chooser rows ───────────
+ *
+ * The same rule as a row, at control scale: a control is applied or it is not,
+ * and the two forms must not be separated by a fill the eye cannot measure -
+ * nor by a hover that paints the applied form.
+ *
+ * What this replaces, measured in the two standard themes: the idle hover was
+ * `bg-md-surface-variant` (1.23:1 against the row in `light-standard`) while
+ * the applied form was `bg-md-primary/10` (**1.15:1**), so hovering an
+ * unapplied filter painted a STRONGER fill than applying it, and the applied
+ * state's only real cue was its 1px border. `--md-primary` is 6.15:1 there
+ * (10.91:1 in `dark-standard`, 11.4…16.3:1 in the medium/high themes), and
+ * `--md-on-primary` on it is 6.48:1…18.41:1 in all six themes - so the applied
+ * form is a solid accent role, exactly as `.row-surface-selected` is.
+ *
+ * The idle hover is a NEUTRAL whisper (no accent hue) laid OVER whatever the
+ * control rests on, through `background-image`, so it composes with a
+ * transparent button and with a tinted chip alike instead of replacing either
+ * - `background-color` would have swapped a grey pill's resting token for the
+ * parent's surface, which reads as the control switching itself off.
+ * Measured effect: ≤1.23:1 against the control's own resting pixel in every
+ * theme, i.e. at least 5× weaker than the applied fill, and below the 1.8:1
+ * floor at which a difference stops being an artefact.
+ *
+ * Unlayered for the same reason as the row states: a view's `bg-*`/`text-*`
+ * utility sits in `@layer utilities` and would otherwise win silently, which is
+ * how an applied filter could be out-shouted by its own hover.
+ *
+ * Verified by `tests/unit/utils/row-surface.test.ts`, which recomputes both
+ * sides for every theme and every surface-family base the whisper can land on.
+ */
+
+.control-surface {
+  transition:
+    background-color 150ms ease,
+    border-color 150ms ease;
+}
+
+/* An APPLIED control takes no hover and no press wash: the applied form is the
+ * only state on it, so hovering it must not repaint it - the same rule the row
+ * states follow. `.control-border-selected` is in this exclusion list too,
+ * because a control whose state is its border would otherwise get the whisper
+ * laid over its resting fill while applied: a second cue for one state, and the
+ * one that made an applied control look merely hovered. */
+.control-surface:not(.control-surface-selected):not(.control-border-selected):hover {
+  background-image: linear-gradient(
+    color-mix(in srgb, var(--md-on-surface) 8%, transparent),
+    color-mix(in srgb, var(--md-on-surface) 8%, transparent)
+  );
+}
+
+.control-surface:not(.control-surface-selected):not(.control-border-selected):active {
+  background-image: linear-gradient(
+    color-mix(in srgb, var(--md-on-surface) 14%, transparent),
+    color-mix(in srgb, var(--md-on-surface) 14%, transparent)
+  );
+}
+
+.control-surface-selected {
+  background-color: var(--md-primary);
+  color: var(--md-on-primary);
+  border-color: var(--md-primary);
+}
+
+/* The UNDERLINE shape of the same state - an MD3 primary tab. Its container is
+ * a tab strip that already reads as a surface, so filling the segment would
+ * restyle the strip; the state is the segment's own ink plus a 2px bar along
+ * its bottom edge. The bar is `--md-primary` against the strip's
+ * `surface-variant`: 5.01:1 in `light-standard`, and 5.01…10.80:1 across the six
+ * themes - comfortably over the 3:1 a graphical cue owes, and reachable without
+ * moving the strip's layout (an INSET shadow, so the tab's box does not grow). */
+.control-underline-selected {
+  color: var(--md-primary);
+  box-shadow: inset 0 -2px 0 0 var(--md-primary);
+}
+
+/* The BORDER shape of the same state - a control whose own box holds content it
+ * must not cover (the credentials domain's select-all disc holds a favicon), so
+ * a fill would swallow the glyph the control exists to show. The state is the
+ * border in the accent role: `--md-primary` against the surface family is
+ * 5.29…14.42:1 across the six themes, well over the 3:1 a graphical cue owes,
+ * and the border sits INSIDE the box, so a clipping ancestor cannot remove it
+ * the way it removed the `ring-md-primary` this replaces (1.54:1 in the
+ * high-contrast themes, painted outside the border box). No fill, no ink: the
+ * content keeps the surface it was legible on. */
+.control-border-selected {
+  border-color: var(--md-primary);
+}
+
+/* The keyboard's cursor on a row: which row the arrows and `X` will act on.
+ *
+ * It is an INSET `outline` (not a ring, not a box-shadow) for the same two
+ * reasons the rest of this file is written the way it is: a `ring-*` paints
+ * outside the border box, so the `overflow-y-auto` list clips it away - which is
+ * how 4 sides of the old `ring-2 ring-md-secondary` indicator vanished - while
+ * an outline with a negative offset paints inside and survives the clip. And
+ * `outline` rather than `box-shadow` on purpose: the row probe asserts a row
+ * paints NO box-shadow at all (a state is its fill), and the underline shape
+ * above already spends that channel on the tab bar.
+ *
+ * `:focus-visible` and not `:focus`: the cue belongs to the keyboard, so a
+ * pointer click that happens to focus a row does not paint a ring around it.
+ * The colour is the accent role, `--md-primary` (6.15:1 against the surface in
+ * `light-standard`, 10.91:1 in `dark-standard`), which is what every other focus
+ * affordance in the app uses. */
+.row-surface:focus-visible {
+  outline: 2px solid var(--md-primary);
+  outline-offset: -2px;
+}
+
+/* On the two FILLED states the accent would sit on the container tint, so the
+ * cursor takes the row's own ink instead - the one colour the sheet already
+ * measures against that exact fill (4.4:1+ on the deepened `light-standard`
+ * selection). Those are the states that define `--row-ink-primary`, which is why
+ * this is a pair of selectors and not a blanket override: `highlighted` and
+ * `unread` paint no such variable, and an unresolved `var()` would silently drop
+ * the declaration back to `currentColor`. */
+.row-surface-selected:focus-visible,
+.row-surface-active:focus-visible {
+  outline-color: var(--row-ink-primary);
+}

@@ -2,7 +2,7 @@
  * Human-like staggered fill timing.
  */
 
-import { loadSmartAutofillSettingsViaBg } from '@/utils/content-bg-bridge.js';
+import { loadSmartAutofillSettingsViaBg } from '@/utils/content/content-bg-bridge.js';
 
 export function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));

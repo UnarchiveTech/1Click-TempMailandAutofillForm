@@ -1,54 +1,25 @@
-import { rgbToHex } from '@/utils/color-utils.js';
-import { t } from '@/utils/i18n-utils.js';
+import { t } from '@/utils/i18n/i18n-utils.js';
 import { logError } from '@/utils/logger.js';
-
-export interface QRState {
-  qrDialogOpen: boolean;
-  qrCanvas: HTMLCanvasElement | null;
-  qrDialogElement: HTMLElement | null;
-  previousFocusElement: HTMLElement | null;
-  customColor: string;
-}
+import { rgbToHex } from '@/utils/theme/color-utils.js';
 
 export interface QRSetters {
   setQrDialogOpen: (open: boolean) => void;
   setQrCanvas: (canvas: HTMLCanvasElement | null) => void;
-  setQrDialogElement: (element: HTMLElement | null) => void;
-  setPreviousFocusElement: (element: HTMLElement | null) => void;
   setShowToast: (message: string, type?: 'success' | 'error' | 'warning') => void;
 }
 
-export function openQrDialog(
-  _selectedEmail: string,
-  state: QRState,
-  setters: QRSetters,
-  setupFocusTrap: (element: HTMLElement) => void
-): ReturnType<typeof setTimeout> {
-  setters.setPreviousFocusElement(document.activeElement as HTMLElement);
+export function openQrDialog(setters: QRSetters): void {
+  // QrDialog is rendered through ModalDialog, which owns the shared dialog
+  // lifecycle including focus trapping and restoration.
   setters.setQrDialogOpen(true);
-  // QR generation is now handled within QrDialog component using $effect
-  return setTimeout(() => {
-    if (state.qrDialogElement) {
-      state.qrDialogElement.focus();
-      setupFocusTrap(state.qrDialogElement);
-    }
-  }, 50);
 }
 
 export function closeQrDialog(
-  focusTrapCleanup: (() => void) | null,
-  state: QRState,
   setters: QRSetters,
   openTimerId?: ReturnType<typeof setTimeout> | null
-) {
-  if (openTimerId != null) {
-    clearTimeout(openTimerId);
-  }
-  focusTrapCleanup?.();
+): void {
+  if (openTimerId != null) clearTimeout(openTimerId);
   setters.setQrDialogOpen(false);
-  if (state.previousFocusElement) {
-    state.previousFocusElement.focus();
-  }
 }
 
 export async function generateQRCode(canvas: HTMLCanvasElement, text: string, customColor: string) {

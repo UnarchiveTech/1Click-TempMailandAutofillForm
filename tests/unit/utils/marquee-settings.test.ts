@@ -4,7 +4,7 @@ import {
   MARQUEE_THRESHOLD,
   normalizeMarquee,
   rectsIntersect,
-} from '@/utils/marquee-selection.js';
+} from '@/utils/ui/marquee-selection.js';
 
 describe('marquee-selection', () => {
   test('normalizeMarquee orders corners', () => {
@@ -45,7 +45,7 @@ describe('marquee-selection', () => {
 describe('provider list excludes demo', () => {
   test('getAllProviderConfigs never returns demo', async () => {
     const { getAllProviderConfigs, loadAllProviderConfigs } = await import(
-      '@/utils/email-service.js'
+      '@/utils/email/email-service.js'
     );
     const all = Object.keys(loadAllProviderConfigs());
     expect(all.includes('demo')).toBe(true);
@@ -57,7 +57,7 @@ describe('provider list excludes demo', () => {
 
 describe('account status helpers', () => {
   test('isLive / isArchived', async () => {
-    const { isLive, isArchived } = await import('@/utils/account-status.js');
+    const { isLive, isArchived } = await import('@/utils/address/address-status.js');
     expect(
       isLive({
         id: '1',

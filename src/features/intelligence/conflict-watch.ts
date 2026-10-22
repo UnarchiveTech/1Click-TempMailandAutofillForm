@@ -1,10 +1,14 @@
 /**
- * Conflict-aware fill — detect "email taken" / disposable blocked after fill
+ * Conflict-aware fill - detect "email taken" / disposable blocked after fill
  * and auto-create a fresh inbox when possible.
  */
 
-import { createFreshInboxAddressViaBg, testConflictTextViaBg } from '@/utils/content-bg-bridge.js';
-import { safeId, safeName, safePlaceholder } from '@/utils/dom-safe.js';
+import {
+  createFreshAddressViaBg,
+  testConflictTextViaBg,
+} from '@/utils/content/content-bg-bridge.js';
+import { EMAIL_DOMAIN_REJECTION_RE } from '@/utils/provider/site-email-domains.js';
+import { safeId, safeName, safePlaceholder } from '@/utils/security/dom-safe.js';
 
 async function scanVisibleText(
   root: ParentNode,
@@ -23,6 +27,9 @@ async function scanVisibleText(
       }
       const t = (el.textContent || '').trim();
       if (t.length > 3 && t.length < 320) {
+        // A different local-part cannot fix a rejected domain. The separate
+        // domain observer remembers the exclusion without creating more mailboxes.
+        if (conflictType === 'email' && EMAIL_DOMAIN_REJECTION_RE.test(t)) continue;
         const result = await testConflictTextViaBg(t);
         if (result === conflictType) return true;
       }
@@ -57,6 +64,7 @@ async function scanVisibleText(
         /* ignore */
       }
       const blob = `${meta} ${descText}`.toLowerCase();
+      if (conflictType === 'email' && EMAIL_DOMAIN_REJECTION_RE.test(blob)) continue;
       const looksUser = /user|login|handle|nick|account.?name/.test(meta);
       if (looksUser) {
         const r1 = await testConflictTextViaBg(blob);
@@ -96,16 +104,23 @@ function watchConflict(
 ): () => void {
   const timeoutMs = opts?.timeoutMs ?? 8000;
   let done = false;
+  const delayedChecks: Array<ReturnType<typeof setTimeout>> = [];
   const finish = (hit: boolean) => {
     if (done) return;
     done = true;
     observer.disconnect();
     clearTimeout(timer);
+    for (const delayedCheck of delayedChecks) clearTimeout(delayedCheck);
     if (hit) onConflict();
   };
 
   const check = async () => {
-    if ((await test(form)) || (form !== document && (await test(document)))) finish(true);
+    if (done) return;
+    const formHit = await test(form);
+    if (done) return;
+    const documentHit = form !== document ? await test(document) : false;
+    if (done) return;
+    if (formHit || documentHit) finish(true);
   };
 
   const observer = new MutationObserver(() => check());
@@ -123,15 +138,21 @@ function watchConflict(
   }
   const timer = setTimeout(() => finish(false), timeoutMs);
   // Initial delayed checks (SPA error render)
-  setTimeout(() => {
-    void check();
-  }, 400);
-  setTimeout(() => {
-    void check();
-  }, 1500);
-  setTimeout(() => {
-    void check();
-  }, 3500);
+  delayedChecks.push(
+    setTimeout(() => {
+      void check();
+    }, 400)
+  );
+  delayedChecks.push(
+    setTimeout(() => {
+      void check();
+    }, 1500)
+  );
+  delayedChecks.push(
+    setTimeout(() => {
+      void check();
+    }, 3500)
+  );
 
   return () => finish(false);
 }
@@ -145,7 +166,7 @@ export function watchEmailConflict(
   return watchConflict(form, (root) => pageShowsEmailConflict(root), onConflict, opts);
 }
 
-/** Watch for username already taken — regenerate username. */
+/** Watch for username already taken - regenerate username. */
 export function watchUsernameConflict(
   form: ParentNode,
   onConflict: () => void,
@@ -154,7 +175,7 @@ export function watchUsernameConflict(
   return watchConflict(form, (root) => pageShowsUsernameConflict(root), onConflict, opts);
 }
 
-/** Watch for OTP verification failure — prompt manual entry. */
+/** Watch for OTP verification failure - prompt manual entry. */
 export function watchOtpFailure(
   root: ParentNode,
   onFail: () => void,
@@ -165,6 +186,6 @@ export function watchOtpFailure(
   });
 }
 
-export async function createFreshInboxAddress(): Promise<string | null> {
-  return createFreshInboxAddressViaBg();
+export async function createFreshAddress(): Promise<string | null> {
+  return createFreshAddressViaBg();
 }

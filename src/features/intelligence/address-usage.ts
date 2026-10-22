@@ -1,5 +1,5 @@
 /**
- * Address usage map — sites where a disposable email was used (saved logins + site profiles).
+ * Address usage map - sites where a disposable email was used (saved logins + site profiles).
  */
 
 import { browser } from 'wxt/browser';
@@ -31,7 +31,8 @@ function emailsMatch(a: string, b: string): boolean {
  */
 export async function getAddressUsageMap(
   address: string,
-  savedLogins?: CredentialsHistoryItem[]
+  savedLogins?: CredentialsHistoryItem[],
+  addressId?: string
 ): Promise<AddressUsageMap> {
   const addr = (address || '').trim();
   let logins = savedLogins;
@@ -45,7 +46,8 @@ export async function getAddressUsageMap(
   const byDomain = new Map<string, AddressUsageSite>();
 
   for (const item of logins) {
-    if (!emailsMatch(item.email || '', addr)) continue;
+    const matchesAddressId = !!addressId && item.addressId === addressId;
+    if (!matchesAddressId && !emailsMatch(item.email || '', addr)) continue;
     const domain = normalizeDomain(item.domain || '');
     if (!domain) continue;
     const prev = byDomain.get(domain);
@@ -67,7 +69,8 @@ export async function getAddressUsageMap(
   try {
     const profiles = await loadSiteProfiles();
     for (const p of Object.values(profiles)) {
-      if (!p.lastEmail || !emailsMatch(p.lastEmail, addr)) continue;
+      const matchesAddressId = !!addressId && p.lastAddressId === addressId;
+      if (!matchesAddressId && (!p.lastEmail || !emailsMatch(p.lastEmail, addr))) continue;
       const domain = normalizeDomain(p.domain);
       if (!domain) continue;
       const prev = byDomain.get(domain);

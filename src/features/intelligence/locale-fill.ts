@@ -1,9 +1,9 @@
 /**
- * Locale-aware fill data — names/phones/addresses match page language.
+ * Locale-aware fill data - names/phones/addresses match page language.
  */
 
-import { detectCountryLocally, randomCity, randomPostalCode } from '@/utils/locale-profile.js';
-import { randomInt, randomIntBetween } from '@/utils/secure-random.js';
+import { detectCountryLocally, randomCity, randomPostalCode } from '@/utils/i18n/locale-profile.js';
+import { randomInt, randomIntBetween } from '@/utils/security/secure-random.js';
 
 /** Detect page language from html[lang], document, or navigator. */
 export function detectPageLocale(): string {

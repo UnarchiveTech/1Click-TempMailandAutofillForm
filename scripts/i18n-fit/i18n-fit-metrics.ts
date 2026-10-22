@@ -15,7 +15,7 @@ export type FontSpec = {
 
 const DEFAULT_WEIGHT = 400;
 
-/** Average Latin advance width as fraction of em (system-ui ~0.52–0.56) */
+/** Average Latin advance width as fraction of em (system-ui ~0.52-0.56) */
 const LATIN_EM = 0.55;
 /** Wide Latin (W, M, @) */
 const LATIN_WIDE_EM = 0.72;
@@ -31,6 +31,38 @@ const CJK_EM = 1.0;
 const RTL_EM = 0.52;
 /** Fallback (emoji, symbols) */
 const OTHER_EM = 0.7;
+
+/**
+ * Unicode combining marks (category Mn) - zero advance width: they stack on
+ * the preceding glyph (Thai vowels/tones ่ ้ ิ ี …, Devanagari matras, Latin
+ * diacritics). Counting them at OTHER_EM inflated every Thai measurement by
+ * ~0.7em × mark count and produced phantom overflows (e.g. "เริ่มต้น…" was
+ * ~35px wider than the browser would render it).
+ */
+const COMBINING_MARK_RANGES: ReadonlyArray<[number, number]> = [
+  [0x0300, 0x036f], // Combining Diacritical Marks
+  [0x0483, 0x0489], // Cyrillic combining marks
+  [0x0591, 0x05bd], // Hebrew combining marks
+  [0x05bf, 0x05c7],
+  [0x0610, 0x061a], // Arabic combining marks
+  [0x064b, 0x065f],
+  [0x0670, 0x0670],
+  [0x0e31, 0x0e31], // Thai vowels above (SARA MAI HAN-AKAT)
+  [0x0e34, 0x0e3a], // Thai vowels above/below (SARA I…SARA UUE)
+  [0x0e47, 0x0e4e], // Thai tone marks + phonetic marks
+  [0x0eb1, 0x0eb1], // Lao
+  [0x0eb4, 0x0ebc],
+  [0x0ec8, 0x0ecd],
+  [0x1ab0, 0x1aff], // Combining Diacritical Marks Extended
+  [0x1dc0, 0x1dff], // Combining Diacritical Marks Supplement
+  [0x20d0, 0x20ff], // Combining Diacritical Marks for Symbols
+  [0x3099, 0x309a], // Japanese voiced/semi-voiced marks
+  [0xfe20, 0xfe2f], // Combining Half Marks
+];
+
+function isCombiningMark(code: number): boolean {
+  return COMBINING_MARK_RANGES.some(([start, end]) => code >= start && code <= end);
+}
 
 const NARROW = new Set('iljtfrI1|!.,:;\'`"'.split(''));
 const WIDE = new Set('WMmw@%&QHGO'.split(''));
@@ -57,6 +89,7 @@ function isRtlLetter(code: number): boolean {
 function charEm(ch: string): number {
   const code = ch.codePointAt(0) ?? 0;
   if (code <= 0x20) return SPACE_EM;
+  if (isCombiningMark(code)) return 0;
   if (isCjk(code)) return CJK_EM;
   if (isRtlLetter(code)) return RTL_EM;
   if (code >= 0x30 && code <= 0x39) return DIGIT_EM;

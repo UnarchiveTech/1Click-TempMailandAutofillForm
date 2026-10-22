@@ -14,18 +14,20 @@ describe('Entrypoint Parity (AGENTS.md Rule 1)', () => {
     expect(appSrc).toContain("import AppLayout from '@/ui/blocks/layout/AppLayout.svelte'");
   });
 
-  test('all entrypoint svelte files check $isLoading for svelte-i18n loading state', () => {
+  test('all entrypoints gate only the initial locale load without remounting the UI later', () => {
     // Accept both a standalone isLoading import and a merged one (biome
     // organizeImports merges same-module imports); the invariant is that
-    // isLoading comes from svelte-i18n and the render is gated on $isLoading.
+    // Loading another dictionary must not destroy navigation or unsaved input.
     const isLoadingImport = "import { isLoading } from 'svelte-i18n'";
     expect(popupSrc).toContain(isLoadingImport);
-    expect(popupSrc).toContain('{#if $isLoading}');
     expect(sidepanelSrc).toContain(isLoadingImport);
-    expect(sidepanelSrc).toContain('{#if $isLoading}');
     expect(appSrc).toContain('isLoading');
     expect(appSrc).toContain("from 'svelte-i18n'");
-    expect(appSrc).toContain('{#if $isLoading}');
+    for (const source of [popupSrc, sidepanelSrc, appSrc]) {
+      expect(source).toContain('let initialLocaleReady = $state(false)');
+      expect(source).toContain('if (!$isLoading) initialLocaleReady = true');
+      expect(source).toContain('{#if !initialLocaleReady && $isLoading}');
+    }
   });
 
   test('all entrypoint svelte files pass their respective context to AppLayout', () => {

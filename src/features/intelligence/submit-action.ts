@@ -1,7 +1,26 @@
 /**
  * Generic submit / continue button detection + click.
- * No site hardcoding — multi-language action labels.
+ * No site hardcoding - multi-language action labels.
  */
+
+import { logError } from '@/utils/logger.js';
+import { detectSignupPage } from './signup-page.js';
+import type { SignupAttemptRef, SignupProgress } from './signup-state.js';
+
+/** Resolve explicit auto-submit consent; a read failure is always denied. */
+export async function hasAutoSubmitConsent(
+  loadSettings: () => Promise<{ autoClickSubmitButtons?: unknown }> = async () => {
+    const { loadSmartAutofillSettings } = await import('./smart-settings.js');
+    return loadSmartAutofillSettings();
+  }
+): Promise<boolean> {
+  try {
+    return (await loadSettings()).autoClickSubmitButtons === true;
+  } catch (error) {
+    logError('Could not verify auto-submit preference; submit skipped', error);
+    return false;
+  }
+}
 
 /** Words that indicate primary form action (signup / continue / login). */
 const ACTION_RE =
@@ -43,16 +62,17 @@ export function findPrimaryActionButton(
   const roots: ParentNode[] = [];
   if (form) {
     roots.push(form);
-    // Sibling footer actions (common in SPAs)
-    if (form.parentElement) roots.push(form.parentElement);
-  }
-  if (typeof document !== 'undefined') roots.push(document);
+    // A native form also owns controls explicitly linked through `form=`.
+    if (form instanceof HTMLFormElement && form.id) {
+      roots.push(form.ownerDocument);
+    }
+  } else if (typeof document !== 'undefined') roots.push(document);
 
   type Cand = { el: HTMLElement; score: number };
   const cands: Cand[] = [];
 
   const selector =
-    'button, input[type="submit"], input[type="button"], [role="button"], a.button, a[class*="btn" i]';
+    'button, input[type="submit"], input[type="button"], [role="button"], a[href], a.button, a[class*="btn" i]';
 
   for (const root of roots) {
     let nodes: Element[];
@@ -64,6 +84,16 @@ export function findPrimaryActionButton(
     }
     for (const n of nodes) {
       if (!(n instanceof HTMLElement)) continue;
+      if (
+        form &&
+        !form.contains(n) &&
+        !(
+          form instanceof HTMLFormElement &&
+          (n instanceof HTMLButtonElement || n instanceof HTMLInputElement) &&
+          n.form === form
+        )
+      )
+        continue;
       if (!visible(n)) continue;
       if ((n as HTMLButtonElement).disabled) continue;
       const label = controlLabel(n);
@@ -86,13 +116,20 @@ export function findPrimaryActionButton(
     }
   }
 
-  // Also native form submit without visible text
+  // Also native form submit without visible/action text. This fallback must
+  // apply the SAME negative-label guard as the main selector: otherwise a
+  // formless React SPA whose real action has no readable label could fall
+  // through to the first `button[type="submit"]`, which may be a Back step
+  // button - and the auto-click would press Back instead of Continue.
   if (form) {
-    const native = form.querySelector<HTMLInputElement>(
+    const natives = form.querySelectorAll<HTMLInputElement | HTMLButtonElement>(
       'input[type="submit"], button[type="submit"]'
     );
-    if (native && visible(native) && !native.disabled) {
+    for (const native of Array.from(natives)) {
+      if (!visible(native) || native.disabled) continue;
+      if (NEGATIVE_RE.test(controlLabel(native))) continue;
       cands.push({ el: native, score: 25 });
+      break;
     }
   }
 
@@ -104,6 +141,7 @@ export function findPrimaryActionButton(
 export function clickPrimaryAction(form?: HTMLFormElement | HTMLElement | null): boolean {
   const btn = findPrimaryActionButton(form);
   if (!btn) return false;
+  if (form && !isSignupScopeValid(form)) return false;
   try {
     btn.focus?.();
     btn.click();
@@ -125,107 +163,156 @@ export function clickPrimaryAction(form?: HTMLFormElement | HTMLElement | null):
  * Call after autofill; marks credential when success follows a user/auto click.
  */
 export function armSignupOutcomeAfterSubmit(
-  domain: string,
+  attempt: SignupAttemptRef,
   form: HTMLFormElement | HTMLElement | null,
   opts?: {
     autoClick?: boolean;
-    timeoutMs?: number;
-    onStatus?: (status: 'pending_submit' | 'submitted' | 'verified' | 'undetected') => void;
   }
 ): () => void {
-  const timeoutMs = opts?.timeoutMs ?? 90_000;
+  activeSignupWatcher?.();
   let stopped = false;
-  let submitted = false;
-  let cleanupWatch: (() => void) | null = null;
-
+  let submitted = attempt.submitted;
+  let reporting = false;
+  const reported = new Set<SignupProgress>();
+  const baseline = submitted ? null : detectSignupPage();
+  const eventRoot = form || document;
+  let autoClickTimer: ReturnType<typeof setTimeout> | null = null;
+  const observer = new MutationObserver(() => void tick());
+  const interval = setInterval(() => {
+    if (!document.hidden) void tick();
+  }, 1500);
+  const deadline = setTimeout(() => stop(), Math.max(0, attempt.expiresAt - Date.now()));
   const stop = () => {
     if (stopped) return;
     stopped = true;
-    document.removeEventListener('click', onClick, true);
-    if (form) form.removeEventListener('submit', onSubmit, true);
-    cleanupWatch?.();
-  };
-
-  const markSubmitted = async () => {
-    if (submitted) return;
-    submitted = true;
-    opts?.onStatus?.('submitted');
-    try {
-      const { markLatestCredentialStatus } = await import('./post-submit.js');
-      await markLatestCredentialStatus(domain, 'submitted');
-      const { watchPostSubmitSuccess } = await import('./post-submit.js');
-      cleanupWatch = watchPostSubmitSuccess(domain, {
-        timeoutMs: timeoutMs,
-        requirePriorSubmit: true,
-        onSuccess: () => opts?.onStatus?.('verified'),
-        onTimeout: () => opts?.onStatus?.('undetected'),
-      });
-    } catch {
-      /* ignore */
+    eventRoot.removeEventListener('click', onClick, true);
+    eventRoot.removeEventListener('submit', onSubmit, true);
+    document.removeEventListener('visibilitychange', onVisibility);
+    window.removeEventListener('pagehide', stop);
+    if (autoClickTimer) clearTimeout(autoClickTimer);
+    clearTimeout(deadline);
+    clearInterval(interval);
+    observer.disconnect();
+    if (activeSignupWatcher === stop) {
+      activeSignupWatcher = null;
+      activeSignupAttemptId = null;
+      activeSignupScope = null;
     }
   };
-
+  async function report(progress: SignupProgress): Promise<boolean> {
+    if (reported.has(progress)) return true;
+    const { reportSignupProgressViaBg } = await import('@/utils/content/content-bg-bridge.js');
+    const ok = await reportSignupProgressViaBg(attempt.id, progress);
+    if (ok) reported.add(progress);
+    return ok;
+  }
+  async function tick(): Promise<void> {
+    if (stopped || !submitted || reporting) return;
+    reporting = true;
+    try {
+      const evidence = detectSignupPage();
+      if (evidence.failed) {
+        await report('failed');
+        return;
+      }
+      if (evidence.emailVerification === 'pending') await report('verification_pending');
+      if (evidence.accountCreated && !baseline?.accountCreated) await report('created');
+      if (
+        evidence.emailVerification === 'confirmed' &&
+        baseline?.emailVerification !== 'confirmed'
+      ) {
+        if (await report('email_confirmed')) stop();
+      }
+    } catch (error) {
+      logError('Signup outcome tracking failed', error);
+    } finally {
+      reporting = false;
+    }
+  }
+  const markSubmitted = async () => {
+    if (stopped || submitted || reporting) return;
+    reporting = true;
+    try {
+      submitted = await report('submitted');
+    } catch (error) {
+      logError('Signup submission tracking failed', error);
+    } finally {
+      reporting = false;
+    }
+    void tick();
+  };
   const onClick = (e: Event) => {
-    if (stopped || submitted) return;
+    if (stopped || submitted || !e.isTrusted || !form || !isSignupScopeValid(form)) return;
     const t = e.target;
     if (!(t instanceof Element)) return;
     const btn = t.closest(
       'button, input[type="submit"], input[type="button"], [role="button"], a'
     ) as HTMLElement | null;
-    if (!btn) return;
+    if (!btn || !form.contains(btn)) return;
+    // Native submit fires only after browser constraint validation. Never
+    // mistake an invalid button click for a submitted request.
+    if (
+      form instanceof HTMLFormElement &&
+      (btn instanceof HTMLButtonElement || btn instanceof HTMLInputElement) &&
+      btn.type === 'submit'
+    )
+      return;
     const label = controlLabel(btn);
-    if (NEGATIVE_RE.test(label)) return;
-    if (ACTION_RE.test(label) || (btn as HTMLInputElement).type === 'submit') {
-      void markSubmitted();
-    }
+    if (!NEGATIVE_RE.test(label) && ACTION_RE.test(label)) void markSubmitted();
   };
-
-  const onSubmit = () => {
-    void markSubmitted();
+  const onSubmit = (e: Event) => {
+    const submitter = (e as SubmitEvent).submitter;
+    if (submitter && NEGATIVE_RE.test(controlLabel(submitter))) return;
+    if (e.isTrusted && e.target === form && form && isSignupScopeValid(form)) void markSubmitted();
   };
-
-  document.addEventListener('click', onClick, true);
-  if (form instanceof HTMLFormElement) form.addEventListener('submit', onSubmit, true);
-
-  opts?.onStatus?.('pending_submit');
-  void import('./post-submit.js').then(({ markLatestCredentialStatus }) =>
-    markLatestCredentialStatus(domain, 'pending_submit')
-  );
-
-  if (opts?.autoClick !== false) {
-    // Slight delay so frameworks bind filled values
-    setTimeout(async () => {
-      if (stopped || submitted) return;
-
-      try {
-        const { loadSmartAutofillSettings } = await import('./smart-settings.js');
-        const settings = await loadSmartAutofillSettings();
-        if (!settings.autoClickSubmitButtons) return;
-      } catch {
-        // proceed if settings load fails
-      }
-
-      if (stopped || submitted) return;
-      const formEl = form instanceof HTMLFormElement ? form : null;
-      if (clickPrimaryAction(formEl || (form as HTMLElement))) {
-        // markSubmitted will fire from click capture if successful;
-        // also arm if click doesn't bubble the way we expect
-        setTimeout(() => {
-          if (!submitted) void markSubmitted();
-        }, 100);
-      }
+  const onVisibility = () => {
+    if (!document.hidden) void tick();
+  };
+  eventRoot.addEventListener('click', onClick, true);
+  eventRoot.addEventListener('submit', onSubmit, true);
+  document.addEventListener('visibilitychange', onVisibility);
+  window.addEventListener('pagehide', stop);
+  if (document.body)
+    observer.observe(document.body, {
+      subtree: true,
+      childList: true,
+      characterData: true,
+      attributes: true,
+      attributeFilter: ['hidden', 'class', 'style', 'aria-hidden'],
+    });
+  if (opts?.autoClick === true) {
+    autoClickTimer = setTimeout(async () => {
+      if (stopped || submitted || !form || !(await hasAutoSubmitConsent())) return;
+      if (stopped || submitted || !isSignupScopeValid(form)) return;
+      // This one extension-initiated click has explicit consent. Synthetic
+      // clicks elsewhere never authorize an attempt.
+      if (clickPrimaryAction(form)) void markSubmitted();
     }, 280);
   }
-
-  setTimeout(() => {
-    if (!stopped && !submitted) {
-      opts?.onStatus?.('undetected');
-      void import('./post-submit.js').then(({ markLatestCredentialStatus }) =>
-        markLatestCredentialStatus(domain, 'undetected')
-      );
-      stop();
-    }
-  }, timeoutMs);
-
+  activeSignupWatcher = stop;
+  activeSignupAttemptId = attempt.id;
+  activeSignupScope = form;
+  void tick();
   return stop;
+}
+
+// One watcher per document; replaced on a new fill and released on pagehide/TTL.
+let activeSignupWatcher: (() => void) | null = null;
+let activeSignupAttemptId: string | null = null;
+let activeSignupScope: HTMLElement | null = null;
+
+export function isSignupScopeValid(scope: HTMLElement): boolean {
+  if (scope instanceof HTMLFormElement) return scope.checkValidity();
+  return Array.from(
+    scope.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(
+      'input,select,textarea'
+    )
+  ).every((input) => !input.willValidate || input.checkValidity());
+}
+
+export async function resumeSignupOutcome(form: HTMLElement | null = null): Promise<void> {
+  const { getSignupAttemptViaBg } = await import('@/utils/content/content-bg-bridge.js');
+  const attempt = await getSignupAttemptViaBg();
+  if (attempt?.id === activeSignupAttemptId && (!form || form === activeSignupScope)) return;
+  if (attempt && attempt.expiresAt > Date.now()) armSignupOutcomeAfterSubmit(attempt, form);
 }

@@ -1,19 +1,24 @@
 /**
- * Local site memory — outcomes & profiles without becoming a password vault.
+ * Local site memory - outcomes & profiles without becoming a password vault.
  * Passwords stay only in encrypted loginInfo; this stores routing metadata.
  */
 
+import { LOCKS, withLock } from '@/utils/mutex.js';
 import { uniqueFieldKinds } from './form-score.js';
 import { rememberIdentityForDomain } from './identity-router.js';
-import { recordInboxAutofill } from './inbox-lifecycle.js';
-import { getSiteProfile, normalizeDomain, saveSiteProfile } from './storage.js';
+import { recordAddressAutofill } from './inbox-lifecycle.js';
+import {
+  getSiteProfile,
+  normalizeDomain,
+  saveSiteProfileUnlockedForLockedCaller,
+} from './storage.js';
 import type { FormFieldKind, FormScore, SiteProfile } from './types.js';
 
 export async function recordAutofillOutcome(opts: {
   domain: string;
   success: boolean;
   identityId?: string | null;
-  inboxId?: string | null;
+  addressId?: string | null;
   email?: string | null;
   formScore?: FormScore | null;
   policyUrls?: string[];
@@ -22,55 +27,55 @@ export async function recordAutofillOutcome(opts: {
   const domain = normalizeDomain(opts.domain);
   if (!domain) return;
 
-  const prev = (await getSiteProfile(domain)) || {
-    domain,
-    successCount: 0,
-    failureCount: 0,
-    fieldKindsSeen: [] as FormFieldKind[],
-    preferredMode: 'auto' as const,
-    updatedAt: Date.now(),
-  };
+  await withLock(LOCKS.SITE_PROFILES, async () => {
+    const prev = (await getSiteProfile(domain)) || {
+      domain,
+      successCount: 0,
+      failureCount: 0,
+      fieldKindsSeen: [] as FormFieldKind[],
+      preferredMode: 'auto' as const,
+      updatedAt: Date.now(),
+    };
 
-  const kinds = opts.formScore ? uniqueFieldKinds(opts.formScore) : prev.fieldKindsSeen;
-
-  const next: SiteProfile = {
-    ...prev,
-    domain,
-    lastIdentityId: opts.identityId || prev.lastIdentityId,
-    lastInboxId: opts.inboxId || prev.lastInboxId,
-    lastEmail: opts.email || prev.lastEmail,
-    successCount: prev.successCount + (opts.success ? 1 : 0),
-    failureCount: prev.failureCount + (opts.success ? 0 : 1),
-    fieldKindsSeen: [...new Set([...prev.fieldKindsSeen, ...kinds])],
-    preferredMode: opts.usedReplay
-      ? 'replay'
-      : opts.success
-        ? prev.preferredMode === 'replay'
-          ? 'replay'
-          : 'auto'
-        : prev.preferredMode,
-    policyUrls: opts.policyUrls?.length
-      ? [...new Set([...(prev.policyUrls || []), ...opts.policyUrls])].slice(0, 12)
-      : prev.policyUrls,
-    lastSignupLikelihood: opts.formScore?.signupLikelihood ?? prev.lastSignupLikelihood,
-    lastSuccessAt: opts.success ? Date.now() : prev.lastSuccessAt,
-    lastFailureAt: opts.success ? prev.lastFailureAt : Date.now(),
-    updatedAt: Date.now(),
-  };
-
-  await saveSiteProfile(next);
+    const kinds = opts.formScore ? uniqueFieldKinds(opts.formScore) : prev.fieldKindsSeen;
+    const next: SiteProfile = {
+      ...prev,
+      domain,
+      lastIdentityId: opts.identityId || prev.lastIdentityId,
+      lastAddressId: opts.addressId || prev.lastAddressId,
+      lastEmail: opts.email || prev.lastEmail,
+      successCount: prev.successCount + (opts.success ? 1 : 0),
+      failureCount: prev.failureCount + (opts.success ? 0 : 1),
+      fieldKindsSeen: [...new Set([...prev.fieldKindsSeen, ...kinds])],
+      preferredMode: opts.usedReplay
+        ? 'replay'
+        : opts.success
+          ? prev.preferredMode === 'replay'
+            ? 'replay'
+            : 'auto'
+          : prev.preferredMode,
+      policyUrls: opts.policyUrls?.length
+        ? [...new Set([...(prev.policyUrls || []), ...opts.policyUrls])].slice(0, 12)
+        : prev.policyUrls,
+      lastSignupLikelihood: opts.formScore?.signupLikelihood ?? prev.lastSignupLikelihood,
+      lastSuccessAt: opts.success ? Date.now() : prev.lastSuccessAt,
+      lastFailureAt: opts.success ? prev.lastFailureAt : Date.now(),
+      updatedAt: Date.now(),
+    };
+    await saveSiteProfileUnlockedForLockedCaller(next);
+  });
 
   if (opts.success && opts.identityId) {
     await rememberIdentityForDomain(domain, opts.identityId);
   }
-  if (opts.success && opts.inboxId && opts.email) {
-    await recordInboxAutofill(opts.inboxId, opts.email, domain);
+  if (opts.success && opts.addressId && opts.email) {
+    await recordAddressAutofill(opts.addressId, opts.email, domain);
   }
   // Site rules: schedule auto-archive after N days when configured
-  if (opts.success && opts.inboxId) {
+  if (opts.success && opts.addressId) {
     try {
       const { scheduleArchiveFromRule } = await import('./site-rules.js');
-      await scheduleArchiveFromRule(domain, opts.inboxId);
+      await scheduleArchiveFromRule(domain, opts.addressId);
     } catch {
       /* optional */
     }

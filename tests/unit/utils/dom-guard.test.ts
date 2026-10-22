@@ -1,6 +1,9 @@
-// biome-ignore-all lint/suspicious/noExplicitAny: mock DOM globals
 import { describe, expect, mock, test } from 'bun:test';
-import { addTrustedClickListener, trustedClick, trustedPointerDown } from '@/utils/dom-guard.js';
+import {
+  addTrustedClickListener,
+  trustedClick,
+  trustedPointerDown,
+} from '@/utils/security/dom-guard.js';
 
 describe('trustedClick', () => {
   test('calls handler when event.isTrusted is true', () => {

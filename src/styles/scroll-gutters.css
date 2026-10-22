@@ -1,0 +1,180 @@
+/* Compact product overrides, not universal Material 3 requirements.
+   See docs/Design.md for the measured compact/roomy dialog profiles. */
+:root {
+  --page-content-inset: 8px;
+  --dialog-content-inset: 16px;
+  --dialog-viewport-inset: 8px;
+}
+
+/* The shell owns page gutters; views must not add another outer inset.
+   Cards, list rows and controls retain their own internal padding. */
+.page-inset,
+.page-inset-wide {
+  padding-inline: var(--page-content-inset);
+}
+
+/* The size container supports responsive controls within the dialog. */
+.dialog-surface {
+  container: dialog / inline-size;
+}
+
+/* Default compact until measured. Portaled dialogs own their tokens, so a
+   nested dialog never inherits the density of the one behind it. */
+.dialog-surface,
+.dialog-padding {
+  --dialog-title-size: var(--md-type-title-medium-size);
+  --dialog-title-line: var(--md-type-title-medium-line);
+  --dialog-title-weight: var(--md-type-title-medium-weight);
+  --dialog-title-tracking: var(--md-type-title-medium-tracking);
+  --dialog-block-inset: 16px;
+  --dialog-region-gap: 12px;
+  --dialog-form-gap: 16px;
+  --dialog-header-gap: 8px;
+  --dialog-action-offset: 4px;
+  --dialog-body-inset: 12px;
+}
+
+[data-dialog-density="roomy"] {
+  --dialog-title-size: var(--md-type-title-large-size);
+  --dialog-title-line: var(--md-type-title-large-line);
+  --dialog-title-weight: var(--md-type-title-large-weight);
+  --dialog-title-tracking: var(--md-type-title-large-tracking);
+  --dialog-block-inset: 24px;
+  --dialog-region-gap: 16px;
+  --dialog-form-gap: 24px;
+  --dialog-header-gap: 12px;
+  --dialog-action-offset: 8px;
+  --dialog-body-inset: 16px;
+}
+
+.dialog-block-padding {
+  padding-block: var(--dialog-block-inset, 16px);
+}
+
+.dialog-body-padding {
+  padding-block: var(--dialog-body-inset, 12px);
+}
+
+.dialog-editor-header {
+  padding-block-start: var(--dialog-block-inset, 16px);
+  padding-block-end: 8px;
+}
+
+/* Material Web's basic dialog uses 24px. This extension deliberately uses a
+   smaller horizontal inset; header, body and footer share the same override. */
+.dialog-inset {
+  padding-inline: var(--dialog-content-inset);
+}
+
+.dialog-padding {
+  padding-block: var(--dialog-block-inset, 16px);
+  padding-inline: var(--dialog-content-inset);
+}
+
+/* Override only the horizontal viewport gutter; existing vertical classes stay. */
+.dialog-viewport-inset {
+  padding-inline: var(--dialog-viewport-inset);
+}
+
+/* Related labels/controls stay close; independent tasks get a larger break.
+   Use one gap owner instead of stacking child margins and parent spacing. */
+.dialog-layout,
+.dialog-content-stack,
+.dialog-form,
+.dialog-section,
+.dialog-field {
+  display: flex;
+  flex-direction: column;
+}
+
+.dialog-layout,
+.dialog-content-stack {
+  gap: var(--dialog-region-gap, 12px);
+}
+
+.dialog-form {
+  gap: var(--dialog-form-gap, 16px);
+}
+
+.dialog-section {
+  gap: 8px;
+}
+
+.dialog-field {
+  gap: 4px;
+}
+
+.dialog-field-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--dialog-region-gap, 12px);
+}
+
+@container dialog (min-width: 480px) {
+  .dialog-field-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.dialog-compact.dialog-layout {
+  gap: 12px;
+}
+
+.dialog-compact .dialog-form {
+  gap: 16px;
+}
+
+/* Product adaptation of M3 type roles: Title Medium in compact dialogs,
+   Title Large in roomy ones; Body Medium stays readable in both profiles.
+   Shared by centered dialogs, sheets and custom editors. */
+.dialog-header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--dialog-header-gap, 8px);
+}
+
+.dialog-heading {
+  font-size: var(--dialog-title-size, var(--md-type-title-medium-size));
+  line-height: var(--dialog-title-line, var(--md-type-title-medium-line));
+  letter-spacing: var(--dialog-title-tracking, var(--md-type-title-medium-tracking));
+  font-weight: var(--dialog-title-weight, var(--md-type-title-medium-weight));
+  color: var(--md-on-surface);
+}
+
+.dialog-description {
+  font-size: var(--md-type-body-medium-size);
+  line-height: var(--md-type-body-medium-line);
+  letter-spacing: var(--md-type-body-medium-tracking);
+  font-weight: var(--md-type-body-medium-weight);
+  color: var(--md-on-surface-variant);
+}
+
+/* Centered body → actions: 12+4px compact, 16+8px roomy.
+   This does not change the spacing or fitting of the buttons inside the row. */
+.dialog-actions {
+  margin-block-start: var(--dialog-action-offset, 4px);
+}
+
+.dialog-field-label {
+  font-size: var(--md-type-label-large-size);
+  line-height: var(--md-type-label-large-line);
+  letter-spacing: var(--md-type-label-large-tracking);
+  font-weight: var(--md-type-label-large-weight);
+  color: var(--md-on-surface-variant);
+}
+
+/* A classic scrollbar occupies inline-end. Spend the same space at inline-start.
+   Short content and overlay scrollbars need no compensation. Keep native bars.
+   Only marked outer content areas participate; nested menus keep their layout. */
+.scroll-body[data-scroll-balanced] {
+  padding-inline-start: calc(var(--scroll-base-padding, 0px) + var(--scrollbar-space, 0px));
+}
+
+.scroll-frame {
+  --scroll-edge-space: 0px;
+}
+
+.scroll-edge,
+.scroll-frame > .scroll-spy {
+  margin-inline: var(--scroll-edge-space, 0px);
+}

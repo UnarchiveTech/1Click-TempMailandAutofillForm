@@ -12,6 +12,12 @@
  *   bun run bump-version major            # 3.0.0 → 4.0.0
  *   bun run bump-version 3.1.0            # explicit SemVer
  *   bun run bump-version --preid=beta 3.1.0-rc.1   # prerelease
+ *   bun run bump-version --check           # release-state preflight only
+ *
+ * With --check (alone or combined with a bump), verifies the working tree is
+ * clean and the latest reachable git tag matches package.json's version
+ * (v<version>) before doing anything, exiting 1 on mismatch. This is the
+ * guard CI release runs use to fail early.
  *
  * Validates the result is a parseable SemVer string. Exits non-zero on error
  * so CI can gate releases on it.
@@ -20,6 +26,8 @@
  *   git tag v<version>           # tag must match (release.yml enforces this)
  *   git push origin v<version>   # triggers the release workflow
  */
+
+import { GitCommandError, runGit, runGitCapture } from './git';
 
 const PKG_PATH = `${import.meta.dir}/../package.json`;
 
@@ -99,29 +107,76 @@ async function writeVersion(newVersion: string): Promise<void> {
   console.log(`✓ package.json version: ${newVersion}`);
 }
 
+/**
+ * Release-state preflight: refuses to proceed unless the working tree is
+ * clean and the latest reachable git tag matches package.json's version
+ * (`v<version>`). Prints ✓ lines on success and exits 1 with a descriptive
+ * message on any mismatch, so release runs (local or CI) fail before any
+ * work happens.
+ */
+function verifyReleaseState(currentVersion: string): void {
+  const expectedTag = `v${currentVersion}`;
+
+  const dirtyLines = runGitCapture(['status', '--porcelain'])
+    .trim()
+    .split('\n')
+    .filter((line) => line.length > 0);
+  if (dirtyLines.length > 0) {
+    console.error(
+      `✗ Working tree is not clean - expected tag ${expectedTag} to match package.json version ${currentVersion}.`
+    );
+    for (const line of dirtyLines.slice(0, 20)) console.error(`  ${line}`);
+    if (dirtyLines.length > 20) {
+      console.error(`  … and ${dirtyLines.length - 20} more`);
+    }
+    process.exit(1);
+  }
+  console.log('✓ Working tree is clean');
+
+  let latestTag: string;
+  try {
+    latestTag = runGitCapture(['describe', '--tags', '--abbrev=0']).trim();
+  } catch (error) {
+    if (error instanceof GitCommandError) {
+      console.error(
+        `✗ No git tags found - expected ${expectedTag} to match package.json version ${currentVersion}.`
+      );
+      process.exit(1);
+    }
+    throw error;
+  }
+
+  if (latestTag !== expectedTag) {
+    console.error(
+      `✗ Latest tag ${latestTag} does not match package.json version ${currentVersion} (expected ${expectedTag}).`
+    );
+    console.error('  Bump the version first, or tag this commit:');
+    console.error(`    git tag -a ${expectedTag} -m "Release ${expectedTag}"`);
+    process.exit(1);
+  }
+  console.log(`✓ Latest tag ${latestTag} matches package.json version ${currentVersion}`);
+}
+
 function gitTag(version: string, opts: { tag: boolean; push: boolean }): void {
   if (!opts.tag && !opts.push) return;
   const tagName = `v${version}`;
-  if (opts.tag) {
-    const r = Bun.spawnSync(['git', 'tag', '-a', tagName, '-m', `Release ${tagName}`], {
-      stdout: 'inherit',
-      stderr: 'inherit',
-    });
-    if (!r.success) process.exit(r.exitCode ?? 1);
-    console.log(`✓ Created tag ${tagName}`);
-  }
-  if (opts.push) {
-    const r1 = Bun.spawnSync(['git', 'push', 'origin', 'HEAD'], {
-      stdout: 'inherit',
-      stderr: 'inherit',
-    });
-    if (!r1.success) process.exit(r1.exitCode ?? 1);
-    const r2 = Bun.spawnSync(['git', 'push', 'origin', tagName], {
-      stdout: 'inherit',
-      stderr: 'inherit',
-    });
-    if (!r2.success) process.exit(r2.exitCode ?? 1);
-    console.log(`✓ Pushed branch and tag ${tagName}`);
+  try {
+    if (opts.tag) {
+      runGit(['tag', '-a', tagName, '-m', `Release ${tagName}`], {
+        okMessage: `Created tag ${tagName}`,
+      });
+    }
+    if (opts.push) {
+      runGit(['push', 'origin', 'HEAD'], { okMessage: 'Pushed branch to origin' });
+      runGit(['push', 'origin', tagName], { okMessage: `Pushed tag ${tagName}` });
+      console.log(`✓ Pushed branch and tag ${tagName}`);
+    }
+  } catch (error) {
+    // Preserve the previous CLI contract: exit with git's code (1 when git
+    // could not be launched). The descriptive ✗ message is already printed by
+    // runGit.
+    if (error instanceof GitCommandError) process.exit(error.exitCode ?? 1);
+    throw error;
   }
 }
 
@@ -132,6 +187,7 @@ interface Args {
   tag: boolean;
   push: boolean;
   dryRun: boolean;
+  check: boolean;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -142,12 +198,14 @@ function parseArgs(argv: string[]): Args {
     tag: false,
     push: false,
     dryRun: false,
+    check: false,
   };
 
   const positional: string[] = [];
   for (const arg of argv) {
     if (arg === '--tag') args.tag = true;
     else if (arg === '--push') args.push = true;
+    else if (arg === '--check') args.check = true;
     else if (arg === '--dry-run') args.dryRun = true;
     else if (arg.startsWith('--preid=')) args.preid = arg.slice('--preid='.length);
     else if (arg === '--help' || arg === '-h') {
@@ -180,6 +238,8 @@ Flags:
   --preid=<id>   Prerelease identifier (default: rc)
   --tag          Create a v<version> git tag after bumping
   --push         Push branch and tag to origin (implies --tag)
+  --check        Verify release state (clean tree + latest tag matches
+                 package.json) and fail early on mismatch
   --dry-run      Show the new version without writing anything
   --help, -h     Show this help
 
@@ -188,6 +248,7 @@ Examples:
   bun run bump-version minor --tag
   bun run bump-version 3.1.0 --push
   bun run bump-version prerelease --preid=beta
+  bun run bump-version --check
 `);
 }
 
@@ -195,6 +256,11 @@ Examples:
 
 const args = parseArgs(process.argv.slice(2));
 const current = await readVersion();
+
+if (args.check) {
+  verifyReleaseState(current);
+}
+
 const parsed = parseSemVer(current);
 
 let next: string;

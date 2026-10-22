@@ -1,0 +1,136 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, sans-serif;
+  background: light-dark(#f8faef, #12150e);
+  color: light-dark(#1b2116, #e1e6d9);
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  padding: 16px;
+}
+header,
+.actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.actions {
+  width: min(100%, 640px);
+  flex-wrap: nowrap;
+}
+.views {
+  display: none;
+}
+#extensionViewport {
+  position: relative;
+  height: 680px;
+  min-width: 0;
+}
+#extension {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: top left;
+}
+header h1 {
+  font-size: 24px;
+  margin: 0;
+}
+p {
+  line-height: 1.5;
+}
+a {
+  color: inherit;
+}
+header a {
+  margin-inline-start: auto;
+}
+button {
+  min-height: 40px;
+  padding: 8px 16px;
+  border-radius: 20px;
+  border: 1px solid currentColor;
+  background: light-dark(#d9e7c5, #35492a);
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+button:focus-visible,
+a:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 382px;
+  gap: 16px;
+}
+iframe {
+  width: 100%;
+  height: 680px;
+  border: 1px solid light-dark(#737c69, #98a48c);
+  border-radius: 16px;
+  background: light-dark(#f8faef, #12150e);
+}
+.sample {
+  max-width: 480px;
+  margin: auto;
+}
+.sample h1 {
+  font-size: 20px;
+}
+.sample h2 {
+  font-size: 24px;
+  font-weight: 500;
+}
+label {
+  display: grid;
+  gap: 4px;
+  margin-block: 12px;
+}
+input {
+  width: 100%;
+  min-height: 44px;
+  border: 1px solid currentColor;
+  border-radius: 8px;
+  padding: 8px 12px;
+  font: inherit;
+  color: inherit;
+  background: transparent;
+}
+[hidden] {
+  display: none !important;
+}
+@media (max-width: 760px) {
+  main {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .views {
+    display: flex;
+    gap: 8px;
+    margin-block: 8px;
+  }
+  .views button {
+    flex: 1;
+    min-width: 0;
+  }
+  .views [aria-pressed="true"] {
+    background: light-dark(#4c662b, #b0cd8e);
+    color: light-dark(#fff, #20310e);
+  }
+  #sample {
+    height: 700px;
+  }
+  main[data-pane="sample"] #extensionViewport,
+  main[data-pane="extension"] #sample {
+    display: none;
+  }
+}

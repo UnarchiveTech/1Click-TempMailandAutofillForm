@@ -1,4 +1,3 @@
-import type { Browser } from 'wxt/browser';
 import {
   type AnalyticsData,
   loadAnalytics as loadAnalyticsAction,

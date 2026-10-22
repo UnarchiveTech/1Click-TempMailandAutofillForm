@@ -10,10 +10,21 @@
  */
 
 import { expect, test } from './fixtures';
+import { extensionUrl } from './preview-harness';
 
 // ── 1. BASIC MOUNT ───────────────────────────────────────────────────────────
 
-test.describe('Popup — basic mount', () => {
+test.describe('Popup - basic mount', () => {
+  test('mailbox omits the redundant setup checklist and retains normal controls', async ({
+    extensionPage,
+  }) => {
+    await expect(extensionPage.locator('#button-copy-email')).toBeVisible();
+    await expect(extensionPage.locator('#onboarding-checklist-title')).toHaveCount(0);
+    await expect(
+      extensionPage.getByText("You're all set - finish your setup", { exact: true })
+    ).toHaveCount(0);
+  });
+
   test('popup renders without crashing', async ({ extensionPage }) => {
     // Svelte has mounted if #app has at least one child
     const appRoot = extensionPage.locator('#app');
@@ -38,7 +49,7 @@ test.describe('Popup — basic mount', () => {
     const errors: string[] = [];
     const page = await context.newPage();
     page.on('pageerror', (err) => errors.push(err.message));
-    await page.goto(`chrome-extension://${extensionId}/popup.html`);
+    await page.goto(extensionUrl(extensionId, 'popup.html'));
     await page.waitForSelector('#app > *', { timeout: 10_000 });
     const critical = errors.filter(
       (e) => !e.includes('storage') && !e.includes('chrome') && !e.includes('browser')
@@ -50,7 +61,7 @@ test.describe('Popup — basic mount', () => {
 
 // ── 2. SIDEPANEL MOUNT ────────────────────────────────────────────────────────
 
-test.describe('Sidepanel — basic mount', () => {
+test.describe('Sidepanel - basic mount', () => {
   test('sidepanel renders without crashing', async ({ sidepanelPage }) => {
     const appRoot = sidepanelPage.locator('#app');
     await expect(appRoot).toBeAttached();
@@ -65,10 +76,10 @@ test.describe('Sidepanel — basic mount', () => {
 
 // ── 3. APP ENTRY POINT ────────────────────────────────────────────────────────
 
-test.describe('App entry point — basic mount', () => {
+test.describe('App entry point - basic mount', () => {
   test('app.html renders without crashing', async ({ context, extensionId }) => {
     const page = await context.newPage();
-    await page.goto(`chrome-extension://${extensionId}/app.html`);
+    await page.goto(extensionUrl(extensionId, 'app.html'));
     await page.waitForSelector('#app > *', { timeout: 10_000 });
     const children = await page.locator('#app > *').count();
     expect(children).toBeGreaterThan(0);
@@ -76,7 +87,7 @@ test.describe('App entry point — basic mount', () => {
   });
 });
 
-// ── 4. NAVIGATION — FOOTER NAV BAR ───────────────────────────────────────────
+// ── 4. NAVIGATION - FOOTER NAV BAR ───────────────────────────────────────────
 
 test.describe('Footer navigation bar', () => {
   test('footer nav is present', async ({ extensionPage }) => {
@@ -98,29 +109,37 @@ test.describe('Footer navigation bar', () => {
 test.describe('Email list and viewer interactions', () => {
   test('shows seeded demo email address and seeded mail message', async ({ extensionPage }) => {
     // Check that the address bar displays the demo address in the selector button
-    const addressBtn = extensionPage.getByRole('button', { name: /Select email address/i }).first();
-    await expect(addressBtn).toContainText('demo.user');
+    const addressGroup = extensionPage.getByRole('group', { name: 'Select email address' });
+    await expect(addressGroup).toContainText('demo.user');
 
     // Email list should render the seeded GitHub verification email
-    const emailItem = extensionPage.locator('text=GitHub').first();
+    const emailItem = extensionPage.getByRole('button', {
+      name: /Email from security@github\.com: Your verification code/,
+    });
     await expect(emailItem).toBeVisible();
 
-    const subjectItem = extensionPage.locator('text=Your verification code');
+    const subjectItem = extensionPage.getByText('Your verification code').first();
     await expect(subjectItem).toBeVisible();
   });
 
   test('can open and read email details with OTP copy badge', async ({ extensionPage }) => {
     // Click on the verification email card to open it
-    await extensionPage.locator('text=Your verification code').click();
+    const emailCard = extensionPage.getByRole('button', {
+      name: /Email from security@github\.com: Your verification code/,
+    });
+    await emailCard.focus();
+    await extensionPage.keyboard.press('Enter');
 
     // Check that the email view headers and body loaded
     await expect(extensionPage.locator('text=security@github.com')).toBeVisible();
     await expect(
-      extensionPage.locator('text=Your GitHub verification code is 482901')
+      extensionPage.locator('.email-body').getByText('Your GitHub verification code is 482901.')
     ).toBeVisible();
 
-    // Verification code badge (Copy OTP button) should be present
-    const otpBadge = extensionPage.getByRole('button', { name: 'Copy OTP' }).first();
+    // Verification code badge (Copy OTP button) should be present. The badge
+    // now renders the code itself as its accessible name - the "Copy OTP" text
+    // lives only in the hover tooltip (aria-label is the OTP value).
+    const otpBadge = extensionPage.getByRole('button', { name: '482901' }).first();
     await expect(otpBadge).toBeVisible();
   });
 });
@@ -129,8 +148,12 @@ test.describe('Label tabs and filtering', () => {
   test('labeling a message updates custom tab count and filter', async ({ extensionPage }) => {
     const LABEL = 'e2e-priority';
 
-    await extensionPage.locator('text=Your verification code').click();
-    await extensionPage.getByRole('button', { name: 'Add a label' }).click();
+    const emailCard = extensionPage.getByRole('button', {
+      name: /Email from security@github\.com: Your verification code/,
+    });
+    await emailCard.focus();
+    await extensionPage.keyboard.press('Enter');
+    await extensionPage.getByRole('button', { name: 'Add label' }).click();
     await extensionPage.getByPlaceholder('e.g. Banking, Shopping').fill(LABEL);
     await extensionPage.getByRole('button', { name: 'Save' }).click();
 
@@ -141,8 +164,9 @@ test.describe('Label tabs and filtering', () => {
     });
     await expect(labelTab).toBeVisible({ timeout: 8000 });
 
-    await labelTab.click();
-    await expect(extensionPage.locator('text=Your verification code')).toBeVisible();
+    await labelTab.focus();
+    await extensionPage.keyboard.press('Enter');
+    await expect(extensionPage.getByText('Your verification code').first()).toBeVisible();
     await expect(extensionPage.locator('text=GitHub').first()).toBeVisible();
   });
 });
@@ -150,23 +174,161 @@ test.describe('Label tabs and filtering', () => {
 // ── 6. EMAIL CREATION & SIMULATION ───────────────────────────────────────────
 
 test.describe('Address management and incoming simulation', () => {
+  test('address selector dialog action strip follows the XS responsive fitting', async ({
+    extensionPage,
+  }, testInfo) => {
+    await extensionPage.setViewportSize({ width: 360, height: 640 });
+    await extensionPage.locator('button[aria-label*="Open account list"]').click();
+
+    const actionRow = extensionPage.locator('#button-strip-archive').locator('xpath=..');
+    await expect(actionRow).toHaveAttribute('data-action-tier', 'XS');
+    await expect(actionRow).toHaveAttribute('data-responsive-button-layout-interior', 'fit');
+    await expect(extensionPage.locator('#button-create-new-mail')).toHaveCSS('height', '40px');
+    await extensionPage.evaluate(async () => {
+      await document.fonts.ready;
+      await Promise.allSettled(
+        document
+          .getAnimations()
+          .filter((animation) => animation.effect?.getComputedTiming().iterations !== Infinity)
+          .map((animation) => animation.finished)
+      );
+    });
+
+    const actionMetrics = await actionRow.locator('[role="button"]').evaluateAll((buttons) =>
+      buttons.map((button) => {
+        const style = getComputedStyle(button);
+        const icon = button.querySelector('svg');
+        const iconRect = icon?.getBoundingClientRect();
+        const rect = button.getBoundingClientRect();
+        return {
+          left: rect.left,
+          right: rect.right,
+          height: rect.height,
+          fontSize: Number.parseFloat(style.fontSize),
+          iconWidth: iconRect?.width ?? 0,
+          gap: Number.parseFloat(style.gap),
+        };
+      })
+    );
+    const rowGeometry = await actionRow.evaluate((row) => {
+      const bounds = row.getBoundingClientRect();
+      const buttons = Array.from(row.querySelectorAll('[role="button"]'));
+      const buttonBounds = buttons.map((button) => button.getBoundingClientRect());
+      return {
+        left: bounds.left,
+        right: bounds.right,
+        gap: Number.parseFloat(getComputedStyle(row).columnGap),
+        gaps: buttonBounds.slice(1).map((button, index) => button.left - buttonBounds[index].right),
+      };
+    });
+
+    expect(actionMetrics).toHaveLength(4);
+    const lastAction = actionMetrics[actionMetrics.length - 1];
+    if (!lastAction) throw new Error('Expected four selector actions');
+    // Natural-width fitting may leave unused space after the last action.
+    expect(actionMetrics[0].left).toBeGreaterThanOrEqual(rowGeometry.left - 1);
+    expect(lastAction.right).toBeLessThanOrEqual(rowGeometry.right + 1);
+    expect(Math.max(...rowGeometry.gaps) - Math.min(...rowGeometry.gaps)).toBeLessThan(1);
+    for (const gap of rowGeometry.gaps) {
+      expect(Math.abs(gap - rowGeometry.gap)).toBeLessThan(1);
+    }
+    for (const metrics of actionMetrics) {
+      expect(metrics.height).toBe(56);
+      expect(metrics.fontSize).toBeGreaterThanOrEqual(12);
+      expect(metrics.iconWidth).toBeGreaterThanOrEqual(16);
+      expect(metrics.gap).toBeGreaterThanOrEqual(3);
+    }
+
+    const screenshotPath = testInfo.outputPath('address-selector-dialog.png');
+    await extensionPage.screenshot({ path: screenshotPath });
+    await testInfo.attach('address-selector-dialog', {
+      path: screenshotPath,
+      contentType: 'image/png',
+    });
+  });
+
+  test('address selector bottom sheet follows the same XS responsive fitting', async ({
+    extensionPage,
+  }) => {
+    await extensionPage.evaluate(
+      () =>
+        new Promise<void>((resolve) => {
+          chrome.storage.local.set({ dialogPresentationBottomSheet: true }, resolve);
+        })
+    );
+    await extensionPage.locator('button[aria-label*="Open account list"]').click();
+
+    const actionRow = extensionPage.locator('#button-strip-archive').locator('xpath=..');
+    await expect(actionRow).toHaveAttribute('data-action-tier', 'XS');
+    await expect(actionRow).toHaveAttribute('data-responsive-button-layout-interior', 'fit');
+    await expect(actionRow).toHaveAttribute('data-responsive-button-layout-state', /.+/);
+    await extensionPage.evaluate(async () => {
+      await document.fonts.ready;
+      await Promise.allSettled(
+        document
+          .getAnimations()
+          .filter((animation) => animation.effect?.getComputedTiming().iterations !== Infinity)
+          .map((animation) => animation.finished)
+      );
+    });
+    const metrics = await actionRow.evaluate((row) => {
+      const gap = Number.parseFloat(getComputedStyle(row).columnGap);
+      const buttons = Array.from(row.querySelectorAll<HTMLElement>('[role="button"]'));
+      return buttons.map((button, index) => {
+        const style = getComputedStyle(button);
+        const bounds = button.getBoundingClientRect();
+        const label = button.querySelector('span');
+        return {
+          height: bounds.height,
+          font: Number.parseFloat(style.fontSize),
+          icon: button.querySelector('svg')?.getBoundingClientRect().width ?? 0,
+          insideGap: Number.parseFloat(style.rowGap),
+          outerGap: index ? bounds.left - buttons[index - 1].getBoundingClientRect().right : gap,
+          expectedGap: gap,
+          labelOverflow: label ? label.scrollWidth - label.clientWidth : 0,
+        };
+      });
+    });
+    expect(metrics).toHaveLength(4);
+    for (const button of metrics) {
+      expect(button.height).toBe(56);
+      expect(button.font).toBeGreaterThanOrEqual(12);
+      expect(button.icon).toBeGreaterThanOrEqual(16);
+      expect(button.insideGap).toBeGreaterThanOrEqual(3);
+      expect(Math.abs(button.outerGap - button.expectedGap)).toBeLessThan(1);
+      expect(button.labelOverflow).toBe(0);
+    }
+    const footer = extensionPage.locator('.account-selector-sticky-actions');
+    await expect(footer).toHaveAttribute('data-action-tier', 'S');
+    await expect(footer).toHaveCSS('column-gap', '12px');
+    await expect(footer.locator('button').first()).toHaveCSS('height', '40px');
+    await expect(footer.locator('button').last()).toHaveCSS('height', '40px');
+  });
+
   test('can create a new demo email address', async ({ extensionPage }) => {
     // Open the account dropdown list
     await extensionPage.locator('button[aria-label*="Open account list"]').click();
 
-    // Click on the create new mail button inside the dropdown
+    // Click on the create new mail button inside the dropdown. The New Mail
+    // Address button now opens CreateAddressDialog (Random preselected) which
+    // must be confirmed - confirming also switches the active address.
     const createBtn = extensionPage.locator('#button-create-new-mail');
     await expect(createBtn).toBeVisible();
     await createBtn.click();
+    const confirm = extensionPage.getByRole('button', { name: 'Create' });
+    await expect(confirm).toBeVisible();
+    await confirm.click();
 
     // Wait for the address to update and verify it contains domain
-    const addressBtn = extensionPage.getByRole('button', { name: /Select email address/i }).first();
-    await expect(addressBtn).toContainText('@example.com');
+    const addressGroup = extensionPage.getByRole('group', { name: 'Select email address' });
+    await expect(addressGroup).toContainText('@example.com');
   });
 
   test('can simulate receiving new email via developer settings', async ({ extensionPage }) => {
     // 1. Navigate to Settings page via "More" menu
-    await extensionPage.getByRole('button', { name: 'More' }).click();
+    // Open by keyboard so the hover-open behavior cannot toggle the menu shut
+    // between Playwright's pointer movement and click.
+    await extensionPage.getByRole('button', { name: 'More' }).press('Enter');
     await extensionPage.getByRole('menuitem', { name: 'Settings' }).click();
     await extensionPage.waitForTimeout(400);
 
@@ -175,9 +337,13 @@ test.describe('Address management and incoming simulation', () => {
     await expect(simulateBtn).toBeVisible();
     await simulateBtn.click();
 
-    // 3. Return to Inbox view
-    const inboxBtn = extensionPage.getByRole('button', { name: 'Mailbox' }).first();
-    await inboxBtn.click();
+    // 3. Return to Inbox view. Nav buttons embed their unread badge in the
+    // accessible name ("Mailbox, 2 unread"), so target the MAIN navigation
+    // and match by substring.
+    await extensionPage
+      .getByRole('navigation', { name: 'Main navigation' })
+      .getByRole('button', { name: /Mailbox/ })
+      .click();
     await extensionPage.waitForTimeout(400);
 
     // 4. Verify that another mail item is visible in the list (total count becomes 2)
@@ -217,7 +383,7 @@ test.describe('Onboarding flow', () => {
     const page = await context.newPage();
 
     // Load with clear storage to force onboarding view
-    await page.goto(`chrome-extension://${extensionId}/popup.html`);
+    await page.goto(extensionUrl(extensionId, 'popup.html'));
     await page.evaluate(() => {
       return new Promise<void>((resolve) => {
         chrome.storage.local.clear(() => resolve());
@@ -231,9 +397,12 @@ test.describe('Onboarding flow', () => {
     await expect(getStartedBtn).toBeVisible();
     await getStartedBtn.click();
 
-    // Step 2: Choose Provider (pings are mocked, so "Create My First Address" should activate)
-    const createBtn = page.getByRole('button', { name: /Create My First Address/i });
-    await createBtn.waitFor({ state: 'visible', timeout: 5000 });
+    // Step 2 requires an explicit provider selection; no provider is chosen
+    // automatically. Creation remains disabled until that choice is made.
+    const createBtn = page.getByRole('button', { name: 'Create address', exact: true });
+    await expect(createBtn).toBeDisabled();
+    await page.getByRole('radio', { name: 'Guerrilla Mail', exact: true }).check();
+    await expect(createBtn).toBeEnabled();
     await createBtn.click();
 
     // Main layout footer should appear
@@ -246,7 +415,7 @@ test.describe('Onboarding flow', () => {
 
 // ── 8. DIALOG ACCESSIBILITY ───────────────────────────────────────────────────
 
-test.describe('Dialog accessibility — Btn primitive', () => {
+test.describe('Dialog accessibility - Btn primitive', () => {
   test('all visible buttons have accessible names (text or aria-label)', async ({
     extensionPage,
   }) => {
@@ -301,7 +470,7 @@ test.describe('Keyboard navigation', () => {
 
 // ── 10. CSS REGRESSION CHECKS ─────────────────────────────────────────────────
 
-test.describe('CSS regression — design system tokens', () => {
+test.describe('CSS regression - design system tokens', () => {
   test('md-primary colour variable is applied (theme tokens loaded)', async ({ extensionPage }) => {
     const mdPrimaryDefined = await extensionPage.evaluate(() => {
       const val = getComputedStyle(document.documentElement).getPropertyValue('--md-primary');
@@ -315,13 +484,13 @@ test.describe('CSS regression — design system tokens', () => {
   }) => {
     const btn = extensionPage.locator('button.rounded-xl').first();
     const count = await btn.count();
-    expect(count).toBeGreaterThanOrEqual(0);
+    expect(count).toBeGreaterThan(0);
   });
 });
 
 // ── 11. CONTENT-SCRIPT MOCK FIXTURE TESTS ────────────────────────────────────
 
-test.describe('Autofill form detection (mock fixture)', () => {
+test.describe('Signup fixture DOM smoke checks (not extension detector coverage)', () => {
   const MOCK_SIGNUP = `<!DOCTYPE html><html><head><title>Sign Up</title></head><body>
     <form id="signup-form" action="/register">
       <h2>Sign up for an account</h2>
@@ -329,11 +498,11 @@ test.describe('Autofill form detection (mock fixture)', () => {
       <label>Password<input type="password" name="password" id="password" /></label>
       <label>Confirm Password<input type="password" name="confirm_password" id="confirm_password" /></label>
       <label><input type="checkbox" name="terms" id="terms" /> I agree to the Terms</label>
-      <button type="submit">Create Account</button>
+      <button type="submit">Create Address</button>
     </form>
   </body></html>`;
 
-  test('detects email + password fields', async ({ extensionPage }) => {
+  test('fixture contains email + password fields', async ({ extensionPage }) => {
     await extensionPage.setContent(MOCK_SIGNUP);
     await expect(extensionPage.locator('input[type="email"]')).toHaveCount(1);
     await expect(extensionPage.locator('input[type="password"]')).toHaveCount(2);
@@ -354,8 +523,8 @@ test.describe('Autofill form detection (mock fixture)', () => {
   });
 });
 
-test.describe('OTP input detection (mock fixture)', () => {
-  test('detects autocomplete="one-time-code" input', async ({ extensionPage }) => {
+test.describe('OTP fixture DOM smoke checks (not extension detector coverage)', () => {
+  test('fixture contains an autocomplete="one-time-code" input', async ({ extensionPage }) => {
     await extensionPage.setContent(`<!DOCTYPE html><html><body>
       <input type="text" autocomplete="one-time-code" name="otp" />
     </body></html>`);
@@ -365,7 +534,7 @@ test.describe('OTP input detection (mock fixture)', () => {
     await expect(inp).toHaveValue('123456');
   });
 
-  test('detects split OTP inputs (maxLength=1 × 6)', async ({ extensionPage }) => {
+  test('fixture contains six single-character inputs', async ({ extensionPage }) => {
     await extensionPage.setContent(`<!DOCTYPE html><html><body>
       <form>
         ${Array.from({ length: 6 }, (_, i) => `<input type="text" maxlength="1" id="otp-${i + 1}" />`).join('')}

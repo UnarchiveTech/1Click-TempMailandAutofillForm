@@ -32,6 +32,18 @@ describe('measureTextWidth', () => {
     const bold = measureTextWidth('Settings', { sizePx: 12, weight: 700 });
     expect(bold).toBeGreaterThanOrEqual(regular);
   });
+
+  test('combining marks are zero-width (Thai vowels/tone marks)', () => {
+    // เริ่ม = เ ร ิ ่ ม - the two combining marks (ิ ่) must not add width.
+    const base = measureTextWidth('เริ่ม', { sizePx: 12 });
+    const marks = measureTextWidth('เริ่ม' + '่่่่', { sizePx: 12 });
+    expect(marks).toBe(base);
+    // Thai should not be wider than a comparable CJK string of the same
+    // visible length - the old 0.7em-per-mark model made it balloon.
+    const thai = measureTextWidth('เริ่มต้นแนะนำ', { sizePx: 12 });
+    const cjk = measureTextWidth('日本語', { sizePx: 12 });
+    expect(thai).toBeLessThan(cjk * 2.5);
+  });
 });
 
 describe('fillPlaceholders', () => {

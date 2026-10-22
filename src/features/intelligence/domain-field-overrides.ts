@@ -16,6 +16,7 @@
  */
 
 import type { Identity } from '@/utils/types.js';
+import { hostMatchesDomainScope } from '@/utils/validation.js';
 import defaultConfig from '../../config/identity-field-maps.jsonc';
 
 /** A partial identity shape that can be overridden per-domain. */
@@ -44,9 +45,7 @@ export function resolveDomainFieldOverrides(
 
   // Helper: do suffix/prefix match (e.g. "mail.linkedin.com" matches "linkedin.com")
   function domainMatches(key: string, target: string): boolean {
-    const k = key.toLowerCase().trim();
-    if (k === target) return true;
-    return target.endsWith(`.${k}`);
+    return hostMatchesDomainScope(target, key);
   }
 
   // Find the best-matching domain key in a map

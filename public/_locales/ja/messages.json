@@ -1,0 +1,10 @@
+{
+  "extName": { "message": "1Click: 一時メール & 自動入力" },
+  "extDescription": {
+    "message": "一時的なメールアドレスを生成し、ワンクリックでOTPとログインフォームを自動入力します。"
+  },
+  "cmdAutofillForm": { "message": "現在のページの登録フォームを自動入力" },
+  "cmdOpenAutofillManager": { "message": "自動入力マネージャーを開く（プロフィールと認証情報）" },
+  "cmdQuickGenerateInbox": { "message": "新しい一時メールアドレスをすばやく生成" },
+  "cmdCopyLatestOtp": { "message": "最新のOTPコードをクリップボードにコピー" }
+}

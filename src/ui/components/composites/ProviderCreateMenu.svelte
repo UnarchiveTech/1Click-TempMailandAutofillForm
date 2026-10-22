@@ -12,16 +12,25 @@
 import { onDestroy } from 'svelte';
 import { t } from 'svelte-i18n';
 import { browser } from 'wxt/browser';
+import { registerEscapeTier, topEscapeTierId } from '@/features/keyboard-shortcuts/escape-stack.js';
 import Icon from '@/ui/components/icons/Icon.svelte';
 import FaviconImage from '@/ui/components/primitives/FaviconImage.svelte';
-import { getAllProviderConfigs, type ProviderConfig } from '@/utils/email-service.js';
-import { getErrorMessage } from '@/utils/errors.js';
-import { getDisabledInstances, setDisabledInstances } from '@/utils/instance-manager.js';
-import * as PingService from '@/utils/ping-service.js';
-import { PORTAL_Z } from '@/utils/portal-layers.js';
-import { getSelectedProvider } from '@/utils/storage-keys.js';
-import { toastStore } from '@/utils/toastStore.js';
+import { getAllProviderConfigs, type ProviderConfig } from '@/utils/email/email-service.js';
+import { localizedErrorMessageOrFallback } from '@/utils/errors.js';
+import { logError } from '@/utils/logger.js';
+import {
+  getDisabledInstances,
+  setDisabledInstances,
+  toggleDisabledInstance,
+} from '@/utils/provider/instance-manager.js';
+import * as PingService from '@/utils/provider/ping-service.js';
+import { getSelectedProvider } from '@/utils/storage/storage-keys.js';
+import { writeWithRetry } from '@/utils/storage/storage-write.js';
 import type { ProviderInstance } from '@/utils/types.js';
+import { beginDialogLifecycle } from '@/utils/ui/dialog-lifecycle.js';
+import { ELEVATION } from '@/utils/ui/elevation.js';
+import { PORTAL_Z } from '@/utils/ui/portal-layers.js';
+import { toastStore } from '@/utils/ui/toastStore.js';
 
 let {
   open = false,
@@ -31,16 +40,16 @@ let {
   onClose = () => {},
   onPick = (_providerId: string, _instanceId?: string) => {},
   onOpenProviderSettings = undefined as (() => void) | undefined,
-} = $props<{
+}: {
   open?: boolean;
   x?: number;
   y?: number;
   providerInstances?: ProviderInstance[];
   onClose?: () => void;
   onPick?: (providerId: string, instanceId?: string) => void;
-  /** Settings gear — open Mail Provider Settings */
+  /** Settings gear - open Mail Provider Settings */
   onOpenProviderSettings?: () => void;
-}>();
+} = $props();
 
 let allProviders = $derived.by((): ProviderConfig[] => {
   try {
@@ -86,7 +95,7 @@ async function loadDisabledInstances() {
 /** Persist the chosen provider as the app default (no need to visit Settings). */
 async function setDefaultProvider(provider: ProviderConfig) {
   try {
-    await browser.storage.local.set({ selectedProvider: provider.id });
+    await writeWithRetry({ selectedProvider: provider.id });
     defaultProviderId = provider.id;
     toastStore.success(
       $t('nav.defaultProviderSet', {
@@ -94,7 +103,10 @@ async function setDefaultProvider(provider: ProviderConfig) {
       })
     );
   } catch (err) {
-    toastStore.error(getErrorMessage(err));
+    // A storage throw has no keyable message - its raw text (a DOMException
+    // quota error, etc.) would reach the toast in English in every locale.
+    logError('Failed to set the default provider', err);
+    toastStore.error(localizedErrorMessageOrFallback(err, $t, 'errors.storageWriteFailed'));
   }
 }
 
@@ -107,20 +119,18 @@ async function toggleInstance(provider: ProviderConfig, instance: ProviderInstan
   // Only the default provider's instance pool is actionable. Non-default
   // providers are used for one-off picks; their checkbox pool is disabled.
   if (defaultProviderId && provider.id !== defaultProviderId) return;
-  const current = new Set(disabledByProvider.get(provider.id) ?? []);
-  const willDisable = !current.has(instance.id);
-  const allInstances = instancesFor(provider);
-  if (willDisable && allInstances.length - current.size <= 1) {
+  const current = disabledByProvider.get(provider.id) ?? new Set<string>();
+  const next = toggleDisabledInstance(current, instance.id, instancesFor(provider).length);
+  if (!next) {
     toastStore.warning($t('nav.minOneInstance'));
     return;
   }
-  if (willDisable) current.add(instance.id);
-  else current.delete(instance.id);
   try {
-    await setDisabledInstances(provider.id, [...current]);
-    disabledByProvider = new Map(disabledByProvider).set(provider.id, current);
+    await setDisabledInstances(provider.id, [...next]);
+    disabledByProvider = new Map(disabledByProvider).set(provider.id, next);
   } catch (err) {
-    toastStore.error(getErrorMessage(err));
+    logError('Failed to persist the enabled instance pool', err);
+    toastStore.error(localizedErrorMessageOrFallback(err, $t, 'errors.storageWriteFailed'));
   }
 }
 
@@ -228,11 +238,46 @@ $effect(() => {
 // The parent estimates the panel size (240×300) before it renders, which is
 // wrong for narrow popup windows (menu can be up to 280×360). After the panel
 // mounts we measure its real box and nudge it back into the viewport so the
-// menu never clips off-screen — essential in compact popup mode.
+// menu never clips off-screen - essential in compact popup mode.
 let menuX = $state(0);
 let menuY = $state(0);
 let menuMeasured = $state(false);
 let panelEl = $state<HTMLElement | null>(null);
+
+$effect(() => {
+  if (!open || !panelEl) return;
+  const lifecycle = beginDialogLifecycle({ lockBodyScroll: false });
+  lifecycle.attach(panelEl, panelEl.querySelector<HTMLElement>('[role="menuitem"]'));
+  const releaseEscape = registerEscapeTier('provider.createMenu', onClose);
+  return () => {
+    releaseEscape();
+    lifecycle.cleanup();
+  };
+});
+
+function onMenuKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape' && topEscapeTierId() === 'provider.createMenu') {
+    event.preventDefault();
+    event.stopPropagation();
+    onClose();
+    return;
+  }
+  if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+  const controls = Array.from(
+    panelEl?.querySelectorAll<HTMLElement>('button:not([disabled])') || []
+  );
+  if (!controls.length) return;
+  const index = controls.indexOf(document.activeElement as HTMLElement);
+  const next =
+    event.key === 'Home'
+      ? 0
+      : event.key === 'End'
+        ? controls.length - 1
+        : (index + (event.key === 'ArrowDown' ? 1 : -1) + controls.length) % controls.length;
+  event.preventDefault();
+  event.stopPropagation();
+  controls[next]?.focus();
+}
 
 $effect(() => {
   if (!open) return;
@@ -241,9 +286,8 @@ $effect(() => {
   menuMeasured = false;
 });
 
-// Measure + clamp once the panel has laid out (rAF loop so a first-frame
-// zero-size box retries instead of giving up). Hidden until measured so the
-// reposition never flashes on screen.
+// Measure after layout and re-clamp when async provider details or the viewport
+// change size. Hidden until the first measurement so placement does not flash.
 $effect(() => {
   if (!open || !panelEl) return;
   let raf = 0;
@@ -260,9 +304,18 @@ $effect(() => {
     menuY = Math.max(pad, Math.min(menuY, window.innerHeight - r.height - pad));
     menuMeasured = true;
   };
-  raf = requestAnimationFrame(clamp);
+  const schedule = () => {
+    if (raf) cancelAnimationFrame(raf);
+    raf = requestAnimationFrame(clamp);
+  };
+  const observer = new ResizeObserver(schedule);
+  observer.observe(panelEl);
+  window.addEventListener('resize', schedule, { passive: true });
+  schedule();
   return () => {
     if (raf) cancelAnimationFrame(raf);
+    observer.disconnect();
+    window.removeEventListener('resize', schedule);
   };
 });
 
@@ -291,10 +344,12 @@ onDestroy(() => {
     <!-- Menu panel -->
     <div
       bind:this={panelEl}
-      style="position:fixed; z-index:{PORTAL_Z.dialog}; left:{menuX}px; top:{menuY}px; min-width:220px; max-width:min(280px,90vw); max-height:min(360px,70vh); overflow-y:auto; opacity:{menuMeasured ? 1 : 0}; transition:opacity 120ms ease;"
-      class="rounded-xl border border-md-outline-variant bg-md-surface-container shadow-2xl py-1"
+      style="position:fixed; z-index:{PORTAL_Z.dialog}; left:{menuX}px; top:{menuY}px; width:min(280px,calc(100vw - 16px)); min-width:0; max-height:min(360px,70vh); overflow-y:auto; opacity:{menuMeasured ? 1 : 0}; transition:opacity 120ms ease;"
+      class="rounded-xl border border-md-outline-variant bg-md-surface-container {ELEVATION.level2} py-1"
       role="menu"
-      aria-label={$t('account.newMailAddress')}
+      tabindex="-1"
+      onkeydown={onMenuKeydown}
+      aria-label={$t('address.newMailAddress')}
     >
       <div class="px-3 py-1.5 flex items-center justify-between gap-2">
         <span class="text-xs font-bold text-md-on-surface/45">
@@ -303,7 +358,7 @@ onDestroy(() => {
         {#if onOpenProviderSettings}
           <button
             type="button"
-            class="w-7 h-7 flex items-center justify-center rounded-lg text-md-on-surface/55 hover:text-md-primary hover:bg-md-primary/10 transition-colors shrink-0"
+            class="w-7 h-7 flex items-center justify-center rounded-full text-md-on-surface/55 hover:text-md-primary hover:bg-md-primary/10 active:bg-md-primary/20 transition-colors shrink-0"
             aria-label={$t('preferences.mailProviderSettings')}
             title={$t('preferences.mailProviderSettings')}
             onclick={(e) => {
@@ -349,7 +404,7 @@ onDestroy(() => {
             }}
           >
             <Icon
-              name={provider.id === defaultProviderId ? 'radioChecked' : 'radioUnchecked'}
+              name={provider.id === defaultProviderId ? 'radioButtonChecked' : 'radioButtonUnchecked'}
               class="w-4 h-4"
             />
           </button>
@@ -362,7 +417,7 @@ onDestroy(() => {
             {#if favDomain}
               <FaviconImage
                 domain={favDomain}
-                size={16}
+                size="xs"
                 fallbackLetter={(provider.displayName || provider.id || '?').charAt(0)}
                 class="shrink-0 rounded-sm"
               />
@@ -377,7 +432,7 @@ onDestroy(() => {
               >
             {/if}
           </button>
-          <span class="text-label-sm text-md-on-surface/50 shrink-0 tabular-nums"
+          <span class="text-xs text-md-on-surface-variant shrink-0 tabular-nums"
             >{pingDot(rootPing)} {formatPing(rootPing)}</span
           >
         </div>
@@ -395,7 +450,7 @@ onDestroy(() => {
           {@const poolLocked = defaultProviderId !== '' && provider.id !== defaultProviderId}
           <!-- Instance row: leading enable checkbox + name + ping -->
           <div
-            class="w-full px-3 py-1.5 text-start hover:bg-md-surface-variant text-xs flex items-center gap-2 ps-8 {poolLocked
+            class="w-full min-h-10 px-3 py-1.5 text-start hover:bg-md-surface-variant text-sm flex items-center gap-2 ps-8 {poolLocked
               ? 'text-md-on-surface/35'
               : 'text-md-on-surface/80'}"
             role="none"
@@ -427,7 +482,7 @@ onDestroy(() => {
                 void toggleInstance(provider, instance);
               }}
             >
-              <Icon name={instEnabled ? 'checkBox' : 'checkBoxBlank'} class="w-4 h-4" />
+              <Icon name={instEnabled ? 'checkBox' : 'checkBoxOutlineBlank'} class="w-4 h-4" />
             </button>
             <button
               type="button"
@@ -438,20 +493,20 @@ onDestroy(() => {
               {#if instDomain}
                 <FaviconImage
                   domain={instDomain}
-                  size={14}
+                  size="xs"
                   fallbackLetter={
                     (instance.displayName || instance.name || instance.id || '?').charAt(0)
                   }
                   class="shrink-0 rounded-sm"
                 />
               {:else}
-                <Icon name="instances" class="w-3 h-3 shrink-0 opacity-60" />
+                <Icon name="layers" class="w-3 h-3 shrink-0 opacity-60" />
               {/if}
               <span class="truncate flex-1"
                 >{instance.displayName || instance.name || instance.id}</span
               >
             </button>
-            <span class="text-label-sm text-md-on-surface/50 shrink-0 tabular-nums"
+            <span class="text-xs text-md-on-surface-variant shrink-0 tabular-nums"
               >{pingDot(iPing)} {formatPing(iPing)}</span
             >
           </div>

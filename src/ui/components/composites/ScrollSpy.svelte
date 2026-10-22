@@ -8,13 +8,14 @@
 import { onDestroy } from 'svelte';
 import { t } from 'svelte-i18n';
 import Icon from '@/ui/components/icons/Icon.svelte';
-import { enableHorizontalWheelScroll } from '@/utils/horizontal-wheel-scroll.js';
+import type { KnownIconName } from '@/ui/components/icons/icon-names.js';
+import { enableHorizontalWheelScroll } from '@/utils/ui/horizontal-wheel-scroll.js';
 
 export type ScrollSpySection = {
   id: string;
   labelKey: string;
   /** Optional icon name from the Icon catalog (rendered before the label). */
-  icon?: string;
+  icon?: KnownIconName;
 };
 
 let {
@@ -27,7 +28,7 @@ let {
   sectionIdPrefix = 'settings-section-',
   ariaLabel = 'Section navigation',
   onNavigate = (_id: string) => {},
-} = $props<{
+}: {
   sections?: ScrollSpySection[];
   activeId?: string;
   scrollRoot?: HTMLElement | null;
@@ -35,7 +36,7 @@ let {
   sectionIdPrefix?: string;
   ariaLabel?: string;
   onNavigate?: (id: string) => void;
-}>();
+} = $props();
 
 let scrollerEl = $state<HTMLElement | null>(null);
 let observer: IntersectionObserver | null = null;
@@ -152,7 +153,7 @@ onDestroy(() => {
 </script>
 
 <nav
-  class="scroll-spy shrink-0 px-2 pt-1.5 pb-1.5 border-b border-md-outline-variant/15 bg-md-surface/95 backdrop-blur-sm z-20"
+  class="scroll-spy shrink-0 pt-1.5 pb-1.5 border-b border-md-outline-variant/15 bg-md-surface/95 backdrop-blur-sm z-20"
   aria-label={ariaLabel}
 >
   <div
@@ -163,10 +164,10 @@ onDestroy(() => {
       <button
         type="button"
         data-spy-id={section.id}
-        class="shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-label-sm font-semibold transition-colors {activeId ===
+        class="shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full ui-label transition-colors {activeId ===
         section.id
           ? 'bg-md-secondary-container text-md-on-secondary-container'
-          : 'border border-md-outline-variant text-md-on-surface-variant bg-md-surface-container-low'} hover:bg-md-secondary-container hover:text-md-on-secondary-container"
+          : 'border border-md-outline-variant text-md-on-surface-variant bg-md-surface-container-low'} hover:bg-md-secondary-container active:bg-md-secondary-container-pressed hover:text-md-on-secondary-container"
         aria-current={activeId === section.id ? 'true' : undefined}
         onclick={() => scrollToSection(section.id)}
       >

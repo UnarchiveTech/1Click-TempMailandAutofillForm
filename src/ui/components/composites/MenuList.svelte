@@ -1,20 +1,25 @@
 <script lang="ts">
 /**
- * MD3 menu list composite — shared dropdown / context menu styling.
+ * MD3 menu composite - shared dropdown / context menu surface.
  *
- * Container: surface-container-low
+ * Container: 4dp (extra-small) shape · surface-container · elevation level 2 ·
+ *            8dp vertical padding · no outline (MD3 menus are elevated).
+ * Item:      48dp height · 12dp leading/trailing padding · Label Large ·
+ *            24dp icons · 12dp icon-to-label gap.
  * Item text: on-surface · icons: on-surface-variant
- * State layers (Android MD3 on-surface):
- *   hover  8% · pressed 12% · focus 12%
- * Selected/active: tertiary-container + on-tertiary-container
+ * State layers (MD3 of on-surface): hover 8% · focus 10% · pressed 10%
+ * Selected/active: secondary-container + on-secondary-container
  */
 import type { Snippet } from 'svelte';
 import Icon from '@/ui/components/icons/Icon.svelte';
+import type { KnownIconName } from '@/ui/components/icons/icon-names.js';
+import { type AnchoredFlyoutOptions, anchoredFlyout } from '@/utils/ui/anchored-flyout.js';
+import { ELEVATION } from '@/utils/ui/elevation.js';
 
 export type MenuListItem = {
   id: string;
   label: string;
-  icon?: string;
+  icon?: KnownIconName;
   active?: boolean;
   disabled?: boolean;
   trailing?: string;
@@ -28,6 +33,7 @@ let {
   role = 'menu' as 'menu' | 'listbox',
   ariaLabel = '',
   children,
+  floating,
   ...restProps
 }: {
   items?: MenuListItem[];
@@ -36,6 +42,7 @@ let {
   role?: 'menu' | 'listbox';
   ariaLabel?: string;
   children?: Snippet;
+  floating?: AnchoredFlyoutOptions;
   /** Allow arbitrary attributes like style (positioning), id, data-*. */
   [key: string]: unknown;
 } = $props();
@@ -43,7 +50,8 @@ let {
 
 <div
   {...restProps}
-  class="menu-list rounded-xl border border-md-outline-variant/50 bg-md-surface-container-low shadow-xl overflow-hidden {className}"
+  use:anchoredFlyout={floating}
+  class="menu-list rounded bg-md-surface-container py-2 {ELEVATION.level2} overflow-hidden {className}"
   {role}
   aria-label={ariaLabel || undefined}
 >
@@ -57,8 +65,6 @@ let {
         aria-selected={role === 'listbox' ? !!item.active : undefined}
         disabled={item.disabled}
         class="menu-list-item w-full flex items-center gap-3 px-3 min-h-12 text-sm text-start
-          {i === 0 ? 'rounded-t-xl' : ''}
-          {i === items.length - 1 ? 'rounded-b-xl' : ''}
           {item.disabled ? 'is-disabled' : ''}
           {item.active ? 'is-active' : ''}
           {item.danger && !item.active ? 'is-danger' : ''}"
@@ -68,7 +74,7 @@ let {
         }}
       >
         {#if item.icon}
-          <Icon name={item.icon} class="menu-list-icon w-5 h-5 shrink-0" />
+          <Icon name={item.icon} class="menu-list-icon w-6 h-6 shrink-0" />
         {/if}
         <span class="flex-1 truncate font-medium">{item.label}</span>
         {#if item.trailing}

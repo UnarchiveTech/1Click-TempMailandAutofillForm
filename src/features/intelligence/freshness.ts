@@ -1,9 +1,11 @@
 /**
- * Identity + email freshness score — prefer unused pairs for new signups.
+ * Identity + email freshness score - prefer unused pairs for new signups.
  */
 
 import { browser } from 'wxt/browser';
+import { arrayOrEmpty } from '@/utils/storage/storage-shape-guards.js';
 import type { CredentialsHistoryItem, Identity } from '@/utils/types.js';
+import { hostMatchesDomainScope } from '@/utils/validation.js';
 import { normalizeDomain } from './storage.js';
 
 export interface FreshnessCandidate {
@@ -25,9 +27,11 @@ export async function rankIdentitiesForSignup(
   liveEmails: string[]
 ): Promise<FreshnessCandidate[]> {
   const d = normalizeDomain(domain);
-  const { loginInfo = [] } = (await browser.storage.local.get(['loginInfo'])) as {
-    loginInfo?: CredentialsHistoryItem[];
+  const { loginInfo: rawLoginInfo } = (await browser.storage.local.get(['loginInfo'])) as {
+    loginInfo?: unknown;
   };
+  // Shape guard (storage-shape-guards.ts): for..of on a corrupt truthy value throws.
+  const loginInfo = arrayOrEmpty<CredentialsHistoryItem>(rawLoginInfo);
 
   const usedOnDomain = new Set<string>();
   const usedEmailGlobal = new Set<string>();
@@ -62,8 +66,11 @@ export async function rankIdentitiesForSignup(
     // Pick preferred or random live email
     let email: string | null = null;
     const pref = (id.preferredEmail || '').trim();
-    if (pref && pref !== '__random_active__' && liveEmails.includes(pref)) {
-      email = pref;
+    const preferredLiveEmail = liveEmails.find(
+      (candidate) => candidate.toLowerCase() === pref.toLowerCase()
+    );
+    if (pref && pref !== '__random_active__' && preferredLiveEmail) {
+      email = preferredLiveEmail;
     } else if (liveEmails.length) {
       // Prefer live emails not used on this domain
       const unused = liveEmails.filter((e) => !usedOnDomain.has(e.toLowerCase()));
@@ -88,8 +95,12 @@ export async function rankIdentitiesForSignup(
       reasons.push('no_email');
     }
 
-    // Domain hints boost
-    if (id.domainHints?.some((h) => d.includes(h.toLowerCase()) || h.toLowerCase().includes(d))) {
+    // Domain hints & domain field overrides boost
+    const domainMatches = [
+      ...(id.domainHints || []),
+      ...(id.domainFieldOverrides ? Object.keys(id.domainFieldOverrides) : []),
+    ];
+    if (domainMatches.some((hint) => hostMatchesDomainScope(d, hint))) {
       score += 10;
       reasons.push('domain_hint');
     }

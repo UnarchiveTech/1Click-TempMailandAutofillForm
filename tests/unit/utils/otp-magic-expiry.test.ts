@@ -3,7 +3,7 @@ import {
   estimateExpiresAt,
   formatRemaining,
   parseValidityDurationMs,
-} from '@/utils/otp-magic-expiry.js';
+} from '@/utils/otp/otp-magic-expiry.js';
 
 describe('parseValidityDurationMs', () => {
   test('parses expires in N minutes', () => {
@@ -24,6 +24,20 @@ describe('estimateExpiresAt / formatRemaining', () => {
     const base = 1_700_000_000_000;
     const exp = estimateExpiresAt(base, 'Verify', 'expires in 5 minutes');
     expect(exp).toBe(base + 5 * 60_000);
+  });
+
+  test('normalizes epoch-seconds receivedAt to milliseconds', () => {
+    const secs = 1_723_891_200; // Unix seconds
+    const exp = estimateExpiresAt(secs, 'Code', 'expires in 10 minutes');
+    // Previously: secs + 600_000 produced a ~1970 timestamp, so the OTP strip
+    // showed it as already expired. Now the base is normalized to ms first.
+    expect(exp).toBe(secs * 1000 + 10 * 60_000);
+  });
+
+  test('keeps millisecond receivedAt unchanged (idempotent)', () => {
+    const ms = 1_723_891_200_000;
+    const exp = estimateExpiresAt(ms, 'Code', 'valid for 5 minutes');
+    expect(exp).toBe(ms + 5 * 60_000);
   });
 
   test('formatRemaining', () => {

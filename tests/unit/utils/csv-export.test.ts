@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { exportAnalyticsToCSV } from '@/utils/csv-export';
+import { exportAnalyticsToCSV } from '@/utils/email/csv-export';
 import type { ActivityEvent, Analytics } from '@/utils/types';
 
 describe('exportAnalyticsToCSV', () => {
@@ -47,8 +47,8 @@ describe('exportAnalyticsToCSV', () => {
     expect(csv).toContain('Avg Email Fetch Time (ms),150.00');
     expect(csv).toContain('Avg UI Render Time (ms),25.00');
     expect(csv).toContain('Provider Latency (ms)');
-    expect(csv).toContain('guerrilla,62.50');
-    expect(csv).toContain('burner,35.00');
+    expect(csv).toContain('"guerrilla","62.50"');
+    expect(csv).toContain('"burner","35.00"');
   });
 
   test('handles empty performance arrays', () => {
@@ -74,7 +74,7 @@ describe('exportAnalyticsToCSV', () => {
         type: 'email_received',
         timestamp: 1700000000000,
         data: {
-          inboxAddress: 'test@guerrilla.com',
+          address: 'test@guerrilla.com',
           sender: 'sender@test.com',
           subject: 'Test Email',
         },
@@ -85,6 +85,44 @@ describe('exportAnalyticsToCSV', () => {
     expect(csv).toContain('test@guerrilla.com');
     expect(csv).toContain('sender@test.com');
     expect(csv).toContain('Test Email');
+  });
+
+  test('escapes provider-latency rows against formula injection (provider name is config-controlled)', () => {
+    const analytics: Analytics = {
+      ...baseAnalytics,
+      performance: {
+        emailFetchTimes: [],
+        providerLatency: {
+          '=HYPERLINK("http://evil.example","click")': [50, 75],
+          '@SUM(1+1)': [30, 40],
+        },
+        uiRenderTimes: [],
+      },
+    };
+    const csv = exportAnalyticsToCSV(analytics, []);
+    // The leading = and @ must be neutralized with the guard apostrophe, and
+    // the row must stay properly quoted so the embedded quotes/commas cannot
+    // break out of the field.
+    expect(csv).toContain('"\'=HYPERLINK(""http://evil.example"",""click"")","62.50"');
+    expect(csv).toContain('"\'@SUM(1+1)","35.00"');
+    // And the raw payload must never start a row unguarded (line-anchored
+    // check - the neutralized "'=…" form IS allowed and asserted above).
+    const providerSection = csv.slice(csv.indexOf('Provider Latency (ms)'));
+    expect(providerSection).not.toMatch(/(^|\n)=HYPERLINK/);
+    expect(providerSection).not.toMatch(/(^|\n)@SUM/);
+  });
+
+  test('escapes commas and quotes in a hostile provider name without breaking the row shape', () => {
+    const analytics: Analytics = {
+      ...baseAnalytics,
+      performance: {
+        emailFetchTimes: [],
+        providerLatency: { 'my, "provider"': [10, 20] },
+        uiRenderTimes: [],
+      },
+    };
+    const csv = exportAnalyticsToCSV(analytics, []);
+    expect(csv).toContain('"my, ""provider""","15.00"');
   });
 
   test('escapes commas in CSV fields', () => {
@@ -134,6 +172,22 @@ describe('exportAnalyticsToCSV', () => {
     expect(csv).toContain('"Line1\nLine2"');
   });
 
+  test('analytics export uses the same quote-when-needed rules as the identity exports', () => {
+    const events: ActivityEvent[] = [
+      {
+        id: '1',
+        type: 'email_received',
+        timestamp: 1700000000000,
+        data: { subject: 'Plain subject', sender: '@risky' },
+      },
+    ];
+    const csv = exportAnalyticsToCSV(baseAnalytics, events);
+    // Non-delimiter fields are always-quoted (unified escaper contract), the
+    // formula-injection guard applies identically to leading @.
+    expect(csv).toContain('"Plain subject"');
+    expect(csv).toContain(`"'@risky"`);
+  });
+
   test('handles empty activity events', () => {
     const csv = exportAnalyticsToCSV(baseAnalytics, []);
     const lines = csv.split('\n');
@@ -148,12 +202,12 @@ describe('exportAnalyticsToCSV', () => {
     const events: ActivityEvent[] = [
       { id: '1', type: 'email_received', timestamp: 1700000000000, data: {} },
       { id: '2', type: 'otp_detected', timestamp: 1700000001000, data: {} },
-      { id: '3', type: 'account_created', timestamp: 1700000002000, data: {} },
+      { id: '3', type: 'address_created', timestamp: 1700000002000, data: {} },
     ];
     const csv = exportAnalyticsToCSV(baseAnalytics, events);
     expect(csv).toContain('email_received');
     expect(csv).toContain('otp_detected');
-    expect(csv).toContain('account_created');
+    expect(csv).toContain('address_created');
   });
 
   test('handles empty event data fields gracefully', () => {
@@ -161,9 +215,10 @@ describe('exportAnalyticsToCSV', () => {
       { id: '1', type: 'email_received', timestamp: 1700000000000, data: {} },
     ];
     const csv = exportAnalyticsToCSV(baseAnalytics, events);
-    // Should not crash, fields should be empty strings
+    // Should not crash; empty fields become "" (unified escaper contract).
     const lines = csv.split('\n');
-    const dataLines = lines.filter((l) => l.startsWith('20'));
+    const dataLines = lines.filter((l) => l.includes('email_received'));
     expect(dataLines.length).toBe(1);
+    expect(dataLines[0]).toContain(',"",');
   });
 });

@@ -1,0 +1,12 @@
+# Module-level cache baseline - a ratchet: rows may only disappear.
+# Format: <path><TAB><container name>[<TAB># why]
+# Each row is a module-level container that is written after initialization and
+# carries NO lifetime story (see scripts/check-stale-caches.ts). A row is either
+# debt to fix, or a reviewed PERMANENT registry whose entries can never go stale
+# - and the second kind MUST say which in the trailing why column, which
+# --update preserves. A new finding that is not listed here fails the gate, and
+# a row whose container later grows a ttl / invalidation / bound also fails, so
+# the list can only shrink.
+# Refresh (after shrinking) with:
+#   bun scripts/check-stale-caches.ts --update
+src/utils/i18n/i18n.ts	registeredLocales	# PERMANENT: mirrors svelte-i18n's own process-global locale registry so ensureLocaleRegistered() never calls register() twice. An entry records a fact that cannot change - register() is idempotent and lasts the process - so there is no truth for an entry to go stale against.

@@ -1,2 +1,13 @@
-# Bun configuration — unit tests live under tests/ (mirrors src/)
+# Bun configuration - automated tests live under tests/ (unit and integration, mirroring src/)
 # Path aliases from tsconfig (@/* → ./src/*) are honored automatically.
+
+[test]
+# Belt and braces, NOT the mechanism: Bun 1.4.2 does NOT honour this key.
+# Verified with a two-file probe (tests/unit/harness/isolation-*.test.ts): with
+# the key alone, one file sees another's module state and `globalThis` writes,
+# and the full suite then fails 12 order-dependent tests in the expiry and
+# email-storage suites. Isolation is a CLI flag only here, so every runner
+# passes it explicitly - `bun test --isolate` in the npm scripts, the pre-commit
+# hook and CI. Kept so a Bun that does read the key is isolated too.
+isolate = true
+preload = ["./tests/unit/setup/web-locks.ts"]

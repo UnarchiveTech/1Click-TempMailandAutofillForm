@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>1Click notification audio</title>
+  </head>
+  <body>
+    <!--
+      Chrome MV3 service workers have no AudioContext, so this offscreen
+      document plays the notification beep on behalf of the background.
+      Created on demand via chrome.offscreen.createDocument (see
+      playNotificationSound in src/utils/notifications/notification-sound.ts) and kept for
+      AUDIO_PLAYBACK. Used for new-email alerts, OTP copy alerts, and per-site
+      auto-copy confirmations alike.
+    -->
+    <script src="offscreen.js"></script>
+  </body>
+</html>

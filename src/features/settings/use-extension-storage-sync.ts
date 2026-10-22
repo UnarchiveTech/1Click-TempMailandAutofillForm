@@ -36,6 +36,7 @@ export const SETTINGS_SYNC_KEYS = [
   'nameSettings',
   'autoCopy',
   'autoRenew',
+  'preExpiryWindowMinutes',
   'selectedProvider',
   'customColor',
   'emailRetentionDays',
@@ -46,13 +47,18 @@ export const SETTINGS_SYNC_KEYS = [
 ];
 
 export const THEME_SYNC_KEYS = ['themeMode', 'contrastLevel'];
-/** Toast master switch — synced via its own handler (no full settings reload). */
+/** Toast master switch - synced via its own handler (no full settings reload). */
 export const TOAST_SYNC_KEYS = ['toastsEnabled'];
-export const INBOX_SYNC_KEYS = ['inboxes', 'activeInboxId', 'demoMode', 'storedEmails'];
+// NOTE - despite the name, these are LOCAL storage-change watch keys used by
+// useExtensionStorageSync() to reload UI state (e.g. loadAddresses) when local
+// inbox/email keys change. They are NOT mirrored to browser.storage.sync: the
+// cross-device mirror (setupStorageSyncMirror) only pushes SETTINGS_SYNC_KEYS,
+// and emails stay local by design (too large / sensitive for sync quotas).
+export const INBOX_SYNC_KEYS = ['addresses', 'activeAddressId', 'demoMode'];
 export const IDENTITY_SYNC_KEYS = ['identities', 'selectedIdentityId'];
 export const FILTER_SYNC_KEYS = ['savedSearchFilters'];
 export const ANALYTICS_SYNC_KEYS = ['analytics'];
 export const LOGIN_INFO_SYNC_KEYS = ['loginInfo'];
-export const EMAIL_TAGS_SYNC_KEYS = ['emailTags'];
+export const EMAIL_LABELS_SYNC_KEYS = ['emailLabels'];
 export const STARRED_EMAILS_SYNC_KEYS = ['starredEmails'];
 export const READ_EMAILS_SYNC_KEYS = ['readEmails'];

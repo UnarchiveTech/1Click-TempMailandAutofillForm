@@ -1,30 +1,22 @@
 <script lang="ts">
 import { onDestroy, onMount, tick, untrack } from 'svelte';
 import { get } from 'svelte/store';
-import { t } from 'svelte-i18n';
+import { locale, t } from 'svelte-i18n';
 import { browser } from 'wxt/browser';
-
+import ShortcutDiscovery from '@/ui/blocks/overlays/ShortcutDiscovery.svelte';
+import ModalDialog from '@/ui/components/composites/ModalDialog.svelte';
+import Btn from '@/ui/components/primitives/Btn.svelte';
 // Bootstrap svelte-i18n (register locales + preferred language)
-import '@/utils/i18n.js';
+import '@/utils/i18n/i18n.js';
 
 // --- Context prop: 'popup' | 'sidepanel' | 'app' ---
 let { context = 'popup' }: { context?: 'popup' | 'sidepanel' | 'app' } = $props();
 
-import type { useAnalyticsActions } from '@/features/analytics/use-analytics-actions.js';
 import {
-  type ArchivedSetters,
-  deleteArchivedEmail as deleteArchivedEmailAction,
-  loadArchivedEmails as loadArchivedEmailsAction,
-  restoreArchivedInbox as restoreArchivedInboxAction,
-} from '@/features/archived-mail/archived-actions.js';
-import {
-  applyEmailLocalAction,
   autofillForm as autofillFormAction,
-  copyOtp as copyOtpAction,
-  createInbox as createInboxAction,
-  type InboxSetters,
-  migrateEmailBags,
-} from '@/features/inbox/inbox-actions.js';
+  flushQueuedEmailReadState,
+  queueEmailReadState,
+} from '@/features/address/address-actions.js';
 import {
   archiveSelected as archiveSelectedAction,
   type BulkActionsSetters,
@@ -33,73 +25,128 @@ import {
   toggleSelect as toggleSelectAction,
   toggleSelectAll as toggleSelectAllAction,
   unarchiveSelected as unarchiveSelectedAction,
-} from '@/features/inbox/inbox-bulk-actions.js';
+} from '@/features/address/address-bulk-actions.js';
 import {
-  type ExportSetters,
-  exportAccountEmails as exportAccountEmailsAction,
-  exportEmailsWithFormat as exportEmailsWithFormatAction,
-  exportMultipleEMLAsZip as exportMultipleEMLAsZipAction,
-  generateMBOXContent as generateMBOXContentAction,
-  generateSingleEMLContent as generateSingleEMLContentAction,
-  showExportFormatDialog as showExportFormatDialogAction,
-} from '@/features/inbox/inbox-export.js';
+  archiveSelected as archiveSelectedAddresses,
+  deleteAddressesDirect as deleteAddressesDirectBulk,
+  reorderAddressesById as reorderAddressesByIdBulk,
+  toggleAutoExtend as toggleAutoExtendBulk,
+  toggleSelect as toggleSelectAddressBulk,
+  toggleSelectAll as toggleSelectAllAddresses,
+  unarchiveSelected as unarchiveSelectedAddresses,
+} from '@/features/address/address-bulk-ui.js';
 import {
-  archiveAccount as archiveAccountAction,
-  extendAccount as extendAccountAction,
+  createAddress as createAddressModule,
+  handleCreateAddressResult,
+  handleCreateAddressWithProvider as handleCreateWithProvider,
+  openCreateAddressDialog as openCreateDialog,
+} from '@/features/address/address-creator.js';
+import { createAddressDetailOperations } from '@/features/address/address-detail-operations.js';
+import {
+  archiveSingleAddress,
+  extendSingleAddress,
+  removeSingleAddress,
+  restoreSingleAddress,
+  unarchiveSingleAddress,
+} from '@/features/address/address-lifecycle.js';
+import {
+  applyAutoRenewToAll as applyAutoRenewToAllAction,
   type ManagementSetters,
-  removeAccount as removeAccountAction,
-  restoreAccount as restoreAccountAction,
   toggleAutoExtend as toggleAutoExtendAction,
-  unarchiveAccount as unarchiveAccountAction,
-} from '@/features/inbox/inbox-management.js';
-import { applyFilters, applySearchShortcuts } from '@/features/inbox/use-email-filters.js';
-import { useInboxActions } from '@/features/inbox/use-inbox-actions.js';
-import type {
-  SaveFilterInput,
-  useSavedSearchFilters,
-} from '@/features/inbox/use-saved-search-filters.js';
+} from '@/features/address/address-management.js';
 import {
-  handleKeydown as handleKeydownAction,
-  type ShortcutsCallbacks,
-} from '@/features/keyboard-shortcuts/shortcuts.js';
+  archiveSelectedEmails as archiveSelectedEmailsAction,
+  deleteSelectedEmails as deleteSelectedEmailsAction,
+  restoreSelectedEmails as restoreSelectedEmailsAction,
+} from '@/features/address/email-bulk-ui.js';
+import { createEmailSyncController } from '@/features/address/email-sync.js';
+import { exportEmailsWithFormat as exportEmailsWithFormatAction } from '@/features/address/inbox-export.js';
+import { createMailboxFilterState } from '@/features/address/mailbox-filter-state.svelte.js';
+import {
+  markOtpEmailRead as markOtpEmailReadAction,
+  persistEmailRead as persistEmailReadAction,
+  persistEmailUnread as persistEmailUnreadAction,
+  projectStoredEmailMetadata,
+  refreshUnreadCounts as refreshUnreadCountsAction,
+  resolveUnreadBadgeKey,
+} from '@/features/address/mailbox-read-state.js';
+import {
+  type MessageTabsState,
+  messageTabKey,
+  openMessageTab,
+  rememberMessageScroll,
+  removeMessageTabs,
+} from '@/features/address/message-tabs.js';
+import { evaluateProviderFailoverAfterRefresh as evaluateProviderFailoverAction } from '@/features/address/provider-failover.js';
+import { createSearchFilterController } from '@/features/address/search-filter-controller.js';
+import { useAddressActions } from '@/features/address/use-address-actions.js';
+import { observeDialogVisits } from '@/features/analytics/dialog-visit-observer.js';
+import type { useAnalyticsActions } from '@/features/analytics/use-analytics-actions.js';
+import { trackVisit as trackVisitAction } from '@/features/analytics/visit-tracker.js';
+import {
+  type ArchivedSetters,
+  deleteArchivedEmail as deleteArchivedEmailAction,
+  restoreArchivedAddress as restoreArchivedAddressAction,
+} from '@/features/archived-mail/archived-actions.js';
+import {
+  cancelTopEscapeTier,
+  registerEscapeTier,
+} from '@/features/keyboard-shortcuts/escape-stack.js';
 import {
   deleteLoginById as deleteLoginByIdAction,
-  type LoginSetters,
   loadLoginInfo as loadLoginInfoAction,
   reorderLoginInfoById as reorderLoginInfoByIdAction,
 } from '@/features/login-info/login-actions.js';
-import { openMessageWindow } from '@/features/message-window/message-window-actions.js';
-import { PRODUCT_TOUR_STEPS } from '@/features/product-tour/tour-steps.js';
+import { createAppStateRestoreController } from '@/features/navigation/app-state-restore.js';
+import { createFormDetectionController } from '@/features/navigation/form-detection-controller.js';
+import { createNavbarPreferencesController } from '@/features/navigation/navbar-preferences.js';
+import { handlePrintIntent as handlePrintIntentFn } from '@/features/navigation/print-intent.js';
+import {
+  isReloadablePageUrl,
+  normalizeReloadRequiredTabIds,
+  RELOAD_REQUIRED_TAB_IDS_KEY,
+} from '@/features/navigation/reload-required-tabs.js';
+import { applyOpenViewHandoff as applyOpenViewHandoffFn } from '@/features/navigation/view-handoff.js';
 import {
   clearPendingProductTour,
   isPendingProductTour,
   isProductTourCompleted,
-  markProductTourCompleted,
 } from '@/features/product-tour/tour-storage.js';
 import {
   closeQrDialog as closeQrDialogAction,
   copyQrImage as copyQrImageAction,
   downloadQrCode as downloadQrCodeAction,
-  generateQRCode as generateQRCodeAction,
   openQrDialog as openQrDialogAction,
-  type QRSetters,
 } from '@/features/qr/qr-actions.js';
 import {
-  addCustomInstance as addCustomInstanceAction,
-  changeProvider as changeProviderAction,
-  handleColorChange as handleColorChangeAction,
-  handleProviderChange as handleProviderChangeAction,
-  hardReset as hardResetAction,
-  loadProviderInstances as loadProviderInstancesAction,
-  loadSettings as loadSettingsAction,
-  type SettingsSetters,
-  saveAutoCopy as saveAutoCopyAction,
-  saveAutoRenew as saveAutoRenewAction,
-  saveSettings as saveSettingsAction,
-  setProviderInstance as setProviderInstanceAction,
-  toggleDeveloperSettings as toggleDeveloperSettingsAction,
-  toggleEnableLogging as toggleEnableLoggingAction,
-} from '@/features/settings/settings-actions.js';
+  getAddressColor as getAddressColorAction,
+  updateAddressColors,
+} from '@/features/settings/address-color.js';
+import {
+  addToAutofillBlocklistSetting as addToAutofillBlocklistSettingAction,
+  removeFromAutofillBlocklistSetting,
+  toggleAutofillBlocklistSetting as toggleAutofillBlocklistSettingAction,
+} from '@/features/settings/blocklist-settings.js';
+import {
+  changePageZoom as changeStoredPageZoom,
+  getPageZoomSetting,
+  normalizePageZoomScale,
+  normalizePageZoomSettings,
+  type PageZoomDirection,
+  type PageZoomSettings,
+  updatePageZoomSetting,
+} from '@/features/settings/page-zoom.js';
+import {
+  finishProductTour as finishProductTourAction,
+  skipProductTour as skipProductTourAction,
+  startProductTour as startProductTourAction,
+} from '@/features/settings/product-tour.js';
+import { flushPendingSettingsWrites } from '@/features/settings/settings-actions.js';
+import {
+  createSettingsController,
+  type SettingsState,
+} from '@/features/settings/settings-controller.js';
+import { createSettingsState } from '@/features/settings/settings-state.svelte.js';
 import { useCommonSetters } from '@/features/settings/use-common-setters.js';
 import {
   ANALYTICS_SYNC_KEYS,
@@ -113,132 +160,159 @@ import {
   TOAST_SYNC_KEYS,
   useExtensionStorageSync,
 } from '@/features/settings/use-extension-storage-sync.js';
-import {
-  applyCustomColor,
-  applyTheme as applyThemeAction,
-  listenForSystemThemeChanges,
-  setThemeMode as setThemeModeAction,
-  type ThemeSetters,
-  toggleTheme as toggleThemeAction,
-} from '@/features/theme/theme-actions.js';
-import type { View } from '@/features/types/view-types.js';
-import AccountCard from '@/ui/blocks/account/AccountCard.svelte';
-import AccountSelector from '@/ui/blocks/account/AccountSelectorBar.svelte';
-import ConfirmDialog from '@/ui/blocks/dialogs/ConfirmDialog.svelte';
-import CreateInboxDialog from '@/ui/blocks/dialogs/CreateInboxDialog.svelte';
-import ExportBackupDialog from '@/ui/blocks/dialogs/ExportBackupDialog.svelte';
-import ExportWizardDialog from '@/ui/blocks/dialogs/ExportWizardDialog.svelte';
-import ImportBackupDialog from '@/ui/blocks/dialogs/ImportBackupDialog.svelte';
-import TagDialog from '@/ui/blocks/dialogs/TagDialog.svelte';
-import OfflineBanner from '@/ui/blocks/feedback/OfflineBanner.svelte';
-import type { ToastType } from '@/ui/blocks/feedback/Toast.svelte';
-import ToastContainer from '@/ui/blocks/feedback/ToastContainer.svelte';
+import { applyCustomColor } from '@/features/theme/theme-actions.js';
+import { type ActivityViewId, isView, type View } from '@/features/types/view-types.js';
+import type { ToastType } from '@/ui/blocks/feedback/toast-types.js';
+import AppShell from '@/ui/blocks/layout/AppShell.svelte';
 import ErrorBoundary from '@/ui/blocks/layout/ErrorBoundary.svelte';
-import Footer from '@/ui/blocks/layout/Footer.svelte';
-import Header from '@/ui/blocks/layout/Header.svelte';
-import SidebarNav from '@/ui/blocks/layout/SidebarNav.svelte';
-import FilterList from '@/ui/blocks/mail/FilterList.svelte';
-import CommandPalette, { type PaletteCommand } from '@/ui/blocks/overlays/CommandPalette.svelte';
-import KeyboardShortcutsCheatSheet from '@/ui/blocks/overlays/KeyboardShortcutsCheatSheet.svelte';
-import Onboarding from '@/ui/blocks/overlays/Onboarding.svelte';
-import ProductTour from '@/ui/blocks/overlays/ProductTour.svelte';
-import Icon from '@/ui/components/icons/Icon.svelte';
-import AboutView from '@/ui/views/AboutView.svelte';
-import ActivityView from '@/ui/views/ActivityView.svelte';
-import AutomationView from '@/ui/views/AutomationView.svelte';
-import AddressesView from '@/ui/views/addresses/AddressesView.svelte';
-import AddressView from '@/ui/views/addresses/AddressView.svelte';
-import AutofillView from '@/ui/views/autofill/AutofillView.svelte';
-import GeneratedAccountsView from '@/ui/views/autofill/GeneratedAccountsView.svelte';
-import IdentitiesView from '@/ui/views/autofill/IdentitiesView.svelte';
-import MailboxView from '@/ui/views/mailbox/MailboxView.svelte';
-import MailView from '@/ui/views/mailbox/MailView.svelte';
-import OrganizeView from '@/ui/views/OrganizeView.svelte';
-import PlaygroundView from '@/ui/views/PlaygroundView.svelte';
-import SettingsView from '@/ui/views/SettingsView.svelte';
-import ConstantsSettingsView from '@/ui/views/settings/ConstantsSettingsView.svelte';
-import DiagnosticsView from '@/ui/views/settings/DiagnosticsView.svelte';
-import KeyboardShortcutsView from '@/ui/views/settings/KeyboardShortcutsView.svelte';
-import MailProviderView from '@/ui/views/settings/MailProviderView.svelte';
-import StoragePerformanceView from '@/ui/views/settings/StoragePerformanceView.svelte';
-import { isSettingsSplitView } from '@/ui/views/view-registry.js';
-import { addToastNotification } from '@/utils/activity-tracker.js';
-import { copyToClipboardAndSchedulePurge } from '@/utils/clipboard.js';
-import { recordConnectivityEvent } from '@/utils/connectivity-log.js';
-import { decrypt, encrypt } from '@/utils/crypto.js';
+import { layoutStore } from '@/ui/blocks/layout/layout-store.svelte.js';
+import { headerBackTarget } from '@/ui/blocks/layout/navigation-helpers.js';
+import { createAddressTagsController } from '@/ui/blocks/layout/use-address-tags.svelte.js';
+import { useConfirmDialog } from '@/ui/blocks/layout/use-confirm-dialog.svelte.js';
+import { createKeyboardTooltipController } from '@/ui/blocks/layout/use-keyboard-tooltip.svelte.js';
+import { createLayoutMeasurementController } from '@/ui/blocks/layout/use-layout-measurement.svelte.js';
 import {
-  computeUnreadCounts,
-  extractLatestOtp,
-  mapEmailsForDisplay,
-} from '@/utils/email-mapper.js';
+  createLayoutOverlays,
+  type OverlayState,
+} from '@/ui/blocks/layout/use-layout-overlays.svelte.js';
+import { createRetentionCleanup } from '@/ui/blocks/layout/use-retention-cleanup.js';
 import {
-  loadAllProviderConfigs,
-  loadProviderConfig,
+  createThemeController,
+  restoreThemeFromStorage,
+} from '@/ui/blocks/layout/use-theme.svelte.js';
+import { showToast as showToastAction } from '@/ui/blocks/layout/use-toast.js';
+import type { PaletteCommand } from '@/ui/blocks/overlays/palette-command-types.js';
+import type { KnownIconName } from '@/ui/components/icons/icon-names.js';
+import { buildTagAddressUsage, existingTagNames } from '@/utils/address/address-tags.js';
+import { copyToClipboardAndSchedulePurge } from '@/utils/clipboard/clipboard.js';
+import {
+  findEmailBodyHost,
+  resetEmailBodyZoom,
+  stepEmailBodyZoom,
+} from '@/utils/email/email-body-zoom.js';
+import {
   loadProviderOverridesFromStorage,
   type ProviderConfig,
-} from '@/utils/email-service.js';
-import { emailTagsStore } from '@/utils/email-tags-store.js';
-import { groupEmailsByThread } from '@/utils/email-threads.js';
-import { ApiError, ValidationError } from '@/utils/errors.js';
-import { setupFocusTrap } from '@/utils/focusTrap.js';
-import { preloadTranslations, setCachedLocale } from '@/utils/i18n-utils.js';
-import { detectIconFromMessage } from '@/utils/iconMapping.js';
+} from '@/utils/email/email-service.js';
+import { groupEmailsByThread } from '@/utils/email/email-threads.js';
+import { pluralMessage } from '@/utils/i18n/i18n-plural.js';
+import { createTranslator, preloadTranslations, setCachedLocale } from '@/utils/i18n/i18n-utils.js';
 import { logDebug, logError } from '@/utils/logger.js';
-import { pingProviderInstances } from '@/utils/ping-service.js';
-import { PORTAL_Z_CLASS } from '@/utils/portal-layers.js';
-import { prepareEmailPrintFromStorage, printHtmlDocument } from '@/utils/print-email.js';
-import { parseSearchShortcuts } from '@/utils/search-shortcuts.js';
-import { type ConfirmDialogState, getToastTypeFromMessage } from '@/utils/shared-ui.js';
-import { domainIndexKey, getInboxes, getReadEmailsMap, setInboxes } from '@/utils/storage-keys.js';
-import { requestUnlimitedStorage } from '@/utils/storageMonitor.js';
-import { formatTimeLeft, getEmailStatus, toMs } from '@/utils/time.js';
-import { formatDate } from '@/utils/time-format.js';
-import { toastStore } from '@/utils/toastStore.js';
+import { recordConnectivityEvent } from '@/utils/provider/connectivity-log.js';
+import { DEFAULT_PRE_EXPIRY_WINDOW_MINUTES } from '@/utils/provider/provider-expiry.js';
+import { emailLabelsStore } from '@/utils/storage/email-labels-store.js';
+import {
+  DEFAULT_SIDEBAR_POSITION,
+  getAutofillBlocklist,
+  getAutoRefreshInterval,
+  normalizeSidebarPosition,
+  resolveBagKey,
+  type SidebarPosition,
+  setAddresses,
+  type UiDensity,
+} from '@/utils/storage/storage-keys.js';
+import { writeWithRetry } from '@/utils/storage/storage-write.js';
 import type {
-  Account,
+  Address,
   CredentialsHistoryItem,
   Email,
+  EmailPreviewMode,
   Identity,
   Keybindings,
   ProviderInstance,
   SavedSearchFilter,
 } from '@/utils/types.js';
 import { DEFAULT_KEYBINDINGS } from '@/utils/types.js';
-import packageJson from '../../../../package.json';
-
-const AboutViewComponent = AboutView;
-const SettingsViewComponent = SettingsView;
-const ActivityViewComponent = ActivityView;
-const SavedLoginInfoViewComponent = GeneratedAccountsView;
-const AutofillViewComponent = AutofillView;
-const KeyboardShortcutsViewComponent = KeyboardShortcutsView;
-const OrganizeViewComponent = OrganizeView;
-const MailProviderViewComponent = MailProviderView;
-const AddressesViewComponent = AddressesView;
-const StoragePerformanceViewComponent = StoragePerformanceView;
-const IdentitiesViewComponent = IdentitiesView;
-const ConstantsSettingsViewComponent = ConstantsSettingsView;
+import { parentNavKey } from '@/utils/ui/nav-layout.js';
+import { observeResizeOnFrame } from '@/utils/ui/resize-observer.js';
+import { observeScrollGutters } from '@/utils/ui/scroll-gutters.js';
+import { activeSelectionStore } from '@/utils/ui/selection-registry.js';
+import { toastStore } from '@/utils/ui/toastStore.js';
 
 // Cross-browser API (polyfill provides browser, chrome as fallback)
 const ext = browser;
-let version = $state<string>(packageJson.version);
+/** Shared translator (flat interpolation vars → svelte-i18n values). */
+const translate = createTranslator();
+// Version comes from the manifest - identical to package.json (wxt.config.ts
+// derives the manifest from it) without inlining the whole package.json
+// (keywords, devDependencies, …) into every entrypoint's shell chunk.
+let version = $state<string>(browser.runtime.getManifest().version);
 
 // --- View state ---
 let currentView = $state<View>('mailbox');
+let reloadRequiredTabId = $state<number | null>(null);
+
+/**
+ * Re-measure the translated nav labels (nav stage state lives in
+ * layout-store.svelte.ts). Triggered here on mount + locale change because
+ * svelte-i18n initializes asynchronously.
+ */
+$effect(() => {
+  void $locale;
+  void $t;
+  void tick().then(() => {
+    layoutStore.refreshNavLabelWidths();
+  });
+});
+
+/**
+ * Keep the window / tab title localized. The static `<title>` in each
+ * entrypoint's index.html is only the pre-hydration fallback: Chrome
+ * substitutes `__MSG_*__` in the manifest and CSS but never in HTML, so the
+ * title has to be assigned at runtime. It uses the same
+ * `actionTitle.tempMailAndAutofill` key as the toolbar tooltip, which is also
+ * what `__MSG_extName__` carries, so the tab, the toolbar and
+ * chrome://extensions can't disagree. One effect covers popup, sidepanel and
+ * app because all three mount this shared shell.
+ */
+$effect(() => {
+  if (typeof document !== 'undefined') {
+    document.title = $t('actionTitle.tempMailAndAutofill') as string;
+  }
+});
 /** Pre-applied filters when navigating from EmailDetail (mailbox detail) */
 let loginInfoEmailFilter = $state('');
 let identitiesEmailFilter = $state('');
 /** Footer FAB → open create UI on target views (increment to trigger) */
 let identityCreateSignal = $state(0);
 let identityEditIdSignal = $state('');
+let vaultLockSignal = $state(0);
 let tagCreateSignal = $state(0);
 let labelCreateSignal = $state(0);
 let splitHostRef = $state<HTMLElement | null>(null);
+const formDetectionController = createFormDetectionController({
+  ext,
+  setDetected: (detected) => (formDetected = detected),
+  setVerificationRequired: (required) => (humanVerificationRequired = required),
+});
+
+const layoutMeasurementController = createLayoutMeasurementController({
+  getContext: () => context,
+  getRootElement: () => layoutRootEl,
+  getLayoutWide: () => layoutWide,
+  getLayoutSplit: () => layoutSplit,
+  getCurrentView: () => currentView,
+  getSelectedThreadLength: () => selectedThread.length,
+  getCurrentEmailDetail: () => currentEmailDetail,
+  getSplitSecondaryView: () => splitSecondaryView,
+  setLayoutWide: (value) => (layoutWide = value),
+  setNavShellWidth: (value) => layoutStore.setNavShellWidth(value),
+  setLayoutSplit: (value) => (layoutSplit = value),
+  setSplitModeFlash: (value) => (splitModeFlash = value),
+  setCurrentView: (value) => (currentView = value),
+  setSplitSecondaryView: (value) => (splitSecondaryView = value),
+  setSplitPaneCollapsed: (value) => (splitPaneCollapsed = value),
+  setSplitListWidthPx: (value) => (splitListWidthPx = value),
+  setUiDensity: (value: UiDensity) => (uiDensity = value),
+  getSplitPaneCollapsed: () => splitPaneCollapsed,
+});
 /** Organize hub tab deep-link */
 let organizeTabSignal = $state(0);
 let organizeTabValue = $state<'tags' | 'labels' | 'filters'>('tags');
 let autofillTabSignal = $state(0);
-let autofillTabValue = $state<'profiles' | 'credentials'>('profiles');
+let autofillTabValue = $state<'profiles' | 'credentials' | 'sites'>('profiles');
+let paletteWebsiteFilter = $state('');
+let paletteWebsiteFilterSignal = $state(0);
 let settingsSubpage = $state<string | null>(null);
 let previousViewBeforeSubpage = $state<View | null>(null);
 
@@ -259,6 +333,35 @@ function handleSettingsSubpageBack() {
 
 let bottomFloatingLayerEl = $state<HTMLElement | null>(null);
 let bottomSafeAreaPx = $state(40);
+/** Temporarily hides bottom strips and the floating Footer/FAB while a list scrolls. */
+let scrollChromeHidden = $state(false);
+let scrollChromeTimer: ReturnType<typeof setTimeout> | null = null;
+
+function handleScrollDirection(_direction: 'up' | 'down', atTop = false) {
+  if (scrollChromeTimer) {
+    clearTimeout(scrollChromeTimer);
+    scrollChromeTimer = null;
+  }
+  if (atTop) {
+    scrollChromeHidden = false;
+    return;
+  }
+  scrollChromeHidden = true;
+  // Reveal shortly after scrolling stops; do not leave controls inaccessible.
+  scrollChromeTimer = setTimeout(() => {
+    scrollChromeHidden = false;
+    scrollChromeTimer = null;
+  }, 180);
+}
+
+$effect(() => {
+  void currentView;
+  if (scrollChromeTimer) {
+    clearTimeout(scrollChromeTimer);
+    scrollChromeTimer = null;
+  }
+  scrollChromeHidden = false;
+});
 
 /**
  * Header back ONLY on these deep sub-pages (not mailbox, not settings hub,
@@ -275,107 +378,111 @@ const HEADER_BACK_VIEWS = new Set<View>([
   'constantsSettings',
   'diagnostics',
   'storagePerformance',
-  // organize is a primary More destination — no back
+  'addressAccentColors',
+  // organize is a primary More destination - no back
 ]);
 
 const showHeaderBack = $derived(HEADER_BACK_VIEWS.has(currentView));
+/** Full-page detail views already provide their own toolbar and Header back action. */
+const hideFloatingFooterForDetail = $derived(
+  currentView === 'mailView' || currentView === 'addressView'
+);
+const contentBottomSafeAreaPx = $derived(hideFloatingFooterForDetail ? 0 : bottomSafeAreaPx);
+
+/** Shared adaptive nav layout - single source of truth (layout-store). */
+const navLayout = $derived(layoutStore.navLayout);
+
+/** Canonical primary key for the current view (deep links → parent page). */
+const currentNavKey = $derived(parentNavKey(currentView));
+/** True when the current page lives inside the More menu (header shows its title). */
+const isMoreOnlyPage = $derived(navLayout.moreViewSet.has(currentNavKey));
+/** Header title of the More-only page - derived from the live nav layout, never hardcoded. */
+const headerPageTitle = $derived.by(() => {
+  if (!isMoreOnlyPage) return '';
+  const item = navLayout.moreItems.find((m) => m.view === currentNavKey);
+  return item ? ($t(item.labelKey) as string) : '';
+});
+const headerPageIcon = $derived.by((): KnownIconName | undefined => {
+  if (!isMoreOnlyPage) return undefined;
+  return navLayout.moreItems.find((m) => m.view === currentNavKey)?.iconName;
+});
 
 function handleHeaderBack() {
-  switch (currentView) {
-    case 'mailView':
-      currentView = 'mailbox';
-      selectedThread = [];
-      break;
-    case 'addressView':
-      currentView = 'addresses';
-      currentEmailDetail = null;
-      break;
-    case 'tagManagement':
-    case 'labelManagement':
-    case 'filtersManagement':
-      currentView = 'organize';
-      break;
-    case 'mailProvider':
-    case 'keybindings':
-    case 'constantsSettings':
-    case 'diagnostics':
-    case 'storagePerformance':
-      currentView = 'settings';
-      break;
-    default:
-      currentView = 'mailbox';
-      break;
+  const viewBeforeBack = currentView;
+  currentView = headerBackTarget(viewBeforeBack);
+  if (viewBeforeBack === 'mailView') {
+    selectedThread = [];
+  } else if (viewBeforeBack === 'addressView') {
+    currentEmailDetail = null;
   }
 }
 
 // --- Main view ---
 let selectedEmail = $state<string>('');
+let qrDialogEmail = $state<string | null>(null);
+/** Sender of the email whose “Create rule” action launched Automation this time. */
+let automationInitialSender = $state('');
 let displayedEmail = $state<string>('');
 let dropdownOpen = $state<boolean>(false);
 let accountSelectorDropdownOpen = $state<boolean>(false);
 let archivedSectionOpen = $state<'active' | 'archived' | 'expired' | null>(null);
-let searchQuery = $state<string>('');
-let otpOnly = $state<boolean>(false);
-let hasAttachment = $state<boolean>(false);
-let senderDomain = $state<string>('');
-let senderEmail = $state<string>('');
-let recipient = $state<string>('');
-let subject = $state<string>('');
-let notSenderDomain = $state<string>('');
-let notSenderEmail = $state<string>('');
-let notRecipient = $state<string>('');
-let notSubject = $state<string>('');
-let selectedSenders = $state<string[]>([]);
-let dateFrom = $state<string>('');
-let dateTo = $state<string>('');
+const mailboxFilters = createMailboxFilterState({
+  emailLabelsById: () => emailLabelsById,
+});
+const {
+  searchQuery,
+  otpOnly,
+  unreadOnly,
+  hasAttachment,
+  senderDomain,
+  senderEmail,
+  recipient,
+  subject,
+  notSenderDomain,
+  notSenderEmail,
+  notRecipient,
+  notSubject,
+  selectedSenders,
+  dateFrom,
+  dateTo,
+  sortBy,
+} = $derived(mailboxFilters);
 let loading = $state<boolean>(false);
-let loadingInboxes = $state<boolean>(false);
+let loadingAddresses = $state<boolean>(false);
 let loadingEmails = $state<boolean>(false);
-let accounts = $state<Account[]>([]);
-let allInboxes = $state<Account[]>([]); // Includes archived inboxes for management view
+let accounts = $state<Address[]>([]);
+let allAddresses = $state<Address[]>([]); // Includes archived addresses for management view
 let emails = $state<Email[]>([]);
 let threadGroupingSetting = $state<boolean>(false);
 let showQuotaBanner = $state<boolean>(false);
 
-async function handleRequestQuotaUnlimitedStorage() {
-  try {
-    const granted = await requestUnlimitedStorage();
-    if (granted) {
-      toastStore.success($t('settings.unlimitedStorageGranted'));
-      showQuotaBanner = false;
-      await ext.storage.local.remove('storageQuotaWarning');
-    } else {
-      toastStore.error($t('settings.unlimitedStorageDenied'));
-    }
-  } catch (err) {
-    logError('Failed to request unlimited storage', err);
-    toastStore.error($t('toasts.operationFailed'));
-  }
-}
-
-async function dismissQuotaBanner() {
-  showQuotaBanner = false;
-  await ext.storage.local.remove('storageQuotaWarning');
-}
 let unreadByAddress = $state<Record<string, number>>({});
 let allStoredEmails = $state<Record<string, Email[]>>({});
 let latestOtp = $state<string>('------');
 let latestOtpSender = $state<string>('');
 let latestOtpSenderName = $state<string>('');
 let otpContext = $state<string>('');
-let notificationsEnabled = $state<boolean>(true);
-let soundEnabled = $state<boolean>(true);
-let expiryWarningThreshold = $state<number>(60 * 60 * 1000); // Default 1 hour
-let keybindings = $state<Keybindings>(DEFAULT_KEYBINDINGS);
-let autoRefreshInterval = $state<number>(30000);
-let emailPreviewEnabled = $state<boolean>(true);
-let defaultDomain = $state<string>('');
+const settingsDomain = createSettingsState();
+const settings = settingsDomain.state;
+const settingsDomainSetters = settingsDomain.setters;
+const overlaysDomain = createLayoutOverlays();
+const overlays = overlaysDomain.state;
+const cleanupOverlayTimers = overlaysDomain.cleanup;
+const overlaySetters = overlaysDomain.setters;
 let autofillBlocklist = $state<string[]>([]);
 let isOffline = $state(!navigator.onLine);
 let offlineDismissed = $state(false);
 let connectivityHeartbeat: ReturnType<typeof setInterval> | null = null;
 
 let savedSearchFilters = $state<SavedSearchFilter[]>([]);
+/** True after the first address load has resolved, so an empty list is known to be real. */
+let addressBootstrapReady = $state(false);
+
+/** True while the empty shell shows onboarding (no sidebar / footer / logo nav). */
+const isOnboardingShell = $derived(
+  !addressBootstrapReady ||
+    (accounts.length === 0 && !loadingAddresses && allAddresses.length === 0)
+);
 
 onMount(() => {
   function updateOnlineStatus() {
@@ -398,59 +505,38 @@ onMount(() => {
     window.removeEventListener('online', updateOnlineStatus);
     window.removeEventListener('offline', updateOnlineStatus);
     if (connectivityHeartbeat) clearInterval(connectivityHeartbeat);
+    cleanupOverlayTimers();
   };
 });
 let formDetected = $state<boolean>(false);
-let menuOpen = $state<boolean>(false);
-let sortBy = $state<string>('newest');
+let humanVerificationRequired = $state(false);
 
 // --- Retention cleanup prompt ---
 let retentionCleanupDismissed = $state(false);
 let oldEmailCount = $state(0);
 
-async function checkRetentionCleanup() {
-  const { emailRetentionDays = 30, storedEmails = {} } = (await browser.storage.local.get([
-    'emailRetentionDays',
-    'storedEmails',
-  ])) as {
-    emailRetentionDays?: number;
-    storedEmails?: Record<string, Email[]>;
-  };
-  if (emailRetentionDays <= 0) return;
-  const threshold = Date.now() - emailRetentionDays * 24 * 60 * 60 * 1000;
-  let count = 0;
-  for (const msgs of Object.values(storedEmails)) {
-    for (const m of msgs) {
-      const ts = m.stored_at || toMs(m.received_at);
-      if (ts < threshold) count++;
+const retentionCleanup = createRetentionCleanup(
+  ext,
+  (patch) => {
+    if (patch.oldEmailCount !== undefined) oldEmailCount = patch.oldEmailCount;
+    if (patch.retentionCleanupDismissed !== undefined) {
+      retentionCleanupDismissed = patch.retentionCleanupDismissed;
     }
-  }
-  oldEmailCount = count;
-}
-
-async function dismissRetentionCleanup() {
-  retentionCleanupDismissed = true;
-}
-
-async function cleanupOldEmailsNow() {
-  try {
-    const { emailRetentionDays = 30 } = (await browser.storage.local.get([
-      'emailRetentionDays',
-    ])) as { emailRetentionDays?: number };
-    await browser.runtime.sendMessage({
-      type: 'cleanupOldStoredEmails',
-      activeRetentionDays: emailRetentionDays,
-      archivedRetentionDays: emailRetentionDays * 3,
-    });
-    retentionCleanupDismissed = true;
-    oldEmailCount = 0;
-    await stableLoadInboxes(true);
-    showToast($t('inbox.retentionCleanupDone'));
-  } catch (error) {
-    logError('Failed to clean up old emails', error);
-    showToast($t('inbox.retentionCleanupFailed'), 'error');
-  }
-}
+  },
+  translate,
+  () => stableLoadAddresses(true)
+);
+const checkRetentionCleanup = retentionCleanup.checkRetentionCleanup;
+const dismissRetentionCleanup = retentionCleanup.dismissRetentionCleanup;
+const cleanupOldEmailsNow = retentionCleanup.cleanupOldEmailsNow;
+const handleRequestQuotaUnlimitedStorage = async () => {
+  showQuotaBanner = false;
+  await retentionCleanup.handleRequestQuotaUnlimitedStorage();
+};
+const dismissQuotaBanner = () => {
+  showQuotaBanner = false;
+  retentionCleanup.dismissQuotaBanner();
+};
 
 // --- Identities ---
 let identities = $state<Identity[]>([]);
@@ -473,9 +559,29 @@ async function loadIdentities() {
   }
 }
 
-// Load identities once on mount (not a reactive $effect — avoids re-entry loops)
+// Load identities once on mount (not a reactive $effect - avoids re-entry loops)
 onMount(() => {
   void loadIdentities();
+});
+
+// Keep navbar preferences synchronized with the shared layout store.
+const navbarPreferencesController = createNavbarPreferencesController({
+  ext: browser,
+  setCustomNavOrder: (value) => layoutStore.setCustomNavOrder(value),
+  setMinPrimaryItems: (value) => layoutStore.setMinPrimaryItems(value),
+  setAutoArrangeMore: (value) => layoutStore.setAutoArrangeMore(value),
+  setNavIndicatorModes: (value) => {
+    layoutStore.setNavIndicatorModes(value);
+    layoutStore.refreshNavLabelWidths();
+  },
+});
+
+onMount(() => {
+  let cleanup: (() => void) | undefined;
+  void navbarPreferencesController.start().then((stop) => {
+    cleanup = stop;
+  });
+  return () => cleanup?.();
 });
 
 // Load login info when opening Autofill hub / credentials
@@ -485,213 +591,107 @@ $effect(() => {
   }
 });
 
-// Track page visits for Activity stats (plain let — never $state read+write in one effect)
-let lastTrackedView: string | null = null;
-async function trackVisit(key: string) {
-  try {
-    const { analytics: a = {} } = (await browser.storage.local.get(['analytics'])) as {
-      analytics?: Record<string, unknown>;
-    };
-    const pageVisits = {
-      ...((a.pageVisits as Record<string, number>) || {}),
-    };
-    pageVisits[key] = (pageVisits[key] || 0) + 1;
-    await browser.storage.local.set({
-      analytics: { ...a, pageVisits },
-    });
-  } catch (e) {
-    logDebug('Failed to update page visit analytics', e);
-  }
-}
+// Track page visits for Activity stats (plain let - never $state read+write in one effect)
+let lastTrackedView: ActivityViewId | null = null;
+const trackVisit = (key: ActivityViewId) => trackVisitAction(key);
 $effect(() => {
   const view = currentView;
   if (!view || view === lastTrackedView) return;
   lastTrackedView = view;
   void trackVisit(view);
 });
-// Dialog visit counters (create inbox, tag, confirm, etc.)
-let lastDialogKeys = '';
-$effect(() => {
-  const keys: string[] = [];
-  if (createInboxDialogOpen) keys.push('dialog:createInbox');
-  if (addressViewTagDialogOpen) keys.push('dialog:tag');
-  if (confirmDialog) keys.push('dialog:confirm');
-  if (qrDialogOpen) keys.push('dialog:qr');
-  if (commandPaletteOpen) keys.push('dialog:commandPalette');
-  if (exportWizardOpen) keys.push('dialog:export');
-  const sig = keys.join('|');
+// Observe dialog roots across the whole document, including view-owned and
+// body-portaled surfaces. Dialog components provide a stable category when
+// they have one; the observer counts unclassified dialogs as `dialog:other`.
+onMount(() => observeDialogVisits());
+onMount(() => observeScrollGutters(document.body));
 
-  untrack(() => {
-    if (!sig || sig === lastDialogKeys) return;
-    // Only count newly opened dialogs
-    const prev = new Set(lastDialogKeys.split('|').filter(Boolean));
-    lastDialogKeys = sig;
-    for (const k of keys) {
-      if (!prev.has(k)) void trackVisit(k);
+onMount(() => {
+  let disposed = false;
+  let refreshGeneration = 0;
+
+  const refreshReloadRequiredTab = async () => {
+    const generation = ++refreshGeneration;
+    try {
+      const [activeTab] = await browser.tabs.query({ active: true, currentWindow: true });
+      if (activeTab?.id === undefined || !isReloadablePageUrl(activeTab.url)) {
+        if (!disposed && generation === refreshGeneration) reloadRequiredTabId = null;
+        return;
+      }
+
+      const stored = (await browser.storage.session.get(RELOAD_REQUIRED_TAB_IDS_KEY)) as Record<
+        string,
+        unknown
+      >;
+      if (!disposed && generation === refreshGeneration) {
+        reloadRequiredTabId = normalizeReloadRequiredTabIds(
+          stored[RELOAD_REQUIRED_TAB_IDS_KEY]
+        ).includes(activeTab.id)
+          ? activeTab.id
+          : null;
+      }
+    } catch (error) {
+      if (!disposed && generation === refreshGeneration) reloadRequiredTabId = null;
+      logError('Failed to read the active tab reload requirement', error);
     }
-  });
+  };
+
+  const onTabActivated = () => void refreshReloadRequiredTab();
+  const onTabUpdated = (_tabId: number, changeInfo: { status?: string; url?: string }) => {
+    if (changeInfo.status === 'complete' || changeInfo.url) {
+      void refreshReloadRequiredTab();
+    }
+  };
+  const onStorageChanged = (changes: Record<string, { newValue?: unknown }>, areaName: string) => {
+    if (areaName === 'session' && changes[RELOAD_REQUIRED_TAB_IDS_KEY]) {
+      void refreshReloadRequiredTab();
+    }
+  };
+
+  browser.tabs.onActivated.addListener(onTabActivated);
+  browser.tabs.onUpdated.addListener(onTabUpdated);
+  browser.storage.onChanged.addListener(onStorageChanged);
+  void refreshReloadRequiredTab();
+
+  return () => {
+    disposed = true;
+    browser.tabs.onActivated.removeListener(onTabActivated);
+    browser.tabs.onUpdated.removeListener(onTabUpdated);
+    browser.storage.onChanged.removeListener(onStorageChanged);
+  };
 });
 
 // --- Toast notifications ---
+const showToast = showToastAction;
 
-function showToast(
-  message:
-    | string
-    | {
-        message: string;
-        type?: ToastType;
-        icon?: ToastType;
-      },
-  type: ToastType = 'success',
-  undoAction: (() => void) | null = null,
-  actionLabel: string | null = null
-) {
-  const messageText = typeof message === 'string' ? message : message.message;
-  if (!messageText?.trim()) return;
-
-  // Log to activity tab (except for mail-related messages)
-  const mailRelatedKeywords = ['email', 'otp', 'message', 'received', 'detected'];
-  const isMailRelated = mailRelatedKeywords.some((keyword) =>
-    messageText.toLowerCase().includes(keyword)
-  );
-
-  if (!isMailRelated) {
-    const toastType =
-      type === 'success' || type === 'error' || type === 'warning' || type === 'info'
-        ? type
-        : 'info';
-    addToastNotification(messageText, toastType);
-  }
-
-  // Prefer explicit type when caller passed something other than the default success,
-  // or when message object carries type/icon. Fall back to keyword detection for string-only calls.
-  if (typeof message === 'string') {
-    const detectedType = getToastTypeFromMessage(message);
-    // Always honor explicit non-success types; for success use detection if more specific
-    const resolved: ToastType = type === 'success' || type === 'info' ? detectedType || type : type;
-    toastStore.add(
-      resolved || type || 'success',
-      message,
-      undoAction ? 10000 : 2500,
-      undoAction,
-      actionLabel
-    );
-  } else {
-    const finalType = message.icon || message.type || type;
-    const detectedType = getToastTypeFromMessage(message.message);
-    toastStore.add(
-      finalType === 'success' ? detectedType || finalType : finalType,
-      message.message,
-      undoAction ? 10000 : 2500,
-      undoAction,
-      actionLabel
-    );
+async function reloadContentTab(): Promise<void> {
+  const tabId = reloadRequiredTabId;
+  if (tabId === null) return;
+  try {
+    await browser.tabs.reload(tabId);
+  } catch (error) {
+    logError('Failed to reload the active tab after an extension update', error);
+    showToast(translate('inbox.staleContentReloadFailed'), 'error');
   }
 }
 
-// --- Confirmation dialog (ConfirmDialogState imported from @/utils/shared-ui.js) ---
-let confirmDialog = $state<ConfirmDialogState | null>(null);
-let confirmDialogRef = $state<HTMLElement | null>(null);
-let confirmPreviousFocus = $state<HTMLElement | null>(null);
-let focusTrapCleanup: (() => void) | null = null;
-let confirmFocusTimeout: ReturnType<typeof setTimeout> | null = null;
-function showConfirm(
-  message: string,
-  onConfirm: () => void,
-  options: Omit<ConfirmDialogState, 'message' | 'onConfirm'> | undefined = undefined
-) {
-  confirmPreviousFocus = document.activeElement as HTMLElement;
-  confirmDialog = { message, onConfirm, ...options };
-  confirmFocusTimeout = setTimeout(() => {
-    if (confirmDialogRef) {
-      confirmDialogRef.focus();
-      focusTrapCleanup = setupFocusTrap(confirmDialogRef);
-    }
-    confirmFocusTimeout = null;
-  }, 50);
-}
-function closeConfirm() {
-  if (confirmFocusTimeout) {
-    clearTimeout(confirmFocusTimeout);
-    confirmFocusTimeout = null;
-  }
-  focusTrapCleanup?.();
-  focusTrapCleanup = null;
-  confirmDialog = null;
-  if (confirmPreviousFocus) {
-    confirmPreviousFocus.focus();
-    confirmPreviousFocus = null;
-  }
-}
+// --- Confirmation dialog ---
+const confirmController = useConfirmDialog();
+const showConfirm = confirmController.showConfirm;
+const closeConfirm = confirmController.closeConfirm;
+const confirmDialog = $derived(confirmController.confirmDialog);
 
 // --- Filtered emails ---
 /** Labels for mailbox search (synced from storage) */
-let emailTagsById = $state<Record<string, string[]>>({});
+let emailLabelsById = $state<Record<string, string[]>>({});
 $effect(() => {
-  return emailTagsStore.subscribe((map) => {
-    emailTagsById = map;
+  return emailLabelsStore.subscribe((map) => {
+    emailLabelsById = map;
   });
 });
 
-/** Free-text portion of searchQuery (shortcut tokens stripped) — used ONLY
- * for actual filtering; `searchQuery` itself keeps the raw query (pills + text)
- * so the FilterList pill row survives the prop round-trip. */
-let searchQueryFreeText = $derived(parseSearchShortcuts(searchQuery).searchQuery);
-
-/** Shared search-commit path: parses shortcut tokens into criteria, keeps the
- * RAW query (with tokens) so FilterList pills survive the prop round-trip. */
-function applySearchQuery(v: string) {
-  const currentCriteria = {
-    searchQuery: searchQueryFreeText,
-    otpOnly,
-    hasAttachment,
-    senderDomain,
-    senderEmail,
-    recipient,
-    subject,
-    notSenderDomain,
-    notSenderEmail,
-    notRecipient,
-    notSubject,
-    selectedSenders,
-    dateFrom,
-    dateTo,
-    sortBy,
-  };
-  const updated = applySearchShortcuts(v, currentCriteria);
-  searchQuery = v;
-  otpOnly = updated.otpOnly;
-  hasAttachment = updated.hasAttachment;
-  senderDomain = updated.senderDomain;
-  senderEmail = updated.senderEmail;
-  recipient = updated.recipient;
-  subject = updated.subject;
-  notSenderDomain = updated.notSenderDomain;
-  notSenderEmail = updated.notSenderEmail;
-  notRecipient = updated.notRecipient;
-  notSubject = updated.notSubject;
-}
-
-let filteredEmails = $derived.by(() =>
-  applyFilters(emails, {
-    searchQuery: searchQueryFreeText,
-    otpOnly,
-    hasAttachment,
-    senderDomain,
-    senderEmail,
-    recipient,
-    subject,
-    notSenderDomain,
-    notSenderEmail,
-    notRecipient,
-    notSubject,
-    selectedSenders,
-    dateFrom,
-    dateTo,
-    sortBy,
-    emailTagsById,
-  })
-);
+const applySearchQuery = mailboxFilters.applySearchQuery;
+let filteredEmails = $derived.by(() => mailboxFilters.filteredEmails(emails));
 
 let activeNavigationList = $derived.by(() => {
   if (threadGroupingSetting) {
@@ -702,8 +702,10 @@ let activeNavigationList = $derived.by(() => {
 
 let currentNavigationIndex = $derived.by(() => {
   if (selectedThread.length === 0) return -1;
-  const currentId = selectedThread[0].id;
-  return activeNavigationList.findIndex((item) => item.emails.some((e) => e.id === currentId));
+  const currentKey = messageTabKey(selectedThread, selectedEmail);
+  return activeNavigationList.findIndex((item) =>
+    item.emails.some((email) => messageTabKey([email], selectedEmail) === currentKey)
+  );
 });
 
 let hasPrevMessage = $derived(currentNavigationIndex > 0);
@@ -723,95 +725,127 @@ function navigateToNextMessage() {
   }
 }
 
-// --- Stable wrapper that always delegates to the current loadInboxesFn ---
-let loadInboxesFn: (skipEmailSelection: boolean | undefined) => Promise<void> = async () => {};
-const stableLoadInboxes = (skipEmailSelection: boolean | undefined = undefined) =>
-  loadInboxesFn(skipEmailSelection);
+// --- Stable wrapper that always delegates to the current loadAddressesFn ---
+let loadAddressesFn: (skipEmailSelection: boolean | undefined) => Promise<void> = async () => {};
+const stableLoadAddresses = (skipEmailSelection: boolean | undefined = undefined) =>
+  loadAddressesFn(skipEmailSelection);
 
 // --- Common setters using composable ---
-const { inboxSetters, settingsSetters, themeSetters, qrSetters, exportSetters, loginSetters } =
-  useCommonSetters({
-    // Inbox
-    setAccounts: (v) => {
-      accounts = typeof v === 'function' ? (v as (prev: Account[]) => Account[])(accounts) : v;
-    },
-    setAllInboxes: (v) => {
-      allInboxes = typeof v === 'function' ? (v as (prev: Account[]) => Account[])(allInboxes) : v;
-    },
-    setEmails: (v) => {
-      emails = typeof v === 'function' ? (v as (prev: Email[]) => Email[])(emails) : v;
-    },
-    setLatestOtp: (v) => (latestOtp = v),
-    setLatestOtpSender: (v) => (latestOtpSender = v),
-    setLatestOtpSenderName: (v) => (latestOtpSenderName = v),
-    setOtpContext: (v) => (otpContext = v),
-    setSelectedEmail: (v) => (selectedEmail = v),
-    setLoading: (v) => (loading = v),
-    setLoadingInboxes: (v) => (loadingInboxes = v),
-    setLoadingEmails: (v) => (loadingEmails = v),
-    setNotificationsEnabled: (v) => (notificationsEnabled = v),
-    setSoundEnabled: (v) => (soundEnabled = v),
-    setExpiryWarningThreshold: (v) => (expiryWarningThreshold = v),
-    setKeybindings: (v) => (keybindings = v),
-    setAutoRefreshInterval: (v: number) => (autoRefreshInterval = v),
-    setEmailPreviewEnabled: (v: boolean) => (emailPreviewEnabled = v),
-    setDefaultDomain: (v: string) => (defaultDomain = v),
-    // Settings
-    setAutoCopy: (v) => (autoCopy = v),
-    setAutoRenew: (v) => (autoRenew = v),
-    setSelectedProvider: (v) => (selectedProvider = v),
-    setProviderInstances: (v) => (providerInstances = v),
-    setSelectedProviderInstance: (v) => (selectedProviderInstance = v),
-    setCustomColor: (v) => (customColor = v),
-    setShowDeveloperSettings: (v) => (showDeveloperSettings = v),
-    setEnableLogging: (v) => (enableLogging = v),
-    setSavingSettings: (v) => (savingSettings = v),
-    setSettingsLoading: (v) => (settingsLoading = v),
-    setEmailRetentionDays: (v) => (emailRetentionDays = v),
-    setFaviconCaching: (v) => (faviconCaching = v),
-    // Theme
-    setThemeMode: (v: ThemeMode) => (themeMode = v),
-    setContrastLevel: (v: ContrastLevel) => (contrastLevel = v),
-    // QR
-    setQrDialogOpen: (open) => (qrDialogOpen = open),
-    setQrCanvas: (canvas) => (qrCanvas = canvas),
-    setQrDialogElement: (element) => (qrDialogElement = element),
-    setPreviousFocusElement: (element) => (previousFocusElement = element),
-    // Login
-    setSavedLogins: (v) => {
-      savedLogins =
-        typeof v === 'function'
-          ? (v as (prev: CredentialsHistoryItem[]) => CredentialsHistoryItem[])(savedLogins)
-          : v;
-    },
-    // Common
-    setShowToast: (message, type) => showToast(message, type),
-    // Functions
-    loadInboxes: stableLoadInboxes,
-    confirmAsync: (message: string) =>
-      new Promise<boolean>((resolve) => {
-        showConfirm(
-          message,
-          () => {
+const { addressSetters, themeSetters, qrSetters, exportSetters, loginSetters } = useCommonSetters({
+  // Inbox
+  setAddresses: (v) => {
+    accounts = typeof v === 'function' ? (v as (prev: Address[]) => Address[])(accounts) : v;
+  },
+  setAllAddresses: (v) => {
+    allAddresses =
+      typeof v === 'function' ? (v as (prev: Address[]) => Address[])(allAddresses) : v;
+  },
+  setEmails: (v) => {
+    emails = typeof v === 'function' ? (v as (prev: Email[]) => Email[])(emails) : v;
+  },
+  setLatestOtp: (v) => (latestOtp = v),
+  setLatestOtpSender: (v) => (latestOtpSender = v),
+  setLatestOtpSenderName: (v) => (latestOtpSenderName = v),
+  setOtpContext: (v) => (otpContext = v),
+  setSelectedEmail: (v) => (selectedEmail = v),
+  setLoading: (v) => (loading = v),
+  setLoadingAddresses: (v) => (loadingAddresses = v),
+  setLoadingEmails: (v) => (loadingEmails = v),
+  setNotificationsEnabled: (v) => settingsDomainSetters.setNotificationsEnabled(v),
+  setSoundEnabled: (v) => settingsDomainSetters.setSoundEnabled(v),
+  setExpiryWarningThreshold: (v) => settingsDomainSetters.setExpiryWarningThreshold(v),
+  setKeybindings: (v) => settingsDomainSetters.setKeybindings(v),
+  setAutoRefreshInterval: (v: number) => settingsDomainSetters.setAutoRefreshInterval(v),
+  setEmailPreviewMode: (v: EmailPreviewMode) => settingsDomainSetters.setEmailPreviewMode(v),
+  setDefaultDomain: (v: string) => settingsDomainSetters.setDefaultDomain(v),
+  // Settings
+  setAutoCopy: (v) => settingsDomainSetters.setAutoCopy(v),
+  setAutoRenew: (v) => settingsDomainSetters.setAutoRenew(v),
+  setAutoRenewScope: (v) => settingsDomainSetters.setAutoRenewScope(v),
+  setAutoRenewWindowMinutes: (v) => settingsDomainSetters.setAutoRenewWindowMinutes(v),
+  setSelectedProvider: (v) => settingsDomainSetters.setSelectedProvider(v),
+  setProviderInstances: (v) => settingsDomainSetters.setProviderInstances(v),
+  setSelectedProviderInstance: (v) => settingsDomainSetters.setSelectedProviderInstance(v),
+  setCustomColor: (v) => settingsDomainSetters.setCustomColor(v),
+  setGlobalZoomEnabled: (v) => settingsDomainSetters.setGlobalZoomEnabled(v),
+  setShowDeveloperSettings: (v) => settingsDomainSetters.setShowDeveloperSettings(v),
+  setEnableLogging: (v) => settingsDomainSetters.setEnableLogging(v),
+  setSavingSettings: (v) => settingsDomainSetters.setSavingSettings(v),
+  setSettingsLoading: (v) => settingsDomainSetters.setSettingsLoading(v),
+  setEmailRetentionDays: (v) => settingsDomainSetters.setEmailRetentionDays(v),
+  setFaviconCaching: (v) => settingsDomainSetters.setFaviconCaching(v),
+  // Theme
+  setThemeMode: (v: ThemeMode) => (themeMode = v),
+  setContrastLevel: (v: ContrastLevel) => (contrastLevel = v),
+  // QR
+  setQrDialogOpen: (open) => overlaySetters.setQrDialogOpen(open),
+  setQrCanvas: (canvas) => overlaySetters.setQrCanvas(canvas),
+  // Login
+  setSavedLogins: (v) => {
+    savedLogins =
+      typeof v === 'function'
+        ? (v as (prev: CredentialsHistoryItem[]) => CredentialsHistoryItem[])(savedLogins)
+        : v;
+  },
+  // Common
+  setShowToast: (message, type) => showToast(message, type),
+  // Functions
+  loadAddresses: stableLoadAddresses,
+  confirmAsync: (message: string) =>
+    new Promise<boolean>((resolve) => {
+      showConfirm(
+        message,
+        () => {
+          closeConfirm();
+          resolve(true);
+        },
+        {
+          secondaryLabel: get(t)('common.cancel'),
+          onSecondary: () => {
             closeConfirm();
-            resolve(true);
+            resolve(false);
           },
-          {
-            secondaryLabel: get(t)('common.cancel'),
-            onSecondary: () => {
-              closeConfirm();
-              resolve(false);
-            },
-          }
-        );
-      }),
-  });
+        }
+      );
+    }),
+});
+
+const settingsController = createSettingsController(ext, {
+  ...settingsDomainSetters,
+  setShowToast: (message, type) => showToast(message, type),
+  loadAddresses: stableLoadAddresses,
+});
+
+const settingsState = (): SettingsState => ({
+  autoCopy: settings.autoCopy,
+  autoRenew: settings.autoRenew,
+  autoRenewScope: settings.autoRenewScope,
+  autoRenewWindowMinutes: settings.autoRenewWindowMinutes,
+  selectedProvider: settings.selectedProvider,
+  providerInstances: settings.providerInstances,
+  selectedProviderInstance: settings.selectedProviderInstance,
+  customColor: settings.customColor,
+  globalZoomEnabled: settings.globalZoomEnabled,
+  showDeveloperSettings: settings.showDeveloperSettings,
+  enableLogging: settings.enableLogging,
+  savingSettings: settings.savingSettings,
+  settingsLoading: settings.settingsLoading,
+  emailRetentionDays: settings.emailRetentionDays,
+  faviconCaching: settings.faviconCaching,
+  notificationsEnabled: settings.notificationsEnabled,
+  soundEnabled: settings.soundEnabled,
+  expiryWarningThreshold: settings.expiryWarningThreshold,
+  keybindings: settings.keybindings,
+  autoRefreshInterval: settings.autoRefreshInterval,
+  emailPreviewMode: settings.emailPreviewMode,
+  defaultDomain: settings.defaultDomain,
+});
 
 const bulkActionsSetters: BulkActionsSetters = {
   setSelectedAddresses: (addresses) => (selectedAddresses = addresses),
   setShowToast: (message, type, undoAction) => showToast(message, type, undoAction),
-  loadInboxes: stableLoadInboxes,
-  showConfirm: (message, onConfirm) => showConfirm(message, onConfirm),
+  loadAddresses: stableLoadAddresses,
+  showConfirm: (message, onConfirm, options) => showConfirm(message, onConfirm, options),
   closeConfirm: () => closeConfirm(),
 };
 
@@ -820,7 +854,10 @@ const managementSetters: ManagementSetters = {
   setEmails: (v) => (emails = v),
   setLoading: (v) => (loading = v),
   setShowToast: (message, type, undoAction) => showToast(message, type, undoAction),
-  loadInboxes: stableLoadInboxes,
+  loadAddresses: stableLoadAddresses,
+  selectAddress: async (address) => {
+    await selectAddress(address);
+  },
   setDropdownOpen: (open) => (accountSelectorDropdownOpen = open),
   setArchivedSectionOpen: async (open) => {
     archivedSectionOpen = open ? 'archived' : null;
@@ -830,15 +867,16 @@ const managementSetters: ManagementSetters = {
     // Navigate to mailbox view (which shows onboarding when accounts.length === 0)
     currentView = 'mailbox';
   },
-  setAllInboxes: (v) => {
-    allInboxes = typeof v === 'function' ? (v as (prev: Account[]) => Account[])(allInboxes) : v;
+  setAllAddresses: (v) => {
+    allAddresses =
+      typeof v === 'function' ? (v as (prev: Address[]) => Address[])(allAddresses) : v;
   },
 };
 
 const archivedSetters: ArchivedSetters = {
   setArchivedEmails: (emails) => (archivedEmails = emails),
   setShowToast: (message, type) => showToast(message, type),
-  loadInboxes: stableLoadInboxes,
+  loadAddresses: stableLoadAddresses,
 };
 
 let _analyticsActions: ReturnType<typeof useAnalyticsActions> | null = null;
@@ -868,24 +906,19 @@ async function getAnalyticsActions() {
 let mgmtTab = $state<string>('active');
 let mgmtSearch = $state<string>('');
 let selectedAddresses = $state<Set<string>>(new Set());
-let currentEmailDetail = $state<Account | null>(null);
+let currentEmailDetail = $state<Address | null>(null);
 
 // --- AddressView tag dialog (AppLayout-level, works from any view) ---
 let addressViewTagDialogOpen = $state(false);
-let addressViewTagTarget = $state<Account | null>(null);
+let addressViewTagTarget = $state<Address | null>(null);
 
-let allExistingTags = $derived.by(() => {
-  const s = new Set<string>();
-  for (const a of allInboxes) {
-    if (Array.isArray(a.tags) && a.tags.length) {
-      for (const t of a.tags) if (t?.name) s.add(t.name);
-    } else if (a.tag) s.add(a.tag);
-  }
-  return Array.from(s);
-});
+let allExistingTags = $derived(existingTagNames(allAddresses));
+// Which addresses carry each tag: the hover info on every existing tag in the
+// tag dialog.
+let allTagAddresses = $derived(buildTagAddressUsage(allAddresses));
 let allTagColors = $derived.by(() => {
   const c: Record<string, string> = {};
-  for (const a of allInboxes) {
+  for (const a of allAddresses) {
     if (Array.isArray(a.tags) && a.tags.length) {
       for (const t of a.tags) if (t?.name && t.color) c[t.name] = t.color;
     } else if (a.tag && a.tagColor) c[a.tag] = a.tagColor;
@@ -894,68 +927,35 @@ let allTagColors = $derived.by(() => {
 });
 
 /** Single account or multi-select batch from Addresses strip / ⋮ menu */
-let addressViewTagTargets = $state<Account[]>([]);
+let addressViewTagTargets = $state<Address[]>([]);
 
-function openAddressViewTagDialog(account: Account) {
-  // Multi-select: if this account is among a selection of 2+, tag the whole selection
-  if (selectedAddresses.size > 1 && selectedAddresses.has(account.id)) {
-    addressViewTagTargets = allInboxes.filter((a) => selectedAddresses.has(a.id));
-  } else {
-    addressViewTagTargets = [account];
-  }
-  addressViewTagTarget = addressViewTagTargets[0] ?? account;
-  addressViewTagDialogOpen = true;
-}
+const addressTagsController = createAddressTagsController({
+  ext,
+  get: {
+    allAddresses: () => allAddresses,
+    selectedAddresses: () => selectedAddresses,
+    currentEmailDetail: () => currentEmailDetail,
+    tagTarget: () => addressViewTagTarget,
+    tagTargets: () => addressViewTagTargets,
+  },
+  set: {
+    tagDialogOpen: (value) => (addressViewTagDialogOpen = value),
+    tagTarget: (value) => (addressViewTagTarget = value),
+    tagTargets: (value) => (addressViewTagTargets = value),
+    currentEmailDetail: (value) => (currentEmailDetail = value),
+  },
+  loadAddresses: (skipEmailSelection) => loadAddressesFn(skipEmailSelection),
+  logDebug,
+  showToast,
+});
+const openAddressViewTagDialog = addressTagsController.openAddressViewTagDialog;
+const openAddressViewTagDialogForSelected =
+  addressTagsController.openAddressViewTagDialogForSelected;
+const closeAddressViewTagDialog = addressTagsController.closeAddressViewTagDialog;
+const saveAddressViewTags = addressTagsController.saveAddressViewTags;
 
-function openAddressViewTagDialogForSelected() {
-  const selected = allInboxes.filter((a) => selectedAddresses.has(a.id));
-  if (selected.length === 0) return;
-  addressViewTagTargets = selected;
-  addressViewTagTarget = selected[0] ?? null;
-  addressViewTagDialogOpen = true;
-}
-
-function closeAddressViewTagDialog() {
-  addressViewTagDialogOpen = false;
-  addressViewTagTarget = null;
-  addressViewTagTargets = [];
-}
-async function saveAddressViewTag(tag: string, color: string) {
-  const targets =
-    addressViewTagTargets.length > 0
-      ? addressViewTagTargets
-      : addressViewTagTarget
-        ? [addressViewTagTarget]
-        : [];
-  if (targets.length === 0) return;
-  try {
-    await Promise.all(
-      targets.map((acc) =>
-        ext.runtime.sendMessage({
-          type: 'updateInboxTag',
-          inboxId: acc.id,
-          tag,
-          color,
-        })
-      )
-    );
-    await loadInboxes(true);
-    // Keep currentEmailDetail in sync when it was among targets
-    if (currentEmailDetail && targets.some((t) => t.id === currentEmailDetail?.id)) {
-      currentEmailDetail = {
-        ...currentEmailDetail,
-        tag: tag || undefined,
-        tagColor: color || undefined,
-      };
-    }
-  } catch (e) {
-    logDebug('Failed to update inbox tag', e);
-  }
-  closeAddressViewTagDialog();
-}
-
-let mgmtAccounts = $derived(
-  (Array.isArray(allInboxes) ? allInboxes : []).filter((a) => {
+let mgmtAddresses = $derived(
+  (Array.isArray(allAddresses) ? allAddresses : []).filter((a) => {
     if (!a || typeof a !== 'object') return false;
     const isInactive =
       a.status !== 'active' || a.accountStatus === 'archived' || a.accountStatus === 'deleted';
@@ -979,14 +979,14 @@ let mgmtAccounts = $derived(
 );
 
 let allSelected = $derived(
-  mgmtAccounts.length > 0 && mgmtAccounts.every((a) => selectedAddresses.has(a.id))
+  mgmtAddresses.length > 0 && mgmtAddresses.every((a) => selectedAddresses.has(a.id))
 );
 
 // --- Use shared inbox actions composable ---
-const inboxActions = useInboxActions(
+const addressActions = useAddressActions(
   {
     ext,
-    inboxSetters,
+    addressSetters,
     get searchQuery() {
       return searchQuery;
     },
@@ -1009,161 +1009,289 @@ const inboxActions = useInboxActions(
     get accounts() {
       return accounts;
     },
-    get allInboxes() {
-      return allInboxes;
+    get allAddresses() {
+      return allAddresses;
     },
-    get mgmtAccounts() {
-      return mgmtAccounts;
+    get mgmtAddresses() {
+      return mgmtAddresses;
     },
   },
   {
-    onSelectAccount: () => {
+    onSelectAddress: () => {
       dropdownOpen = false;
       // Clear inbox list filters that would hide every message on the new mailbox
-      searchQuery = '';
-      otpOnly = false;
-      hasAttachment = false;
-      senderDomain = '';
-      senderEmail = '';
-      recipient = '';
-      subject = '';
-      notSenderDomain = '';
-      notSenderEmail = '';
-      notRecipient = '';
-      notSubject = '';
-      selectedSenders = [];
-      dateFrom = '';
-      dateTo = '';
+      mailboxFilters.clear();
     },
-    getActiveInboxId: (selectedEmail: string, accounts: Account[]) => {
+    getActiveAddressId: (selectedEmail: string, accounts: Address[]) => {
       if (!selectedEmail) return undefined;
-      const currentAccount = accounts.find((a) => a.address === selectedEmail);
-      return currentAccount?.id;
+      const selectedLower = selectedEmail.toLowerCase();
+      const currentAddress = accounts.find(
+        (a) => (a.address || '').toLowerCase() === selectedLower
+      );
+      return currentAddress?.id;
     },
   }
 );
 
-// --- Load inboxes from extension storage ---
-const loadInboxes = inboxActions.loadInboxes;
-const checkMessages = inboxActions.checkMessages;
-const selectAccount = inboxActions.selectAccount;
-const copyEmail = inboxActions.copyEmail;
-const refreshInbox = inboxActions.refreshInbox;
-async function persistEmailRead(email: Email) {
-  try {
-    const readEmails = await getReadEmailsMap();
-    const inboxAddr = email.original_inbox || selectedEmail;
-    const key = inboxAddr ? `${inboxAddr}_${email.id}` : email.id;
-    const wasUnread = !readEmails[key] && !readEmails[email.id];
-    readEmails[key] = true;
-    await browser.storage.local.set({ readEmails });
-    if (wasUnread) {
-      try {
-        const { analytics: a = {} } = (await browser.storage.local.get(['analytics'])) as {
-          analytics?: Record<string, unknown>;
-        };
-        await browser.storage.local.set({
-          analytics: {
-            ...a,
-            emailsRead: ((a.emailsRead as number) || 0) + 1,
-          },
-        });
-      } catch (e) {
-        logDebug('Failed to update email-read analytics', e);
-      }
-    }
-  } catch (error) {
-    logError('Failed to persist email read state', error);
-  }
-}
+// --- Load addresses from extension storage ---
+const loadAddresses = addressActions.loadAddresses;
+const checkMessages = addressActions.checkMessages;
+const selectAddress = addressActions.selectAddress;
+const copyEmail = addressActions.copyEmail;
+const refreshMailbox = addressActions.refreshMailbox;
+const mailboxReadStateDeps = {
+  ext,
+  getSelectedEmail: () => selectedEmail,
+  getAccounts: () => accounts,
+  getAllAddresses: () => allAddresses,
+  getEmails: () => emails,
+  setEmails: (value: Email[]) => (emails = value),
+  getUnreadByAddress: () => unreadByAddress,
+  setUnreadByAddress: (value: Record<string, number>) => (unreadByAddress = value),
+  persistQueuedReadState: (emailId: string, addresses: string[], read: boolean) =>
+    queueEmailReadState(emailId, addresses, read),
+  archiveOnRead: (email: Email) => archiveSelectedEmails([email]),
+};
+const persistEmailRead = (email: Email) => persistEmailReadAction(mailboxReadStateDeps, email);
+const persistEmailUnread = (email: Email) => persistEmailUnreadAction(mailboxReadStateDeps, email);
+const markOtpEmailRead = (otp: string = latestOtp) =>
+  markOtpEmailReadAction(mailboxReadStateDeps, otp);
 
-async function persistEmailUnread(email: Email) {
-  try {
-    const readEmails = await getReadEmailsMap();
-    const inboxAddr = email.original_inbox || selectedEmail;
-    const key = inboxAddr ? `${inboxAddr}_${email.id}` : email.id;
-    delete readEmails[key];
-    await browser.storage.local.set({ readEmails });
-  } catch (error) {
-    logError('Failed to persist email unread state', error);
-  }
-}
-
-async function markOtpEmailRead(otp: string = latestOtp) {
-  const otpEmail = emails.find((e) => e.otp === otp && e.unread);
-  if (otpEmail) {
-    emails = emails.map((e) => (e.id === otpEmail.id ? { ...e, unread: false } : e));
-    if (selectedEmail && unreadByAddress[selectedEmail] > 0) {
-      unreadByAddress = {
-        ...unreadByAddress,
-        [selectedEmail]: unreadByAddress[selectedEmail] - 1,
-      };
-    }
-    await persistEmailRead(otpEmail);
-  }
-}
 const copyOtp = () => {
-  inboxActions.copyOtp();
+  addressActions.copyOtp();
   void markOtpEmailRead();
 };
-const toggleNotifications = inboxActions.toggleNotifications;
+const toggleNotifications = addressActions.toggleNotifications;
 
-async function updateUnreadByAddress() {
-  try {
-    const { storedEmails = {}, readEmails = {} } = (await ext.storage.local.get([
-      'storedEmails',
-      'readEmails',
-    ])) as { storedEmails?: Record<string, Email[]>; readEmails?: Record<string, boolean> };
-    allStoredEmails = storedEmails as Record<string, Email[]>;
-    const counts: Record<string, number> = {};
-    for (const [addr, msgs] of Object.entries(storedEmails)) {
-      counts[addr] = (msgs as Email[]).filter((m) => {
-        const key = `${m.original_inbox || addr}_${m.id}`;
-        return !readEmails[key] && !readEmails[m.id];
-      }).length;
-    }
-    unreadByAddress = counts;
-  } catch (error) {
-    logError('Failed to update unread inbox counts', error);
-  }
+let shortcutDiscoveryOpen = $state(false);
+const keyboardTooltipController = createKeyboardTooltipController({
+  get: {
+    currentView: () => currentView,
+    mgmtTab: () => mgmtTab,
+    selectedAddresses: () => selectedAddresses,
+    mgmtSearch: () => mgmtSearch,
+    selectedThread: () => selectedThread,
+    currentEmailDetail: () => currentEmailDetail,
+    confirmDialog: () => confirmDialog,
+    qrDialogOpen: () => overlayState.qrDialogOpen,
+    createAddressDialogOpen: () => overlayState.createAddressDialogOpen,
+    commandPaletteOpen: () => overlayState.commandPaletteOpen,
+    cheatSheetOpen: () => overlayState.cheatSheetOpen,
+    exportWizardOpen: () => overlayState.exportWizardOpen,
+    showExportBackupDialog: () => overlayState.showExportBackupDialog,
+    showImportBackupDialog: () => overlayState.showImportBackupDialog,
+    addressViewTagDialogOpen: () => addressViewTagDialogOpen,
+    keybindings: () => keybindings,
+    activeNavigationList: () => activeNavigationList,
+    currentNavigationIndex: () => currentNavigationIndex,
+    headerBackAvailable: () => HEADER_BACK_VIEWS.has(currentView),
+  },
+  set: {
+    setCurrentView: (view) => (currentView = view as View),
+    setCheatSheetOpen: (open) => overlaySetters.setCheatSheetOpen(open),
+    setShortcutDiscoveryOpen: (open) => {
+      shortcutDiscoveryOpen = open;
+    },
+    setCommandPaletteOpen: (open) => overlaySetters.setCommandPaletteOpen(open),
+    setActiveTooltip: (tip) => overlaySetters.setActiveTooltip(tip),
+  },
+  toggleSplitPane: () => toggleSplitPane(),
+  shortcuts: {
+    refreshMailbox,
+    createAddress,
+    copyEmail,
+    copyOtp,
+    closeConfirm,
+    closeQrDialog,
+    setSelectedAddresses: (addresses) => (selectedAddresses = addresses),
+    setMgmtSearch: (search) => (mgmtSearch = search),
+    setSelectedMessage: (message: Email[] | null) => (selectedThread = message ?? []),
+    setCurrentEmailDetail: (detail) => (currentEmailDetail = detail),
+    toggleAccountSelector: () => {
+      if (currentView !== 'mailbox') currentView = 'mailbox';
+      accountSelectorDropdownOpen = !accountSelectorDropdownOpen;
+    },
+    // Escape tier - dismiss the most recently opened transient surface.
+    cancelEscapeTier: () => cancelTopEscapeTier(),
+    headerBack: () => handleHeaderBack(),
+  },
+  openMessageDetail,
+  showToast,
+  getTranslation: translate,
+});
+
+// Layout chrome claims Escape tiers too, so the stack - not this file's code
+// order - decides whether an open drawer or a view's own multi-select goes
+// first: whichever the user opened last is the one Escape dismisses.
+$effect(() => {
+  if (!accountSelectorDropdownOpen) return;
+  return registerEscapeTier('layout.accountSelector', () => {
+    accountSelectorDropdownOpen = false;
+  });
+});
+
+$effect(() => {
+  if (!settingsSubpage) return;
+  return registerEscapeTier('layout.settingsSubpage', handleSettingsSubpageBack);
+});
+
+$effect(() => {
+  if (!mailProviderSplitOpen) return;
+  return registerEscapeTier('layout.providerSplit', () => {
+    mailProviderSplitOpen = false;
+  });
+});
+
+function applyStoredEmailMetadata(
+  storedEmails: Record<string, Email[]>,
+  readEmails: Record<string, boolean>
+) {
+  const projection = projectStoredEmailMetadata(storedEmails, readEmails, allAddresses, accounts);
+  allStoredEmails = projection.storedEmails;
+  unreadByAddress = projection.unreadByAddress;
+  allAddresses = projection.allAddresses;
+  accounts = projection.accounts;
 }
 
+const updateUnreadByAddress = () =>
+  refreshUnreadCountsAction(mailboxReadStateDeps, applyStoredEmailMetadata);
+
 // --- Assign actual function to placeholder for setters ---
-loadInboxesFn = (skipEmailSelection: boolean | undefined = undefined) => {
-  if (skipEmailSelection) inboxActions.setSkipEmailSelection(true);
-  return inboxActions.loadInboxes().finally(() => {
-    if (skipEmailSelection) inboxActions.setSkipEmailSelection(false);
-  });
+loadAddressesFn = (skipEmailSelection: boolean | undefined = undefined) =>
+  addressActions.loadAddresses(skipEmailSelection);
+
+/**
+ * Resolve the unread-badge key for an address, case-insensitively. Badge keys
+ * follow the stored bag casing (computeUnreadCounts iterates storage keys), so
+ * a casing drift must not make badge lookups/decrements miss silently.
+ */
+function unreadBadgeKey(address: string): string {
+  return resolveUnreadBadgeKey(unreadByAddress, address);
+}
+
+const addressCreatorDeps = {
+  ext,
+  addressSetters,
+  get selectedProvider() {
+    return selectedProvider;
+  },
+  get selectedProviderInstance() {
+    return selectedProviderInstance ?? 'random';
+  },
+  showToast,
+  getTranslation: translate,
+  setHighlightAddress,
+  reloadAddresses: (skipEmailSelection?: boolean) => loadAddresses(skipEmailSelection),
+  navigateToMailbox: () => (currentView = 'mailbox'),
+  navigateToAddresses: () => (currentView = 'addresses'),
+  isOnAddressesPage,
+  setSelectedEmail: (email: string) => (selectedEmail = email),
+  setDisplayedEmail: (email: string) => (displayedEmail = email),
+};
+
+async function createAddress(
+  provider?: string,
+  instanceId?: string,
+  emailUser?: string,
+  preferredDomain?: string
+) {
+  return createAddressModule(addressCreatorDeps, provider, instanceId, emailUser, preferredDomain);
+}
+
+function openCreateAddressDialog(provider?: string, instanceId?: string) {
+  const result = openCreateDialog(addressCreatorDeps, provider, instanceId);
+  pendingCreateProvider = result.pendingProvider;
+  pendingCreateInstanceId = result.pendingInstanceId;
+  overlaySetters.setPendingCreateProviderConfig(result.pendingConfig);
+  overlaySetters.setCreateAddressDialogOpen(result.openDialog);
+}
+
+async function handleCreateAddressWithProvider(provider?: string, instanceId?: string) {
+  const result = await handleCreateWithProvider(addressCreatorDeps, provider, instanceId);
+  pendingCreateProvider = result.pendingProvider;
+  pendingCreateInstanceId = result.pendingInstanceId;
+  overlaySetters.setPendingCreateProviderConfig(result.pendingConfig);
+  overlaySetters.setCreateAddressDialogOpen(result.openDialog);
+}
+
+async function handleCreateAddress(type: 'random' | 'custom', username?: string, domain?: string) {
+  overlaySetters.setCreateAddressDialogOpen(false);
+  const created = await handleCreateAddressResult(
+    addressCreatorDeps,
+    pendingCreateProvider,
+    pendingCreateInstanceId,
+    type,
+    username,
+    domain
+  );
+  pendingCreateProvider = undefined;
+  pendingCreateInstanceId = undefined;
+  overlaySetters.setPendingCreateProviderConfig(undefined);
+  return created;
+}
+
+const addressBulkDeps = {
+  ext,
+  bulkActionsSetters,
+  managementSetters,
+  getSelectedAddresses: () => selectedAddresses,
+  setSelectedAddresses: (value: Set<string>) => (selectedAddresses = value),
+  getMgmtAddresses: () => mgmtAddresses,
+  getAccounts: () => accounts,
+  getAllAddresses: () => allAddresses,
+  getSavedLogins: () => savedLogins,
+  getIdentities: () => identities,
+  showConfirm,
+  closeConfirm,
+  getTranslation: translate,
+  reloadAddresses: (skip?: boolean) => loadAddresses(skip),
+  removeSingleAddress: (address: string) => removeAddress(address),
+  actions: {
+    toggleSelectAll: toggleSelectAllAction,
+    toggleSelect: toggleSelectAction,
+    archiveSelected: archiveSelectedAction,
+    unarchiveSelected: unarchiveSelectedAction,
+    deleteSelected: deleteSelectedAction,
+    toggleAutoExtend: toggleAutoExtendAction,
+  },
 };
 
 function toggleSelectAll() {
-  selectedAddresses = toggleSelectAllAction(mgmtAccounts, selectedAddresses);
+  toggleSelectAllAddresses(addressBulkDeps);
 }
 
 function toggleSelect(id: string) {
-  selectedAddresses = toggleSelectAction(selectedAddresses, id);
+  toggleSelectAddressBulk(addressBulkDeps, id);
 }
 
-async function archiveSelected() {
-  await archiveSelectedAction(ext, { selectedAddresses, accounts, allInboxes }, bulkActionsSetters);
+function archiveSelected() {
+  return archiveSelectedAddresses(addressBulkDeps);
 }
 
-async function unarchiveSelected() {
-  await unarchiveSelectedAction(
-    ext,
-    { selectedAddresses, accounts, allInboxes },
-    bulkActionsSetters
+function unarchiveSelected() {
+  return unarchiveSelectedAddresses(addressBulkDeps);
+}
+
+function deleteSelected() {
+  return deleteAddressesDirectBulk(
+    addressBulkDeps,
+    Array.from(selectedAddresses)
+      .map((id) => allAddresses.find((address) => address.id === id))
+      .filter((address): address is Address => Boolean(address))
   );
-}
-
-async function deleteSelected() {
-  await deleteSelectedAction(ext, { selectedAddresses, accounts, allInboxes }, bulkActionsSetters);
 }
 
 /** Delete specific accounts by id (drag Live→Inactive) without selection Set race */
 /** If the open thread/detail references a just-deleted inbox, clear it so the
  * split pane / expand routing doesn't show a phantom message view. */
-function clearDetailIfInboxDeleted(deletedAddresses: Set<string>) {
+function clearDetailIfAddressDeleted(deletedAddresses: Set<string>) {
+  removeOpenedMessageTabs(
+    new Set(
+      messageTabs.tabs
+        .filter((tab) => deletedAddresses.has(tab.mailboxAddress.toLowerCase()))
+        .map((tab) => tab.key)
+    )
+  );
   const t0 = selectedThread[0];
   if (t0 && deletedAddresses.has((t0.original_inbox || '').toLowerCase())) {
     selectedThread = [];
@@ -1176,151 +1304,190 @@ function clearDetailIfInboxDeleted(deletedAddresses: Set<string>) {
   }
 }
 
-async function deleteAccountsDirect(toDelete: Account[]) {
-  if (!toDelete.length) return;
-  // Single account: rich confirm (logins + identities); multi uses bulk path
-  if (toDelete.length === 1 && toDelete[0]) {
-    await removeAccount(toDelete[0].address);
-    return;
-  }
-  const addrs = new Set(toDelete.map((a) => (a.address || '').toLowerCase()));
-  const loginHits = (savedLogins || []).filter((l) => addrs.has((l.email || '').toLowerCase()));
-  const idHits = (identities || []).filter((id) => {
-    const e = (id.preferredEmail || (id as { email?: string }).email || '').toLowerCase();
-    return e && addrs.has(e);
-  });
-  const noteParts: string[] = [];
-  if (loginHits.length)
-    noteParts.push($t('account.deleteLinkedLogins', { values: { n: loginHits.length } }) as string);
-  if (idHits.length)
-    noteParts.push(
-      $t('account.deleteLinkedIdentities', {
-        values: { n: idHits.length, names: idHits.map((i) => i.name).join(', ') },
-      }) as string
-    );
-  showConfirm(
-    $t('account.deleteMultiBody', { values: { n: toDelete.length } }) as string,
-    async () => {
-      closeConfirm();
-      const ids = new Set(toDelete.map((a) => a.id));
-      selectedAddresses = ids;
-      await deleteSelectedAction(
-        ext,
-        { selectedAddresses: ids, accounts, allInboxes },
-        bulkActionsSetters
-      );
-      clearDetailIfInboxDeleted(new Set(toDelete.map((a) => (a.address || '').toLowerCase())));
-    },
+const deleteAddressesDirect = (toDelete: Address[]) =>
+  deleteAddressesDirectBulk(
     {
-      title: $t('account.deleteConfirmTitle') as string,
-      confirmLabel: $t('account.deletePermanently') as string,
-      note: noteParts.length ? noteParts.join(' · ') : ($t('account.deleteConfirmNote') as string),
-    }
+      ...addressBulkDeps,
+      removeSingleAddress: (address: string) => removeAddress(address),
+    },
+    toDelete
   );
+
+type ArchivedRenewalDisposition = 'unarchive' | 'keep-archived';
+let manualArchivedRenewalPrompt = $state<{
+  account: Address;
+  resolve: (choice: ArchivedRenewalDisposition | null) => void;
+} | null>(null);
+
+function resolveManualArchivedRenewal(choice: ArchivedRenewalDisposition | null) {
+  const pending = manualArchivedRenewalPrompt;
+  manualArchivedRenewalPrompt = null;
+  pending?.resolve(choice);
 }
 
-async function toggleAutoExtend(account: Account) {
-  await toggleAutoExtendAction(ext, account, managementSetters);
+async function toggleAutoExtend(account: Address) {
+  const archived = account.accountStatus === 'archived' || account.status === 'archived';
+  const hasManualRenewChoice = archived && !account.autoExtend;
+  if (!hasManualRenewChoice) return toggleAutoExtendBulk(addressBulkDeps, account);
+
+  const choice = await new Promise<ArchivedRenewalDisposition | null>((resolve) => {
+    manualArchivedRenewalPrompt = { account, resolve };
+  });
+  if (!choice) return;
+  return toggleAutoExtendBulk(addressBulkDeps, account, choice);
 }
 
-/** Reorder full storage list by account id (safe with Live/Inactive/search filters). */
-async function reorderAccountsById(sourceId: string, targetId: string) {
-  if (!sourceId || !targetId || sourceId === targetId) return;
-  try {
-    const inboxes = await getInboxes();
-    const fromIndex = inboxes.findIndex((a) => a.id === sourceId);
-    const toIndex = inboxes.findIndex((a) => a.id === targetId);
-    if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return;
-    const [moved] = inboxes.splice(fromIndex, 1);
-    inboxes.splice(toIndex, 0, moved);
-    await setInboxes(inboxes);
-    await loadInboxes(true);
-  } catch (error) {
-    logError('Failed to reorder accounts', error);
-  }
+const handleApplyAutoRenewToAll = (value: boolean) =>
+  applyAutoRenewToAllAction(value, managementSetters);
+
+const reorderAddressesById = (sourceId: string, targetId: string) =>
+  reorderAddressesByIdBulk(addressBulkDeps, sourceId, targetId);
+
+function clearDetailIfEmailsRemoved(removed: Email[]) {
+  const removedKeys = new Set(removed.map((email) => messageTabKey([email], selectedEmail)));
+  const tabKeys = new Set(
+    messageTabs.tabs
+      .filter((tab) =>
+        tab.thread.some((email) => removedKeys.has(messageTabKey([email], tab.mailboxAddress)))
+      )
+      .map((tab) => tab.key)
+  );
+  const selectedRemoved = selectedThread.some((email) =>
+    removedKeys.has(messageTabKey([email], selectedEmail))
+  );
+  removeOpenedMessageTabs(tabKeys);
+  if (selectedRemoved && !(layoutSplit || layoutVerticalSplit)) selectedThread = [];
 }
 
-async function archiveSelectedEmails(emailsToArchive: Email[]) {
-  if (emailsToArchive.length === 0) return;
-  const { updated } = await applyEmailLocalAction(ext, emailsToArchive, 'archive');
-  if (updated > 0) {
-    const ids = new Set(emailsToArchive.map((e) => e.id));
-    emails = emails.map((e) =>
-      ids.has(e.id) ? { ...e, local_archived: true, local_archived_at: Date.now() } : e
-    );
-    showToast($t('toasts.emailsArchived', { values: { count: updated } }), 'archived', () => {
-      void applyEmailLocalAction(ext, emailsToArchive, 'restore').then(async () => {
-        emails = emails.map((e) =>
-          ids.has(e.id) ? { ...e, local_archived: false, local_archived_at: undefined } : e
+const emailBulkDeps = {
+  ext,
+  getEmails: () => emails,
+  setEmails: (value: Email[]) => (emails = value),
+  onEmailsRemoved: clearDetailIfEmailsRemoved,
+  showToast,
+  getTranslation: translate,
+  reloadAddresses: (skip?: boolean) => loadAddresses(skip),
+  refreshUnreadCounts: () => updateUnreadByAddress(),
+};
+const archiveSelectedEmails = (items: Email[]) => archiveSelectedEmailsAction(emailBulkDeps, items);
+const deleteSelectedEmails = (items: Email[]) => deleteSelectedEmailsAction(emailBulkDeps, items);
+const restoreSelectedEmails = (items: Email[]) => restoreSelectedEmailsAction(emailBulkDeps, items);
+
+const addressDetailOperations = createAddressDetailOperations({
+  ext,
+  getCurrentEmailDetail: () => currentEmailDetail,
+  getSelectedEmail: () => selectedEmail,
+  getAllAddresses: () => allAddresses,
+  getEmails: () => emails,
+  getLayoutSplit: () => layoutSplit,
+  getLayoutVerticalSplit: () => layoutVerticalSplit,
+  getCurrentView: () => currentView,
+  setCurrentEmailDetail: (value) => (currentEmailDetail = value),
+  setSelectedEmail: (value) => (selectedEmail = value),
+  setDisplayedEmail: (value) => (displayedEmail = value),
+  setCurrentView: (value) => (currentView = value as View),
+  setLoading: (value) => (loading = value),
+  selectAddress,
+  checkMessages,
+  loadAddresses: (skipEmailSelection) => loadAddresses(skipEmailSelection),
+  expandSplitPane,
+  unarchiveAddress,
+  toggleAutoExtend,
+  extendAddress,
+});
+const openAddressView = addressDetailOperations.openAddressView;
+const refreshCurrentAddressMessages = addressDetailOperations.refreshCurrentAddressMessages;
+const handleAddressDomainChanged = addressDetailOperations.handleAddressDomainChanged;
+const navigateFromAddressToMailbox = addressDetailOperations.navigateFromAddressToMailbox;
+const handleAddressUnarchive = addressDetailOperations.handleAddressUnarchive;
+const handleAddressAutoExtend = addressDetailOperations.handleAddressAutoExtend;
+const handleAddressExtend = addressDetailOperations.handleAddressExtend;
+
+function addressDetailToast(
+  message: string | { message: string; type?: ToastType; icon?: ToastType },
+  type?: string,
+  undo?: (() => void | Promise<void>) | null
+) {
+  showToast(message, (type as ToastType) || 'success', undo ?? null);
+}
+
+function createRuleFromMessage(from?: string) {
+  automationInitialSender = from || '';
+  selectedThread = [];
+  currentView = 'automation';
+}
+
+function markSelectedThreadUnreadAndClose(mode: 'split' | 'page') {
+  const closingKey = messageTabKey(selectedThread, selectedEmail);
+  const threadAddress = selectedThread[0]?.original_inbox || selectedEmail;
+  let newlyUnread = 0;
+  let failedMarks = 0;
+  const revertFailedMark = () => {
+    failedMarks += 1;
+    if (failedMarks === 1) {
+      showToast($t('toasts.operationFailed'), 'error');
+    }
+    if (threadAddress) {
+      const badgeKey = unreadBadgeKey(threadAddress);
+      unreadByAddress = {
+        ...unreadByAddress,
+        [badgeKey]: Math.max(0, (unreadByAddress[badgeKey] ?? 0) - 1),
+      };
+    }
+  };
+  for (const msg of selectedThread) {
+    if (!msg.unread) newlyUnread += 1;
+    const key = messageTabKey([msg], threadAddress);
+    const idx = emails.findIndex((email) => messageTabKey([email], selectedEmail) === key);
+    const wasUnreadInList = idx !== -1 ? emails[idx].unread : false;
+    if (idx !== -1) {
+      emails = emails.map((e, i) => (i === idx ? { ...e, unread: true } : e));
+    }
+    void persistEmailUnread(msg).then((ok) => {
+      if (ok) return;
+      // Storage write failed - revert the optimistic update; the badge
+      // increment below is undone per failure while the toast fires once.
+      if (idx !== -1) {
+        emails = emails.map((email) =>
+          messageTabKey([email], selectedEmail) === key
+            ? { ...email, unread: wasUnreadInList }
+            : email
         );
-        await loadInboxes(true);
-        await updateUnreadByAddress();
-      });
+      }
+      revertFailedMark();
     });
-    await loadInboxes(true);
-    await updateUnreadByAddress();
   }
+  if (threadAddress && newlyUnread > 0) {
+    const badgeKey = unreadBadgeKey(threadAddress);
+    unreadByAddress = {
+      ...unreadByAddress,
+      [badgeKey]: (unreadByAddress[badgeKey] ?? 0) + newlyUnread,
+    };
+  }
+  if (mode === 'split') closeMessageTab(closingKey);
+  else selectedThread = [];
+  if (mode === 'page') currentView = 'mailbox';
 }
 
-async function deleteSelectedEmails(emailsToDelete: Email[]) {
-  if (emailsToDelete.length === 0) return;
-  const { updated } = await applyEmailLocalAction(ext, emailsToDelete, 'delete');
-  if (updated > 0) {
-    const ids = new Set(emailsToDelete.map((e) => e.id));
-    emails = emails.map((e) =>
-      ids.has(e.id) ? { ...e, local_deleted: true, local_deleted_at: Date.now() } : e
-    );
-    showToast($t('toasts.emailsDeleted', { values: { count: updated } }), 'deleted', () => {
-      void applyEmailLocalAction(ext, emailsToDelete, 'restore').then(async () => {
-        emails = emails.map((e) =>
-          ids.has(e.id) ? { ...e, local_deleted: false, local_deleted_at: undefined } : e
-        );
-        await loadInboxes(true);
-        await updateUnreadByAddress();
-      });
-    });
-    await loadInboxes(true);
-    await updateUnreadByAddress();
-  }
+function archiveSelectedThread(mode: 'split' | 'page') {
+  if (selectedThread.length === 0) return;
+  const thread = selectedThread;
+  void archiveSelectedEmails(thread).then(() => {
+    if (mode === 'page' && selectedThread.length === 0) currentView = 'mailbox';
+  });
 }
 
-async function restoreSelectedEmails(emailsToRestore: Email[]) {
-  if (emailsToRestore.length === 0) return;
-  const { updated } = await applyEmailLocalAction(ext, emailsToRestore, 'restore');
-  if (updated > 0) {
-    const ids = new Set(emailsToRestore.map((e) => e.id));
-    emails = emails.map((e) =>
-      ids.has(e.id)
-        ? {
-            ...e,
-            local_archived: false,
-            local_deleted: false,
-            local_archived_at: undefined,
-            local_deleted_at: undefined,
-          }
-        : e
-    );
-    showToast($t('toasts.emailsRestored', { values: { count: updated } }), 'success');
-    await loadInboxes(true);
-    await updateUnreadByAddress();
-  }
+function deleteSelectedThread(mode: 'split' | 'page') {
+  if (selectedThread.length === 0) return;
+  const thread = selectedThread;
+  void deleteSelectedEmails(thread).then(() => {
+    if (mode === 'page' && selectedThread.length === 0) currentView = 'mailbox';
+  });
 }
 
-async function openAddressView(account: Account) {
-  currentEmailDetail = account;
-  mailProviderSplitOpen = false;
-  splitSecondaryView = null;
-  expandSplitPane();
-  // Keep active selection aligned with the mailbox being inspected
-  // so "View emails in mailbox" and recent previews use the right data.
-  if (account.address && account.address !== selectedEmail) {
-    await selectAccount(account.address);
-  }
-  // Split view (≥1280): keep address list open + detail panel
-  currentView = layoutSplit || layoutVerticalSplit ? 'addresses' : 'addressView';
-  loading = true;
-  await checkMessages(account.id);
-  loading = false;
+function searchFromMessage(query: string) {
+  applySearchQuery(query);
+  currentView = 'mailbox';
 }
 
 async function autofillForm() {
@@ -1328,265 +1495,78 @@ async function autofillForm() {
 }
 
 /** After refresh: if current provider is down but another is up → toast + strip hint */
-let providerFailoverHint = $state<{
-  show: boolean;
-  otherProvidersOk: boolean;
-  nextRetryAt: number;
-  failCount: number;
-} | null>(null);
+let providerFailoverHint = $state<
+  import('@/features/address/provider-failover.js').FailoverState | null
+>(null);
 
-async function evaluateProviderFailoverAfterRefresh(inboxId: string) {
-  try {
-    const inbox =
-      allInboxes.find((a) => a.id === inboxId) || accounts.find((a) => a.id === inboxId);
-    if (!inbox?.provider) return;
-    const configs = loadAllProviderConfigs();
-    const currentCfg = configs[inbox.provider];
-    if (!currentCfg) return;
+$effect(() => {
+  void selectedEmail;
+  const address = allAddresses.find((item) => item.address === selectedEmail);
+  if (
+    !address?.mailboxRefreshFailure ||
+    (providerFailoverHint && providerFailoverHint.addressId !== address.id)
+  )
+    providerFailoverHint = null;
+});
 
-    // Ping current provider (all instances)
-    const currentInstances =
-      currentCfg.multiInstance?.enabled && Array.isArray(currentCfg.multiInstance.instances)
-        ? currentCfg.multiInstance.instances.map((i) => ({
-            id: i.id,
-            name: i.name || i.id,
-            displayName: i.displayName || i.name || i.id,
-            apiUrl: i.apiUrl || currentCfg.apiUrl,
-          }))
-        : [];
-    const currentPings = await pingProviderInstances(currentCfg, currentInstances);
-    let currentOk = [...currentPings.values()].some(
-      (p) => p !== 'timeout' && typeof p === 'number'
-    );
-
-    // Reliability graph: also treat low historical health as unavailable
-    try {
-      const { getProviderHealth, providerHealthScore } = await import(
-        '@/features/intelligence/provider-health.js'
-      );
-      const health = await getProviderHealth(inbox.provider);
-      const score = providerHealthScore(health);
-      if (health.fetchAttempts + health.createAttempts >= 3 && score < 30) {
-        currentOk = false;
-      } else if (score >= 55 && currentOk) {
-        providerFailoverHint = null;
-        return;
-      }
-    } catch {
-      /* optional */
-    }
-
-    if (currentOk) {
-      providerFailoverHint = null;
-      return;
-    }
-
-    // Probe other providers (ping + health rank)
-    let otherOk = false;
-    try {
-      const { rankProvidersByHealth } = await import('@/features/intelligence/provider-health.js');
-      const ids = Object.keys(configs).filter((id) => id !== inbox.provider && id !== 'demo');
-      const ranked = await rankProvidersByHealth(ids);
-      if (
-        ranked.some((r) => r.score >= 40 && r.health.fetchSuccesses + r.health.createSuccesses > 0)
-      ) {
-        otherOk = true;
-      }
-    } catch {
-      /* fall through to ping */
-    }
-
-    const failCount = (providerFailoverHint?.failCount || 0) + 1;
-    const nextRetryAt = Date.now() + 5 * 60 * 1000;
-    providerFailoverHint = {
-      show: true,
-      otherProvidersOk: otherOk,
-      nextRetryAt,
-      failCount,
-    };
-
-    if (otherOk) {
-      const msg = get(t)('toasts.providerUnavailable');
-      const actionLabel = get(t)('toasts.createWithOtherProvider');
-      toastStore.add(
-        'warning',
-        msg,
-        8000,
-        () => {
-          openCreateInboxDialog();
-        },
-        actionLabel
-      );
-    }
-  } catch (e) {
-    logDebug(`Provider failover eval failed: ${String(e)}`);
-  }
+async function evaluateProviderFailoverAfterRefresh(addressId: string) {
+  await evaluateProviderFailoverAction(
+    {
+      getAllAddresses: () => allAddresses,
+      getAccounts: () => accounts,
+      getCurrentAddressId: () =>
+        allAddresses.find((address) => address.address === selectedEmail)?.id,
+      getFailoverHint: () => providerFailoverHint,
+      setFailoverHint: (hint) => (providerFailoverHint = hint),
+      openCreateAddressDialog: () => openCreateAddressDialog(),
+      showWarningToast: (msg, actionLabel, onAction) =>
+        toastStore.add('warning', msg, 8000, onAction, actionLabel),
+      getTranslation: translate,
+    },
+    addressId
+  );
 }
 
 // --- Settings view ---
-let autoCopy = $state(false);
-/** Auto-renew is ON by default so every new inbox survives expiry out of the box. */
-let autoRenew = $state(true);
-let selectedProvider = $state('');
-let providerInstances: ProviderInstance[] = $state([]);
-let selectedProviderInstance = $state<string | null>(null);
-let loadingProviderInstances = $state(false);
-let savingSettings = $state<boolean>(false);
-let settingsLoading = $state<boolean>(false);
-let _showCustomInstanceForm = $state<boolean>(false);
-let _customInstanceName = $state<string>('');
-let _customInstanceUrl = $state<string>('');
-let customColor = $state<string>('');
-let inboxColorThemeEnabled = $state(false);
-let showDeveloperSettings = $state(false);
-let enableLogging = $state(false);
-let emailRetentionDays = $state(30);
-let faviconCaching = $state<'direct' | 'local'>('local');
+const autoCopy = $derived(settings.autoCopy);
+const autoRenew = $derived(settings.autoRenew);
+const autoRenewWindowMinutes = $derived(settings.autoRenewWindowMinutes);
+const selectedProvider = $derived(settings.selectedProvider);
+const providerInstances = $derived(settings.providerInstances);
+const selectedProviderInstance = $derived(settings.selectedProviderInstance);
+const savingSettings = $derived(settings.savingSettings);
+const settingsLoading = $derived(settings.settingsLoading);
+const customColor = $derived(settings.customColor);
+const globalZoomEnabled = $derived(settings.globalZoomEnabled);
+const addressColorThemeEnabled = $derived(settings.addressColorThemeEnabled);
+const showDeveloperSettings = $derived(settings.showDeveloperSettings);
+const enableLogging = $derived(settings.enableLogging);
+const emailRetentionDays = $derived(settings.emailRetentionDays);
+const faviconCaching = $derived(settings.faviconCaching);
+const notificationsEnabled = $derived(settings.notificationsEnabled);
+const soundEnabled = $derived(settings.soundEnabled);
+const expiryWarningThreshold = $derived(settings.expiryWarningThreshold);
+const keybindings = $derived(settings.keybindings);
+const emailPreviewMode = $derived(settings.emailPreviewMode);
+const defaultDomain = $derived(settings.defaultDomain);
 
-let inboxColors = $state<Record<string, string>>({});
-
-function hslToHex(h: number, s: number, l: number): string {
-  l /= 100;
-  const a = (s * Math.min(l, 1 - l)) / 100;
-  const f = (n: number) => {
-    const k = (n + h / 30) % 12;
-    const color = l - a * Math.max(Math.min(k - 3, 9 - k, 1), -1);
-    return Math.round(255 * color)
-      .toString(16)
-      .padStart(2, '0');
-  };
-  return `#${f(0)}${f(8)}${f(4)}`;
-}
-
-function hexToHue(hex: string): number | null {
-  if (!hex || hex.length < 7) return null;
-  const r = parseInt(hex.slice(1, 3), 16) / 255;
-  const g = parseInt(hex.slice(3, 5), 16) / 255;
-  const b = parseInt(hex.slice(5, 7), 16) / 255;
-  const max = Math.max(r, g, b);
-  const min = Math.min(r, g, b);
-  const d = max - min;
-  if (d === 0) return 0;
-  let h = 0;
-  switch (max) {
-    case r:
-      h = (g - b) / d + (g < b ? 6 : 0);
-      break;
-    case g:
-      h = (b - r) / d + 2;
-      break;
-    case b:
-      h = (r - g) / d + 4;
-      break;
-  }
-  return Math.round(h * 60);
-}
-
-/**
- * Per-inbox accent is keyed by stable inbox **id** (not address) so domain
- * changes never reassign or regenerate the color.
- */
-function getInboxColor(address: string, inboxId?: string): string {
-  if (!address && !inboxId) return customColor || '#4c662b';
-  const idKey = inboxId || '';
-  // Prefer id key; fall back to legacy address key once, then migrate to id
-  if (idKey && inboxColors[idKey]) {
-    return inboxColors[idKey];
-  }
-  if (address && inboxColors[address]) {
-    const legacy = inboxColors[address];
-    if (idKey) {
-      const next = { ...inboxColors, [idKey]: legacy };
-      delete next[address];
-      inboxColors = next;
-      void browser.storage.local.set({ inboxColors: next });
-    }
-    return legacy;
-  }
-
-  // Generate a random hue that doesn't conflict with existing active colors
-  const activeHues = Object.values(inboxColors)
-    .map(hexToHue)
-    .filter((h) => h !== null) as number[];
-
-  let chosenHue = Math.floor(Math.random() * 360);
-  let attempts = 0;
-
-  while (attempts < 100) {
-    const isTooClose = activeHues.some((h) => {
-      const diff = Math.abs(h - chosenHue) % 360;
-      const shortest = diff > 180 ? 360 - diff : diff;
-      return shortest < 30; // at least 30 degrees apart
-    });
-
-    if (!isTooClose) {
-      break;
-    }
-    chosenHue = Math.floor(Math.random() * 360);
-    attempts++;
-  }
-
-  const generatedColor = hslToHex(chosenHue, 60, 45);
-  const key = idKey || address;
-  inboxColors = { ...inboxColors, [key]: generatedColor };
-  void browser.storage.local.set({ inboxColors: { ...inboxColors } });
-  return generatedColor;
-}
-
-/** When an address is rewritten (domain change), keep the same accent under the id. */
-function migrateInboxColorOnAddressChange(
-  inboxId: string | undefined,
-  prevAddress: string,
-  nextAddress: string
-) {
-  if (!prevAddress || prevAddress === nextAddress) return;
-  const color = (inboxId && inboxColors[inboxId]) || inboxColors[prevAddress] || null;
-  if (!color) return;
-  const next = { ...inboxColors };
-  if (inboxId) next[inboxId] = color;
-  // Drop legacy address key so a new domain does not pick up a wrong color later
-  delete next[prevAddress];
-  // Do not write nextAddress as a key — id is the stable key
-  inboxColors = next;
-  void browser.storage.local.set({ inboxColors: next });
-}
+let addressColors = $state<Record<string, string>>({});
 
 async function loadSettings() {
-  await loadSettingsAction(
-    ext,
-    {
-      autoCopy,
-      autoRenew,
-      selectedProvider,
-      providerInstances,
-      selectedProviderInstance,
-      customColor,
-      showDeveloperSettings,
-      enableLogging,
-      savingSettings,
-      settingsLoading,
-      emailRetentionDays,
-      faviconCaching,
-      notificationsEnabled,
-      soundEnabled,
-      expiryWarningThreshold,
-      keybindings,
-      autoRefreshInterval,
-      emailPreviewEnabled,
-      defaultDomain,
-    },
-    settingsSetters
-  );
+  await settingsController.load(settingsState());
   try {
-    const res = (await browser.storage.local.get(['inboxColorThemeEnabled', 'inboxColors'])) as {
-      inboxColorThemeEnabled?: boolean;
-      inboxColors?: Record<string, string>;
+    const res = (await browser.storage.local.get([
+      'addressColorThemeEnabled',
+      'addressColors',
+    ])) as {
+      addressColorThemeEnabled?: boolean;
+      addressColors?: Record<string, string>;
     };
-    if (res.inboxColorThemeEnabled !== undefined) {
-      inboxColorThemeEnabled = res.inboxColorThemeEnabled;
+    if (res.addressColorThemeEnabled !== undefined) {
+      settingsDomainSetters.setAddressColorThemeEnabled(res.addressColorThemeEnabled);
     }
-    if (res.inboxColors) {
-      inboxColors = res.inboxColors;
+    if (res.addressColors) {
+      addressColors = res.addressColors;
     }
   } catch (error) {
     logError('Failed to load inbox color theme settings', error);
@@ -1603,43 +1583,31 @@ async function loadSettings() {
   }
 }
 
-async function removeFromAutofillBlocklist(domain: string) {
-  const updated = autofillBlocklist.filter((d) => d !== domain);
-  autofillBlocklist = updated;
-  await browser.storage.local.set({ autofillBlocklist: updated });
-  showToast($t('settings.domainRemovedFromBlocklist', { values: { domain } }), 'success');
-}
-
-async function addToAutofillBlocklistSetting(domain: string) {
-  const cleaned = domain
-    .trim()
-    .toLowerCase()
-    .replace(/^https?:\/\//, '')
-    .split('/')[0];
-  if (!cleaned) return;
-  if (autofillBlocklist.includes(cleaned)) {
-    showToast($t('settings.blocklistAlreadyAdded'), 'info');
-    return;
-  }
-  const updated = [...autofillBlocklist, cleaned];
-  autofillBlocklist = updated;
-  await browser.storage.local.set({ autofillBlocklist: updated });
-  showToast($t('settings.blocklistAdded', { values: { domain: cleaned } }), 'success');
-}
+const blocklistSettingsDeps = {
+  showToast,
+  getTranslation: translate,
+  onBlocklistChanged: (list: string[]) => (autofillBlocklist = list),
+};
+const removeFromAutofillBlocklist = (domain: string) =>
+  removeFromAutofillBlocklistSetting(blocklistSettingsDeps, domain);
+const addToAutofillBlocklistSetting = (domain: string) =>
+  addToAutofillBlocklistSettingAction(blocklistSettingsDeps, domain);
+const toggleAutofillBlocklistSetting = (domain: string) =>
+  toggleAutofillBlocklistSettingAction(blocklistSettingsDeps, domain);
 
 async function setSelectedIdentity(id: string | null) {
   selectedIdentityId = id;
   try {
-    await browser.storage.local.set({ selectedIdentityId: id });
+    await writeWithRetry({ selectedIdentityId: id });
   } catch (error) {
     logError('Failed to save selected identity', error);
   }
 }
 
 async function updateAutoRefreshInterval(intervalMs: number) {
-  autoRefreshInterval = intervalMs;
+  settingsDomainSetters.setAutoRefreshInterval(intervalMs);
   try {
-    await browser.storage.local.set({ autoRefreshInterval: intervalMs });
+    await writeWithRetry({ autoRefreshInterval: intervalMs });
     await browser.runtime.sendMessage({ type: 'updateRefreshInterval', intervalMs });
   } catch (error) {
     logError('Failed to update auto-refresh interval', error);
@@ -1651,7 +1619,10 @@ async function copyOtpFromMessage(otp: string) {
   try {
     await copyToClipboardAndSchedulePurge(otp);
     showToast($t('inbox.otpCopied'));
-    await markOtpEmailRead(otp);
+    const marked = await markOtpEmailRead(otp);
+    if (!marked) {
+      showToast($t('toasts.operationFailed'), 'error');
+    }
 
     // Automation Rule: Auto-Archive on OTP copy
     try {
@@ -1674,92 +1645,20 @@ async function copyOtpFromMessage(otp: string) {
 }
 
 async function saveSettings() {
-  await saveSettingsAction(
-    ext,
-    {
-      autoCopy,
-      autoRenew,
-      selectedProvider,
-      providerInstances,
-      selectedProviderInstance,
-      customColor,
-      showDeveloperSettings,
-      enableLogging,
-      savingSettings,
-      settingsLoading,
-      emailRetentionDays,
-      faviconCaching,
-      notificationsEnabled,
-      soundEnabled,
-      expiryWarningThreshold,
-      keybindings,
-      autoRefreshInterval,
-      emailPreviewEnabled,
-      defaultDomain,
-    },
-    settingsSetters
-  );
+  await settingsController.save(settingsState());
 }
 
 async function toggleDeveloperSettings() {
-  await toggleDeveloperSettingsAction(
-    ext,
-    {
-      autoCopy,
-      autoRenew,
-      selectedProvider,
-      providerInstances,
-      selectedProviderInstance,
-      customColor,
-      showDeveloperSettings,
-      enableLogging,
-      savingSettings,
-      settingsLoading,
-      emailRetentionDays,
-      faviconCaching,
-      notificationsEnabled,
-      soundEnabled,
-      expiryWarningThreshold,
-      keybindings,
-      autoRefreshInterval,
-      emailPreviewEnabled,
-      defaultDomain,
-    },
-    settingsSetters
-  );
+  await settingsController.toggleDeveloperSettings(settingsState());
 }
 
 async function toggleEnableLogging() {
-  await toggleEnableLoggingAction(
-    ext,
-    {
-      autoCopy,
-      autoRenew,
-      selectedProvider,
-      providerInstances,
-      selectedProviderInstance,
-      customColor,
-      showDeveloperSettings,
-      enableLogging,
-      savingSettings,
-      settingsLoading,
-      emailRetentionDays,
-      faviconCaching,
-      notificationsEnabled,
-      soundEnabled,
-      expiryWarningThreshold,
-      keybindings,
-      autoRefreshInterval,
-      emailPreviewEnabled,
-      defaultDomain,
-    },
-    settingsSetters
-  );
+  await settingsController.toggleEnableLogging(settingsState());
 }
 
 async function handleProviderChange(provider: string) {
-  await handleProviderChangeAction(ext, provider, settingsSetters);
-  // Switching providers reloads inboxes with a different provider's accounts.
+  await settingsController.handleProviderChange(provider);
+  // Switching providers reloads addresses with a different provider's accounts.
   // Clear any thread/detail referencing the old provider's email IDs so MailView
   // doesn't render stale content and activeViewForExpand doesn't report a
   // message view that no longer belongs to a visible inbox.
@@ -1771,87 +1670,70 @@ async function handleProviderChange(provider: string) {
 }
 
 async function saveAutoCopy() {
-  await saveAutoCopyAction(ext, autoCopy);
+  await settingsController.saveAutoCopy(autoCopy);
   showToast($t('toasts.autoCopyToggled', { values: { state: autoCopy ? 'enabled' : 'disabled' } }));
 }
 
 async function saveAutoRenew() {
-  await saveAutoRenewAction(ext, autoRenew);
+  await settingsController.saveAutoRenew(autoRenew);
   showToast(
     $t('toasts.autoRenewToggled', { values: { state: autoRenew ? 'enabled' : 'disabled' } })
   );
 }
 
+async function saveAutoRenewWindowMinutes() {
+  await settingsController.saveAutoRenewWindowMinutes(autoRenewWindowMinutes);
+}
+
+async function saveAutoRenewScope() {
+  await settingsController.saveAutoRenewScope(settings.autoRenewScope);
+}
+
 async function handleColorChange(color: string) {
-  customColor = color;
-  await handleColorChangeAction(ext, color);
+  settingsDomainSetters.setCustomColor(color);
+  await settingsController.handleColorChange(color);
   applyCustomColor(color);
 }
 
 async function changeProvider(provider: string) {
-  await changeProviderAction(ext, provider, settingsSetters);
+  await settingsController.changeProvider(provider);
 }
 
 async function loadProviderInstances() {
-  await loadProviderInstancesAction(ext, settingsSetters);
+  await settingsController.loadProviderInstances();
 }
 
 async function setProviderInstance(instanceId: string) {
-  await setProviderInstanceAction(instanceId, ext, settingsSetters);
+  await settingsController.setProviderInstance(instanceId);
 }
 
 async function addCustomInstance(name: string, url: string) {
-  await addCustomInstanceAction(ext, name, url, settingsSetters);
+  await settingsController.addCustomInstance(name, url);
 }
 
 async function hardReset() {
-  await hardResetAction(ext, settingsSetters);
+  await settingsController.hardReset();
 }
 
-let showExportBackupDialog = $state(false);
-let showImportBackupDialog = $state(false);
-let productTourOpen = $state(false);
+const overlayState = overlays as OverlayState;
 
-async function startProductTour() {
-  // Never start tour without at least one mailbox (targets live on main inbox UI)
-  if (!allInboxes.length && !accounts.length) {
-    try {
-      await clearPendingProductTour();
-    } catch {
-      /* ignore */
-    }
-    return;
-  }
-  currentView = 'mailbox';
-  productTourOpen = true;
-}
+const productTourDeps = {
+  showToast,
+  getTranslation: translate,
+  // The product tour navigates to a catalog View, so the compiler checks what it
+  // asks for - no cast is needed once the callback says what it accepts.
+  setCurrentView: (view: View) => {
+    currentView = view;
+  },
+  setProductTourOpen: (open: boolean) => overlaySetters.setProductTourOpen(open),
+  getAllAddresses: () => allAddresses,
+  getAccounts: () => accounts,
+};
+const startProductTour = () => startProductTourAction(productTourDeps);
+const finishProductTour = () => finishProductTourAction(productTourDeps);
+const skipProductTour = () => skipProductTourAction(productTourDeps);
 
-async function finishProductTour() {
-  productTourOpen = false;
-  try {
-    await markProductTourCompleted();
-    await clearPendingProductTour();
-  } catch {
-    /* ignore */
-  }
-  // Keep demo mode on after tour — users exit via banner/settings only
-  currentView = 'mailbox';
-  showToast($t('productTour.completedToast'), 'success');
-}
-
-async function skipProductTour() {
-  productTourOpen = false;
-  try {
-    await markProductTourCompleted();
-    await clearPendingProductTour();
-  } catch {
-    /* ignore */
-  }
-  // Do not auto-exit demo mode
-  currentView = 'mailbox';
-}
-
-/** Open mail provider settings — prefer split pane when wide layout is active */
+/** Open mail provider settings - prefer split pane when wide layout is active */
 function openMailProviderSettings() {
   if (layoutSplit || layoutVerticalSplit) {
     // Keep current list/settings in mainview; open provider form in split
@@ -1873,25 +1755,24 @@ function openMailProviderSettings() {
 }
 
 function exportData() {
-  showExportBackupDialog = true;
+  overlaySetters.setShowExportBackupDialog(true);
 }
 
 function importData() {
-  showImportBackupDialog = true;
+  overlaySetters.setShowImportBackupDialog(true);
 }
 
 /** Demo mode banner (isolated from real data) */
-let demoModeActive = $state(false);
 $effect(() => {
   void browser.storage.local.get(['demoMode']).then((r) => {
-    demoModeActive = !!(r as { demoMode?: boolean }).demoMode;
+    overlaySetters.setDemoModeActive(!!(r as { demoMode?: boolean }).demoMode);
   });
   const onCh = (changes: Record<string, { newValue?: unknown }>, area: string) => {
     if (area !== 'local') return;
     if (changes.demoMode) {
-      demoModeActive = !!changes.demoMode.newValue;
+      overlaySetters.setDemoModeActive(!!changes.demoMode.newValue);
       // Force UI bag reload when entering/exiting demo so real vs demo never mix on screen
-      void loadInboxes(false);
+      void loadAddresses(false);
     }
   };
   browser.storage.onChanged.addListener(onCh);
@@ -1948,58 +1829,52 @@ async function loadLoginInfo() {
 // --- Archived Emails view ---
 let archivedEmails = $state<Email[]>([]);
 let archivedSearch = $state<string>('');
-let filteredArchivedEmails = $derived(
-  archivedEmails.filter(
-    (e) =>
-      archivedSearch === '' ||
-      e.subject?.toLowerCase().includes(archivedSearch.toLowerCase()) ||
-      e.from?.toLowerCase().includes(archivedSearch.toLowerCase())
-  )
-);
-let _currentMessage = $state<Email | null>(null);
-let _currentArchivedEmail = $state<Email | null>(null);
-let _qrCanvasRef = $state<HTMLCanvasElement | null>(null);
-let _qrDialogRef = $state<HTMLElement | null>(null);
-let _toastDialogRef = $state<HTMLElement | null>(null);
-
-async function _loadArchivedEmails() {
-  await loadArchivedEmailsAction(ext, archivedSetters);
-}
-
-async function _restoreArchivedEmail(email: Email) {
-  await restoreArchivedInboxAction(ext, email, { archivedEmails }, archivedSetters);
-}
-
 async function deleteArchivedEmail(email: Email) {
   await deleteArchivedEmailAction(ext, email, { archivedEmails }, archivedSetters);
 }
 
 // --- QR Code dialog ---
-let qrDialogOpen = $state(false);
-let qrCanvas = $state<HTMLCanvasElement | null>(null);
-let qrDialogElement = $state<HTMLElement | null>(null);
-let previousFocusElement = $state<HTMLElement | null>(null);
-let qrOpenTimerId = $state<ReturnType<typeof setTimeout> | null>(null);
-
 // Lazy-load QrDialog component (saves ~200 KB of qrcode + component code from
-// the main bundle — only loaded when the user opens the QR dialog)
-let QrDialogComponent: typeof import('@/ui/blocks/dialogs/QrDialog.svelte')['default'] | null =
-  $state(null);
+// the main bundle - only loaded when the user opens the QR dialog)
 let _qrDialogLoadStarted = false;
 $effect(() => {
-  if (qrDialogOpen && !QrDialogComponent && !_qrDialogLoadStarted) {
+  if (overlayState.qrDialogOpen && !overlayState.QrDialogComponent && !_qrDialogLoadStarted) {
     _qrDialogLoadStarted = true;
     void import('@/ui/blocks/dialogs/QrDialog.svelte').then((m) => {
-      QrDialogComponent = m.default;
+      overlaySetters.setQrDialogComponent(m.default);
+    });
+  }
+});
+
+// --- Backup / export dialogs ---
+// Lazy-load the three backup dialogs (same pattern as QrDialog). Their
+// dependency cluster (backup-actions, webdav-sync, the export MIME builder)
+// is heavy and only needed once a dialog is actually opened. Triggering on
+// the open flags covers every opener path: settings menus, onboarding's
+// import shortcut, and the popup→app import handoff flags.
+let _backupDialogsLoadStarted = false;
+$effect(() => {
+  const needed =
+    overlayState.exportWizardOpen ||
+    overlayState.showExportBackupDialog ||
+    overlayState.showImportBackupDialog;
+  if (needed && !_backupDialogsLoadStarted) {
+    _backupDialogsLoadStarted = true;
+    void Promise.all([
+      import('@/ui/blocks/dialogs/ExportWizardDialog.svelte'),
+      import('@/ui/blocks/dialogs/ExportBackupDialog.svelte'),
+      import('@/ui/blocks/dialogs/ImportBackupDialog.svelte'),
+    ]).then(([wizard, exportBackup, importBackup]) => {
+      overlaySetters.setExportWizardDialogComponent(wizard.default);
+      overlaySetters.setExportBackupDialogComponent(exportBackup.default);
+      overlaySetters.setImportBackupDialogComponent(importBackup.default);
     });
   }
 });
 
 // --- Create Inbox dialog ---
-let createInboxDialogOpen = $state(false);
 let pendingCreateProvider = $state<string | undefined>(undefined);
 let pendingCreateInstanceId = $state<string | undefined>(undefined);
-let pendingCreateProviderConfig = $state<ProviderConfig | undefined>(undefined);
 /** Highlight a newly created address on the Addresses page */
 let highlightAddress = $state<string | null>(null);
 let highlightAddressTimer: ReturnType<typeof setTimeout> | null = null;
@@ -2024,210 +1899,124 @@ function isOnAddressesPage(): boolean {
   return currentView === 'addresses';
 }
 
-async function createInbox(
-  provider: string | undefined = undefined,
-  instanceId: string | undefined = undefined,
-  emailUser: string | undefined = undefined,
-  preferredDomain: string | undefined = undefined
-): Promise<string | null> {
-  // Demo isolation: never hit real providers while demoMode is on
-  try {
-    const { isDemoMode, createDemoInbox } = await import('@/features/demo/demo-mode.js');
-    if (await isDemoMode(ext)) {
-      const addr = await createDemoInbox(ext, emailUser);
-      await loadInboxes(false);
-      if (addr) {
-        selectedEmail = addr;
-        displayedEmail = addr;
-        showToast($t('toasts.newInboxCreated'), 'success');
-      }
-      return addr;
-    }
-  } catch {
-    /* fall through to real create */
-  }
-  const fromAddresses = isOnAddressesPage();
-  inboxActions.setSkipEmailSelection(true);
-  let createdAddr = await createInboxAction(ext, inboxSetters, provider, instanceId, emailUser, {
-    skipToast: fromAddresses,
-  });
-  // After create: try to inject/rescan the active tab (site may already be open)
-  try {
-    await browser.runtime.sendMessage({ type: 'ensureActiveTabAutofill' });
-  } catch {
-    /* background may be waking */
-  }
-
-  // Apply preferred multi-domain only to the NEWLY created inbox.
-  // Never fall back to activeInboxId / list.length-1 — those can point at an
-  // existing mailbox when create failed or another provider is unavailable.
-  if (preferredDomain && createdAddr) {
-    try {
-      const result = (await ext.storage.local.get(['inboxes'])) as {
-        inboxes?: Account[];
-      };
-      const list = result.inboxes || [];
-      // Match by exact created address only (never rewrite unrelated inboxes)
-      const idx = list.findIndex((i) => i.address === createdAddr);
-      if (idx >= 0 && list[idx]?.address) {
-        const prevAddr = list[idx].address;
-        const user = prevAddr.split('@')[0];
-        const nextAddr = `${user}@${preferredDomain}`;
-        // Skip if already on preferred domain or domain not valid for this provider
-        let domains: string[] = [];
-        try {
-          domains = loadProviderConfig(list[idx].provider).multiDomain?.domains || [];
-        } catch {
-          /* ignore */
-          domains = [];
-        }
-        if (domains.includes(preferredDomain) && prevAddr !== nextAddr) {
-          list[idx] = { ...list[idx], address: nextAddr, emailUser: user };
-          await setInboxes(list);
-          await ext.storage.local.set({ activeInboxId: list[idx].id });
-          await migrateEmailBags(ext, prevAddr, nextAddr);
-          selectedEmail = nextAddr;
-          createdAddr = nextAddr;
-          const di = domains.indexOf(preferredDomain);
-          if (di >= 0) {
-            await ext.storage.local.set({
-              [domainIndexKey(list[idx].provider, user)]: di,
-            });
-          }
-          await loadInboxes(true);
-          selectedEmail = nextAddr;
-        }
-      }
-    } catch (e) {
-      logDebug(`Could not apply preferred domain: ${String(e)}`);
-    }
-  }
-  inboxActions.setSkipEmailSelection(false);
-
-  if (fromAddresses && createdAddr) {
-    setHighlightAddress(createdAddr);
-    showToast(
-      $t('toasts.newInboxCreated'),
-      'success',
-      () => {
-        currentView = 'mailbox';
-      },
-      $t('toasts.goToMailbox')
-    );
-  }
-  return createdAddr;
-}
-
-function openCreateInboxDialog(
-  provider: string | undefined = undefined,
-  instanceId: string | undefined = undefined
-) {
-  // Resolve the instanceId: use the passed instanceId, or fall back to selectedProviderInstance
-  const resolvedProvider = provider || selectedProvider || undefined;
-  const resolvedInstanceId =
-    instanceId ||
-    (selectedProviderInstance && selectedProviderInstance !== 'random'
-      ? selectedProviderInstance
-      : undefined);
-
-  // Use JSON config to decide if a custom username dialog is needed
-  if (resolvedProvider) {
-    try {
-      const config = loadProviderConfig(resolvedProvider);
-      const supportsCustom =
-        config.capabilities?.supportsCustomEmail ?? config.customEmail?.supported;
-      if (!supportsCustom) {
-        createInbox(resolvedProvider, resolvedInstanceId);
-        return;
-      }
-    } catch (error) {
-      logDebug(`Could not load provider config for ${resolvedProvider}: ${String(error)}`);
-      // Unknown provider, fall through to dialog
-    }
-  }
-  // Store pending provider/instance so handleCreateInbox can use them
-  pendingCreateProvider = resolvedProvider;
-  pendingCreateInstanceId = resolvedInstanceId;
-  pendingCreateProviderConfig = resolvedProvider ? loadProviderConfig(resolvedProvider) : undefined;
-  createInboxDialogOpen = true;
-}
-
-async function handleCreateInboxWithProvider(
-  provider: string | undefined = undefined,
-  instanceId: string | undefined = undefined
-) {
-  // Use JSON config to decide if a custom username dialog is needed
-  if (provider) {
-    try {
-      const config = loadProviderConfig(provider);
-      const supportsCustom =
-        config.capabilities?.supportsCustomEmail ?? config.customEmail?.supported;
-      if (!supportsCustom) {
-        await createInbox(provider, instanceId);
-        return;
-      }
-    } catch (error) {
-      logDebug(`Could not load provider config for ${provider}: ${String(error)}`);
-      // Unknown provider, fall through to dialog
-    }
-  }
-  // For providers with customEmail.supported, show dialog
-  openCreateInboxDialog(provider, instanceId);
-}
-
-async function handleCreateInbox(
-  type: 'random' | 'custom',
-  username: string | undefined = undefined,
-  domain: string | undefined = undefined
-) {
-  createInboxDialogOpen = false;
-  const provider = pendingCreateProvider;
-  const instanceId = pendingCreateInstanceId;
-  pendingCreateProvider = undefined;
-  pendingCreateInstanceId = undefined;
-  if (type === 'random') {
-    await createInbox(provider, instanceId, undefined, domain);
-  } else {
-    await createInbox(provider, instanceId, username, domain);
-  }
-}
-
-function openQrDialog() {
-  qrOpenTimerId = openQrDialogAction(
-    displayedEmail || selectedEmail,
-    { qrDialogOpen, qrCanvas, qrDialogElement, previousFocusElement, customColor },
-    qrSetters,
-    setupFocusTrap
-  );
+function openQrDialog(email?: string) {
+  qrDialogEmail = email || null;
+  openQrDialogAction(qrSetters);
 }
 
 function closeQrDialog() {
-  closeQrDialogAction(
-    focusTrapCleanup,
-    { qrDialogOpen, qrCanvas, qrDialogElement, previousFocusElement, customColor },
-    qrSetters,
-    qrOpenTimerId
-  );
-  qrOpenTimerId = null;
+  closeQrDialogAction(qrSetters, overlayState.qrOpenTimerId);
+  overlaySetters.setQrOpenTimerId(null);
+  qrDialogEmail = null;
 }
 
 function downloadQrCode() {
-  downloadQrCodeAction(qrCanvas, displayedEmail || selectedEmail, (message) => showToast(message));
+  downloadQrCodeAction(
+    overlayState.qrCanvas,
+    qrDialogEmail || displayedEmail || selectedEmail,
+    (message) => showToast(message)
+  );
 }
 
 async function copyQrImage() {
-  await copyQrImageAction(qrCanvas, (message, type) => showToast(message, type));
+  await copyQrImageAction(overlayState.qrCanvas, (message, type) => showToast(message, type));
 }
 
 // --- Message detail ---
 let selectedThread = $state<Email[]>([]);
+// Per-app session state; closing tabs releases their message/scroll snapshots.
+let messageTabs = $state<MessageTabsState>({ tabs: [], activeKey: '' });
+const activeMessageTabKey = $derived(messageTabKey(selectedThread, selectedEmail));
+
+// Handoffs and the existing keyboard controller can select a thread directly.
+$effect(() => {
+  const thread = selectedThread;
+  const owner = thread[0]?.original_inbox || selectedEmail;
+  if (!(layoutSplit || layoutVerticalSplit) || !thread.length) return;
+  untrack(() => {
+    const key = messageTabKey(thread, owner);
+    if (!messageTabs.tabs.some((tab) => tab.key === key))
+      messageTabs = openMessageTab(messageTabs, thread, owner);
+  });
+});
+
+// Inbox deletion (including from another extension surface) releases its tabs.
+$effect(() => {
+  const owners = new Set(
+    allAddresses
+      .filter((address) => address.accountStatus !== 'deleted')
+      .map((address) => address.address.toLowerCase())
+  );
+  untrack(() => {
+    const removed = new Set(
+      messageTabs.tabs
+        .filter((tab) => !owners.has(tab.mailboxAddress.toLowerCase()))
+        .map((tab) => tab.key)
+    );
+    if (removed.size) removeOpenedMessageTabs(removed);
+  });
+});
+
+// Storage refreshes can remove messages from another popup/app context.
+$effect(() => {
+  const bags = allStoredEmails;
+  untrack(() => {
+    const removed = new Set<string>();
+    for (const tab of messageTabs.tabs) {
+      const bag = bags[resolveBagKey(bags, tab.mailboxAddress)];
+      if (!bag) continue;
+      const current = bag.find((email) => messageTabKey([email], tab.mailboxAddress) === tab.key);
+      const opened = tab.thread[0];
+      if (
+        current?.local_deleted ||
+        (!opened?.local_archived && (!current || current.local_archived))
+      )
+        removed.add(tab.key);
+    }
+    if (removed.size) removeOpenedMessageTabs(removed);
+  });
+});
+
+function selectMessageTab(key: string) {
+  const tab = messageTabs.tabs.find((item) => item.key === key);
+  if (tab) openMessageDetail(tab.thread);
+}
+
+function removeOpenedMessageTabs(keys: Set<string>) {
+  const wasActive = keys.has(activeMessageTabKey);
+  messageTabs = removeMessageTabs({ ...messageTabs, activeKey: activeMessageTabKey }, keys);
+  if (wasActive) {
+    const next = messageTabs.tabs.find((tab) => tab.key === messageTabs.activeKey);
+    if (next) openMessageDetail(next.thread);
+    else selectedThread = [];
+  }
+}
+
+function closeMessageTab(key: string) {
+  removeOpenedMessageTabs(new Set([key]));
+}
+
+function onMessageScroll(key: string, scrollTop: number) {
+  messageTabs = rememberMessageScroll(messageTabs, key, scrollTop);
+}
 
 function openMessageDetail(thread: Email[]) {
+  if (!thread.length) return;
+  const outgoing = document.querySelector<HTMLElement>(
+    '[data-message-tab-panel] [data-message-scroll]'
+  );
+  if (outgoing?.dataset.messageScrollKey)
+    onMessageScroll(outgoing.dataset.messageScrollKey, outgoing.scrollTop);
+  const threadAddress = thread[0].original_inbox || selectedEmail;
+  if (layoutSplit || layoutVerticalSplit) {
+    messageTabs = openMessageTab(messageTabs, thread, threadAddress);
+    thread = messageTabs.tabs.find((tab) => tab.key === messageTabs.activeKey)?.thread || thread;
+  }
   const unreadInThread = thread.filter((m) => m.unread).length;
   selectedThread = thread;
   mailProviderSplitOpen = false;
   splitSecondaryView = null;
-  // Leaving the address detail view (email-detail of an account) — clear the
+  // Leaving the address detail view (email-detail of an account) - clear the
   // stale account so activeViewForExpand / split routing don't see a dangling
   // currentEmailDetail while the message thread is shown.
   currentEmailDetail = null;
@@ -2236,231 +2025,286 @@ function openMessageDetail(thread: Email[]) {
   currentView = layoutSplit || layoutVerticalSplit ? 'mailbox' : 'mailView';
 
   // Mark every email in the thread as read
+  let failedMarks = 0;
+  const revertFailedMark = () => {
+    failedMarks += 1;
+    if (failedMarks === 1) {
+      showToast($t('toasts.operationFailed'), 'error');
+    }
+    if (threadAddress) {
+      const badgeKey = unreadBadgeKey(threadAddress);
+      unreadByAddress = {
+        ...unreadByAddress,
+        [badgeKey]: (unreadByAddress[badgeKey] ?? 0) + 1,
+      };
+    }
+  };
   for (const message of thread) {
     if (!message.unread) continue;
     message.unread = false;
-    void persistEmailRead(message);
     // Update emails array to reflect read state (trigger reactivity)
-    const emailIndex = emails.findIndex((e) => e.id === message.id);
+    const messageKey = messageTabKey([message], threadAddress);
+    const emailIndex = emails.findIndex(
+      (email) => messageTabKey([email], selectedEmail) === messageKey
+    );
+    const wasUnreadInList = emailIndex !== -1 ? emails[emailIndex].unread : true;
     if (emailIndex !== -1) {
       emails = emails.map((e, i) => (i === emailIndex ? { ...e, unread: false } : e));
     }
+    void persistEmailRead(message).then((ok) => {
+      if (ok) return;
+      // Storage write failed - revert the optimistic update so the row does
+      // not lie about being read; the badge increment above is undone per
+      // failure while the toast fires only once per thread.
+      message.unread = true;
+      if (emailIndex !== -1) {
+        emails = emails.map((email) =>
+          messageTabKey([email], selectedEmail) === messageKey
+            ? { ...email, unread: wasUnreadInList }
+            : email
+        );
+      }
+      revertFailedMark();
+    });
   }
   // Immediately decrement footer badge - don't wait for next storage poll
-  if (selectedEmail && unreadByAddress[selectedEmail] > 0) {
+  const badgeKey = unreadBadgeKey(threadAddress);
+  if (threadAddress && (unreadByAddress[badgeKey] ?? 0) > 0) {
     unreadByAddress = {
       ...unreadByAddress,
-      [selectedEmail]: Math.max(0, unreadByAddress[selectedEmail] - unreadInThread),
+      [badgeKey]: Math.max(0, unreadByAddress[badgeKey] - unreadInThread),
     };
   }
 }
 
 // --- Remove account (delete inbox) ---
-async function removeAccount(address: string) {
-  const account = allInboxes.find((a) => a.address === address);
+async function removeAddress(address: string) {
+  const account = allAddresses.find(
+    (item) => (item.address || '').toLowerCase() === address.toLowerCase()
+  );
   if (!account) return;
-  const addrLower = account.address.toLowerCase();
-  const linkedLogins = (savedLogins || []).filter(
-    (l) => (l.email || '').toLowerCase() === addrLower
-  );
-  const linkedIdentities = (identities || []).filter(
-    (id) =>
-      (id.preferredEmail || '').toLowerCase() === addrLower ||
-      (id as { email?: string }).email?.toLowerCase() === addrLower
-  );
-  const impactParts: string[] = [];
-  if (linkedLogins.length) {
-    impactParts.push(
-      $t('account.deleteLinkedLogins', { values: { n: linkedLogins.length } }) as string
-    );
-  }
-  if (linkedIdentities.length) {
-    impactParts.push(
-      $t('account.deleteLinkedIdentities', {
-        values: {
-          n: linkedIdentities.length,
-          names: linkedIdentities.map((i) => i.name).join(', '),
-        },
-      }) as string
-    );
-  }
-  const wasInactive =
-    account.accountStatus === 'archived' ||
-    account.accountStatus === 'deleted' ||
-    account.status === 'archived' ||
-    account.status === 'deleted' ||
-    (account.expiresAt > 0 && account.expiresAt <= Date.now());
-  const returnToAddresses = currentView === 'addressView';
-
-  const doDelete = async () => {
-    closeConfirm();
-    await removeAccountAction(ext, account, { selectedEmail, emails, loading }, managementSetters);
-    clearDetailIfInboxDeleted(new Set([address.toLowerCase()]));
-    if (returnToAddresses) {
-      currentEmailDetail = null;
-      mgmtTab = wasInactive ? 'inactive' : 'active';
-      currentView = 'addresses';
-    }
-  };
-  const doArchive = async () => {
-    closeConfirm();
-    await archiveAccountAction(
-      ext,
-      account,
-      accounts,
-      { selectedEmail, emails, loading },
-      managementSetters
-    );
-    if (returnToAddresses) {
-      currentEmailDetail = null;
-      mgmtTab = 'inactive';
-      currentView = 'addresses';
-    }
-  };
-  showConfirm(
-    $t('account.deleteConfirmBody', { values: { address: account.address } }) as string,
-    doDelete,
+  await removeSingleAddress(
     {
-      title: $t('account.deleteConfirmTitle') as string,
-      confirmLabel: $t('account.deletePermanently') as string,
-      secondaryLabel:
-        account.accountStatus !== 'archived' ? ($t('account.archiveInstead') as string) : undefined,
-      onSecondary: account.accountStatus !== 'archived' ? doArchive : undefined,
-      note:
-        impactParts.length > 0
-          ? impactParts.join(' · ')
-          : ($t('account.deleteConfirmNote') as string),
-    }
+      ext,
+      allAddresses,
+      accounts,
+      savedLogins,
+      identities,
+      managementSetters,
+      selectedEmail,
+      emails,
+      loading,
+      showConfirm,
+      closeConfirm,
+      getTranslation: translate,
+      clearDetailIfAddressDeleted,
+      getCurrentView: () => currentView,
+      setCurrentView: (view) => (currentView = view as View),
+      setCurrentEmailDetail: (detail) => (currentEmailDetail = detail),
+      setMgmtTab: (tab) => (mgmtTab = tab),
+    },
+    account.address
   );
 }
 
 // --- Restore deleted account ---
-async function restoreAccount(address: string) {
-  const account = allInboxes.find((a) => a.address === address);
-  if (!account) return;
-  await restoreAccountAction(ext, account, managementSetters);
-}
-
-// --- Archive single account from row ---
-async function archiveAccount(account: Account) {
-  if (account.accountStatus === 'deleted') {
-    showConfirm(
-      get(t)('toasts.accountDeletedArchivePrompt', {
-        values: { address: account.address },
-      }) as string,
-      async () => {
-        closeConfirm();
-        await restoreAccountAction(ext, account, managementSetters);
-        await archiveAccountAction(
-          ext,
-          account,
-          accounts,
-          { selectedEmail, emails, loading },
-          managementSetters
-        );
-      }
-    );
-    return;
-  }
-  await archiveAccountAction(
-    ext,
-    account,
-    accounts,
-    { selectedEmail, emails, loading },
-    managementSetters
+async function restoreAddress(address: string) {
+  const account = allAddresses.find(
+    (a) => (a.address || '').toLowerCase() === address.toLowerCase()
   );
+  if (!account) return;
+  await restoreSingleAddress(ext, allAddresses, account.address, managementSetters);
 }
 
-async function unarchiveAccount(account: Account) {
-  await unarchiveAccountAction(ext, account, managementSetters);
+// --- Archive, restore, and unarchive single account actions ---
+async function archiveAddress(account: Address) {
+  await archiveSingleAddress(ext, account, {
+    accounts,
+    selectedEmail,
+    emails,
+    loading,
+    managementSetters,
+    showConfirm,
+    closeConfirm,
+    getTranslation: translate,
+    allAddresses,
+  });
 }
 
-let exportWizardOpen = $state(false);
-let exportWizardAccount = $state<Account | null>(null);
+async function unarchiveAddress(account: Address) {
+  await unarchiveSingleAddress(ext, account, managementSetters);
+}
+
+let exportWizardAddress = $state<Address | null>(null);
 let exportWizardMessages = $state<Email[]>([]);
 
 // --- Export single or multi-inbox emails ---
-async function exportAccountEmails(target: Account | Account[]) {
+async function exportAddressEmails(target: Address | Address[]) {
   try {
     const list = Array.isArray(target) ? target : [target];
     if (list.length === 0) return;
+    // ONE batched round-trip instead of N serial checkEmails messages; the
+    // background fans out the per-inbox checks with bounded concurrency and
+    // returns per-address outcomes in request order.
+    const response = (await ext.runtime.sendMessage({
+      type: 'checkEmailsBulk',
+      addressIds: list.map((a) => a.id),
+      filters: {},
+    })) as { results?: Array<{ success?: boolean; messages?: Email[] }> } | undefined;
+    const results = Array.isArray(response?.results) ? response.results : [];
     const allMessages: Email[] = [];
-    for (const account of list) {
-      const response = (await ext.runtime.sendMessage({
-        type: 'checkEmails',
-        inboxId: account.id,
-        filters: {},
-      })) as { messages?: Email[] } | undefined;
-      if (response?.messages) allMessages.push(...response.messages);
+    for (const r of results) {
+      if (r?.success && r.messages) allMessages.push(...r.messages);
     }
-    exportWizardAccount = list[0];
+    if (results.length > 0 && allMessages.length === 0 && !results.some((r) => r.success)) {
+      // Every inbox failed the check - nothing to export.
+      showToast($t('toasts.exportFailed'), 'error');
+      return;
+    }
+    exportWizardAddress = list[0];
     exportWizardMessages = allMessages;
-    exportWizardOpen = true;
+    overlaySetters.setExportWizardOpen(true);
   } catch {
     showToast($t('toasts.exportFailed'), 'error');
   }
 }
 
 async function handleExecuteExport(format: string) {
-  if (exportWizardAccount) {
-    await exportEmailsWithFormatAction(exportWizardAccount, exportWizardMessages, format);
+  if (exportWizardAddress) {
+    await exportEmailsWithFormatAction(exportWizardAddress, exportWizardMessages, format);
   }
 }
 
-// --- Show export format dialog ---
-function showExportFormatDialog() {
-  return showExportFormatDialogAction();
-}
-
-/**
- * Exports emails from an account in the specified format.
- *
- * Supported formats:
- * - json: Exports as a JSON file containing address, provider, and message data
- * - eml: Exports as EML format (single email) or ZIP (multiple emails)
- * - mbox: Exports as MBOX format for email clients
- *
- * @param account - The account containing the email address and provider info
- * @param msgs - Array of email messages to export
- * @param format - The export format ('json', 'eml', or 'mbox')
- * @throws Error if export fails
- */
-async function exportEmailsWithFormat(account: Account, msgs: Email[], format: string) {
+async function exportEmailsWithFormat(account: Address, msgs: Email[], format: string) {
   await exportEmailsWithFormatAction(account, msgs, format);
   showToast($t('toasts.emailsExportedAsFormat', { values: { format: format.toUpperCase() } }));
 }
 
-// --- Generate single EML content ---
-function generateSingleEMLContent(account: Account, message: Email): string {
-  return generateSingleEMLContentAction(account, message);
-}
-
-/**
- * Generates MBOX format content from an array of email messages.
- * MBOX is a standard format for storing email messages that can be imported by most email clients.
- * Each message is separated by a "From " line followed by the message content.
- *
- * @param account - The account containing the email address
- * @param messages - Array of email messages to convert to MBOX format
- * @returns A string containing the MBOX formatted email data
- */
-function generateMBOXContent(account: Account, messages: Email[]): string {
-  return generateMBOXContentAction(account, messages);
-}
-
-// --- Export multiple EML as ZIP ---
-async function exportMultipleEMLAsZip(account: Account, messages: Email[], baseFilename: string) {
-  await exportMultipleEMLAsZipAction(account, messages, baseFilename);
-}
-
 // --- Export selected bulk ---
+// Pass allAddresses (not active-only `accounts`) so archived/deleted accounts
+// selected in the Inactive tab of the Addresses view can be exported too.
 async function exportSelected() {
-  await exportSelectedAction(accounts, selectedAddresses, exportAccountEmails);
+  await exportSelectedAction(allAddresses, selectedAddresses, exportAddressEmails);
 }
 
 // --- Extend single account (Guerrilla only) ---
-async function extendAccount(account: Account) {
-  await extendAccountAction(ext, account, managementSetters);
+async function extendAddress(account: Address) {
+  await extendSingleAddress(ext, account, managementSetters);
+}
+
+// --- Bulk lifecycle (cross-tab drag prompts): ONE message per batch ---
+// The drag-across-tabs confirm (AddressesView applyToLive/applyToInactive)
+// used to loop the per-account single RPCs; each single re-read and re-wrote
+// the whole address list under its own lock. These batch variants send N ids
+// in one round-trip and the background performs one locked pass, mirroring
+// deleteAddresses. Per-address outcomes drive the same count-based toasts the
+// bulk selector strips use.
+async function archiveAddressesBulk(accounts: Address[]) {
+  const ids = accounts.map((a) => a.id);
+  if (ids.length === 0) return;
+  try {
+    const res = (await ext.runtime.sendMessage({
+      type: 'archiveAddresses',
+      addressIds: ids,
+    })) as { results?: Array<{ success?: boolean }> } | undefined;
+    await loadAddresses(true);
+    const results = Array.isArray(res?.results) ? res.results : [];
+    const ok = results.filter((r) => r?.success).length;
+    const failed = results.length - ok;
+    if (ok === 0) {
+      showToast(await translate('toasts.archiveFailed'), 'error');
+      return;
+    }
+    showToast(
+      pluralMessage(
+        get(t),
+        {
+          oneKey: 'toasts.emailsArchivedCount',
+          otherKey: 'toasts.emailsArchivedCountPlural',
+        },
+        ok
+      ),
+      'success'
+    );
+    if (failed > 0) {
+      showToast(
+        await translate('toasts.someActionsFailed', { failed, total: results.length }),
+        'warning'
+      );
+    }
+  } catch (e) {
+    logError('Bulk archive error:', undefined, e instanceof Error ? e : new Error(String(e)));
+    showToast(await translate('toasts.archiveFailed'), 'error');
+  }
+}
+
+async function unarchiveAddressesBulk(accounts: Address[]) {
+  const ids = accounts.map((a) => a.id);
+  if (ids.length === 0) return;
+  try {
+    const res = (await ext.runtime.sendMessage({
+      type: 'unarchiveAddresses',
+      addressIds: ids,
+    })) as { results?: Array<{ success?: boolean }> } | undefined;
+    await loadAddresses(true);
+    const results = Array.isArray(res?.results) ? res.results : [];
+    const ok = results.filter((r) => r?.success).length;
+    const failed = results.length - ok;
+    if (ok === 0) {
+      showToast(await translate('toasts.unarchiveFailed'), 'error');
+      return;
+    }
+    showToast(
+      pluralMessage(
+        get(t),
+        {
+          oneKey: 'toasts.emailsUnarchivedCount',
+          otherKey: 'toasts.emailsUnarchivedCountPlural',
+        },
+        ok
+      ),
+      'success'
+    );
+    if (failed > 0) {
+      showToast(
+        await translate('toasts.someActionsFailed', { failed, total: results.length }),
+        'warning'
+      );
+    }
+  } catch (e) {
+    logError('Bulk unarchive error:', undefined, e instanceof Error ? e : new Error(String(e)));
+    showToast(await translate('toasts.unarchiveFailed'), 'error');
+  }
+}
+
+async function renewAddressesBulk(accounts: Address[]) {
+  const ids = accounts.map((a) => a.id);
+  if (ids.length === 0) return;
+  try {
+    showToast(await translate('toasts.extendingExpiry'));
+    const res = (await ext.runtime.sendMessage({
+      type: 'renewAddresses',
+      addressIds: ids,
+    })) as { results?: Array<{ success?: boolean }> } | undefined;
+    await loadAddresses(true);
+    const results = Array.isArray(res?.results) ? res.results : [];
+    const ok = results.filter((r) => r?.success).length;
+    const failed = results.length - ok;
+    if (ok === 0) {
+      showToast(await translate('toasts.expiryExtendFailed'), 'error');
+      return;
+    }
+    showToast(await translate('toasts.expiryExtended'), 'success');
+    if (failed > 0) {
+      showToast(
+        await translate('toasts.someActionsFailed', { failed, total: results.length }),
+        'warning'
+      );
+    }
+  } catch (e) {
+    logError('Bulk renew error:', undefined, e instanceof Error ? e : new Error(String(e)));
+    showToast(await translate('toasts.expiryExtendFailed'), 'error');
+  }
 }
 
 // --- Theme management ---
@@ -2475,6 +2319,9 @@ let layoutSplit = $state(false);
 let layoutVerticalSplit = $derived(layoutWide && !layoutSplit && context !== 'popup');
 /** Whether split pane is collapsed by user (persisted) */
 let splitPaneCollapsed = $state(false);
+/** Icon-only sidebar rail when wide (persisted; expansion state owned here) */
+let sidebarCollapsed = $state(false);
+let sidebarPosition = $state<SidebarPosition>(DEFAULT_SIDEBAR_POSITION);
 /** Combined: split pane visible when layout warrants it AND user hasn't collapsed it */
 let showSplitPane = $derived((layoutSplit || layoutVerticalSplit) && !splitPaneCollapsed);
 /** Mail provider settings docked in splitview when layoutSplit (from FAB gear or settings) */
@@ -2485,7 +2332,7 @@ let mailProviderSplitOpen = $state(false);
  * view, this holds that view so the settings hub (left) + detail (right)
  * split container renders correctly.  Null in narrow / non-split layouts.
  * The set of settings subpages is driven by `isSettingsSplitView()` from the
- * view-registry (single source of truth) — no hardcoded view list here.
+ * view-registry (single source of truth) - no hardcoded view list here.
  */
 let splitSecondaryView = $state<View | null>(null);
 
@@ -2523,9 +2370,11 @@ async function expandCurrentView() {
       settingsSubpage: settingsSubpage ?? undefined,
       previousViewBeforeSubpage,
       mgmtTab,
+      autofillTab: autofillTabValue,
+      organizeTab: organizeTabValue,
       mgmtSearch,
       selectedEmail,
-      // $state proxies cannot be structured-cloned into storage.local — snapshot
+      // $state proxies cannot be structured-cloned into storage.local - snapshot
       // the arrays/objects so browser.storage.local.set does not throw DataCloneError.
       selectedThread: $state.snapshot(selectedThread),
       currentEmailDetail: currentEmailDetail ? $state.snapshot(currentEmailDetail) : null,
@@ -2536,26 +2385,68 @@ async function expandCurrentView() {
       mailProviderSplitOpen: mailProviderSplitOpen || undefined,
       createdAt: Date.now(),
     };
-    await ext.storage.local.set({ expandedAppState: expandPayload });
+    await writeWithRetry({ expandedAppState: expandPayload });
     const runtime = ext.runtime as { getURL?: (path: string) => string };
     const appUrl = typeof runtime.getURL === 'function' ? runtime.getURL('/app.html') : '/app.html';
     await ext.tabs.create({ url: appUrl });
-  } catch {
-    /* expand failed — keep UI quiet */
+  } catch (error) {
+    logError('Failed to expand current view', error);
+    showToast($t('toasts.operationFailed'), 'error');
   }
 }
 
 /** Toggle the user's split pane collapsed/expanded preference and persist it */
 function toggleSplitPane() {
   splitPaneCollapsed = !splitPaneCollapsed;
-  void browser.storage.local.set({ splitPaneCollapsed });
+  void writeWithRetry({ splitPaneCollapsed });
 }
+
+/** Toggle the sidebar between full labels and the icon-only rail; persisted. */
+function toggleSidebarCollapse() {
+  sidebarCollapsed = !sidebarCollapsed;
+  void writeWithRetry({ sidebarCollapsed });
+}
+
+/** Density switch from the sidebar rail (minimised → expanded) or settings. */
+function changeDensity(value: UiDensity) {
+  uiDensity = value;
+  void writeWithRetry({ uiDensity: value });
+}
+
+void browser.storage.local
+  .get(['sidebarCollapsed'])
+  .then((result) => {
+    const stored = (result as { sidebarCollapsed?: boolean }).sidebarCollapsed;
+    if (typeof stored === 'boolean') sidebarCollapsed = stored;
+  })
+  .catch(() => {
+    /* ignore unavailable layout preferences */
+  });
+
+$effect(() => {
+  const applyPosition = (raw: unknown) => {
+    sidebarPosition = normalizeSidebarPosition(raw);
+  };
+  void browser.storage.local
+    .get(['sidebarPosition'])
+    .then((result) => applyPosition((result as { sidebarPosition?: unknown }).sidebarPosition))
+    .catch(() => {
+      /* Keep the default position if layout preferences are unavailable. */
+    });
+  const onPositionChanged = (changes: Record<string, { newValue?: unknown }>, area: string) => {
+    if (area === 'local' && changes.sidebarPosition) {
+      applyPosition(changes.sidebarPosition.newValue);
+    }
+  };
+  browser.storage.onChanged.addListener(onPositionChanged);
+  return () => browser.storage.onChanged.removeListener(onPositionChanged);
+});
 
 /** Ensure split pane is visible (call when content navigates into it) */
 function expandSplitPane() {
   if (splitPaneCollapsed) {
     splitPaneCollapsed = false;
-    void browser.storage.local.set({ splitPaneCollapsed });
+    void writeWithRetry({ splitPaneCollapsed });
   }
 }
 
@@ -2589,62 +2480,49 @@ $effect(() => {
 /** Brief fade when crossing split breakpoint */
 let splitModeFlash = $state(false);
 
-/** ResizeObserver for container-based layout measurement (replaces window.innerWidth) */
-let _layoutRo: ResizeObserver | null = null;
-/** Root layout container element — used for container-based breakpoints */
+/** Root layout container element - used for container-based breakpoints */
 let layoutRootEl = $state<HTMLElement | null>(null);
 /** Resizable list column width (px) for split view */
 let splitListWidthPx = $state(420);
-/** Ctrl/Cmd+K command palette */
-let commandPaletteOpen = $state(false);
+/** Ctrl/Cmd+K command palette (owned by layout overlays) */
 /** UI density for sidepanel / wide layouts */
-let uiDensity = $state<'comfortable' | 'compact'>('comfortable');
+let uiDensity = $state<UiDensity>('expanded');
 /** Mailbox folder + label (sidebar / list sync) */
-let mailboxListTab = $state<'inbox' | 'archived' | 'deleted' | 'all'>('inbox');
+let mailboxListTab = $state<'inbox' | 'archived' | 'deleted' | 'storedLocally' | 'all'>('inbox');
 let activeMailboxLabel = $state<string | null>(null);
-let mailboxSelectionApi = $state({
-  cancel: () => {},
-  archive: () => {},
-  delete: () => {},
-  restore: () => {},
-  star: () => {},
-  label: () => {},
-  selectAll: () => {},
-  deselectAll: () => {},
-  applyLabel: async (_lab: string) => {},
-});
 
-let sidebarMailboxLabels = $derived.by(() => {
-  const set = new Set<string>();
-  for (const list of Object.values(emailTagsById || {})) {
-    if (Array.isArray(list)) for (const t of list) if (t) set.add(t);
-  }
-  return Array.from(set).sort((a, b) => a.localeCompare(b));
-});
-
-let mailboxLabelCounts = $derived.by(() => {
-  const counts: Record<string, number> = {};
-  for (const list of Object.values(emailTagsById || {})) {
+let sidebarLabelSummary = $derived.by(() => {
+  const counts: Record<string, number> = Object.create(null);
+  for (const list of Object.values(emailLabelsById || {})) {
     if (!Array.isArray(list)) continue;
     for (const t of list) {
       if (!t) continue;
       counts[t] = (counts[t] || 0) + 1;
     }
   }
-  return counts;
+  return { labels: Object.keys(counts).sort((a, b) => a.localeCompare(b)), counts };
 });
+let sidebarMailboxLabels = $derived(sidebarLabelSummary.labels);
+let mailboxLabelCounts = $derived(sidebarLabelSummary.counts);
 
 let mailboxFolderCounts = $derived.by(() => {
   const list = filteredEmails || [];
-  return {
-    all: list.length,
-    inbox: list.filter((e) => !e.local_archived && !e.local_deleted).length,
-    archived: list.filter((e) => e.local_archived && !e.local_deleted).length,
-    deleted: list.filter((e) => !!e.local_deleted).length,
-  };
+  const counts = { all: list.length, inbox: 0, archived: 0, deleted: 0, storedLocally: 0 };
+  for (const email of list) {
+    const isArchived = !!email.local_archived;
+    const isDeleted = !!email.local_deleted;
+    if (isDeleted) {
+      counts.deleted += 1;
+      continue;
+    }
+    if (isArchived) counts.archived += 1;
+    else counts.inbox += 1;
+    if (email.local_only || isArchived) counts.storedLocally += 1;
+  }
+  return counts;
 });
 let sidebarLiveCount = $derived(
-  allInboxes.filter(
+  allAddresses.filter(
     (a) =>
       a.status === 'active' &&
       a.accountStatus !== 'archived' &&
@@ -2652,10 +2530,10 @@ let sidebarLiveCount = $derived(
       !((a.expiresAt ?? 0) > 0 && a.expiresAt <= Date.now())
   ).length
 );
-let sidebarInactiveCount = $derived(Math.max(0, allInboxes.length - sidebarLiveCount));
+let sidebarInactiveCount = $derived(Math.max(0, allAddresses.length - sidebarLiveCount));
 let sidebarTagCount = $derived(
   new Set(
-    allInboxes.flatMap((a) => {
+    allAddresses.flatMap((a) => {
       if (Array.isArray(a.tags) && a.tags.length) return a.tags.map((t) => t.name).filter(Boolean);
       return a.tag ? [a.tag] : [];
     })
@@ -2665,151 +2543,124 @@ let sidebarLabelCount = $derived(sidebarMailboxLabels.length);
 let sidebarFilterCount = $derived(savedSearchFilters?.length ?? 0);
 let sidebarProfileCount = $derived(identities?.length ?? 0);
 let sidebarCredentialCount = $derived(savedLogins?.length ?? 0);
-let totalUnreadCount = $derived(
-  (Object.entries(unreadByAddress) as [string, number][])
-    .filter(([addr]) => allInboxes.some((a) => a.address === addr && a.status === 'active'))
-    .reduce((sum, [, n]) => sum + n, 0)
-);
+let activeAddressKeys = $derived.by(() => {
+  const keys = new Set<string>();
+  for (const address of allAddresses) {
+    if (address.status === 'active') keys.add((address.address || '').toLowerCase());
+  }
+  return keys;
+});
+let totalUnreadCount = $derived.by(() => {
+  let total = 0;
+  for (const [address, count] of Object.entries(unreadByAddress)) {
+    if (activeAddressKeys.has(address.toLowerCase())) total += count;
+  }
+  return total;
+});
 let contrastLevel = $state<ContrastLevel>('standard');
 
-function _toggleTheme() {
-  toggleThemeAction({ themeMode, customColor, contrastLevel }, themeSetters, ext);
-}
-
-function setThemeMode(mode: ThemeMode) {
-  setThemeModeAction(mode, customColor, contrastLevel, themeSetters, ext);
-}
-
-function applyTheme() {
-  applyThemeAction(themeMode, contrastLevel);
-}
-
-async function syncThemeSettings() {
-  const themeData = (await ext.storage.local.get(['themeMode', 'contrastLevel'])) as {
-    themeMode?: string;
-    contrastLevel?: string;
-  };
-  if (
-    themeData.themeMode === 'light' ||
-    themeData.themeMode === 'system' ||
-    themeData.themeMode === 'dark'
-  ) {
-    themeMode = themeData.themeMode;
-  }
-  if (
-    themeData.contrastLevel === 'standard' ||
-    themeData.contrastLevel === 'medium' ||
-    themeData.contrastLevel === 'high'
-  ) {
-    contrastLevel = themeData.contrastLevel;
-  }
-  applyTheme();
-  if (customColor) {
-    applyCustomColor(customColor);
-  }
-}
-
-async function setContrastLevel(level: ContrastLevel) {
-  contrastLevel = level;
-  applyThemeAction(themeMode, contrastLevel);
-  if (customColor) {
-    applyCustomColor(customColor);
-  }
-  await ext.storage.local.set({ contrastLevel: level });
-}
-
-// Listen for system theme changes
-const cleanupSystemThemeListener = listenForSystemThemeChanges(
-  () => themeMode,
-  () => contrastLevel,
-  applyTheme
+const themeController = createThemeController(
+  ext,
+  {
+    getThemeMode: () => themeMode,
+    getCustomColor: () => customColor,
+    getContrastLevel: () => contrastLevel,
+  },
+  themeSetters
 );
-
-const restoreArchivedInbox = (email: Email) => {
-  restoreArchivedInboxAction(ext, email, { archivedEmails }, archivedSetters);
+const setThemeMode = (mode: ThemeMode) => {
+  void themeController.setThemeMode(mode).then((ok) => {
+    if (!ok) {
+      logError('Failed to persist theme mode', mode);
+      showToast($t('toasts.operationFailed'), 'error');
+    }
+  });
+};
+const syncThemeSettings = () => themeController.syncThemeSettings();
+const setContrastLevel = (level: ContrastLevel) => {
+  void themeController.setContrastLevel(level).then((ok) => {
+    if (!ok) {
+      logError('Failed to persist contrast level', level);
+      showToast($t('toasts.operationFailed'), 'error');
+    }
+  });
 };
 
-function _openMessageWindow(message: Email) {
-  if (!openMessageWindow(message)) {
-    openMessageDetail([message]);
-  }
-}
+// Listen for system theme changes
+const cleanupSystemThemeListener = themeController.startSystemThemeListener();
+
+const restoreArchivedAddress = (email: Email) => {
+  restoreArchivedAddressAction(ext, email, { archivedEmails }, archivedSetters);
+};
 
 // --- Saved search filters ---
-let _savedSearchFiltersActions: ReturnType<typeof useSavedSearchFilters> | null = null;
-async function getSavedSearchFilters() {
-  if (!_savedSearchFiltersActions) {
-    const { useSavedSearchFilters } = await import('@/features/inbox/use-saved-search-filters.js');
-    _savedSearchFiltersActions = useSavedSearchFilters(
-      ext,
-      {
-        get savedSearchFilters() {
-          return savedSearchFilters;
-        },
-      },
-      {
-        setSavedSearchFilters: (filters) => (savedSearchFilters = filters),
-        setSearchQuery: (value) => (searchQuery = value),
-        setOtpOnly: (value) => (otpOnly = value),
-        setHasAttachment: (value) => (hasAttachment = value),
-        setSenderDomain: (value) => (senderDomain = value),
-        setSenderEmail: (value) => (senderEmail = value),
-        setRecipient: (value) => (recipient = value),
-        setSubject: (value) => (subject = value),
-        setNotSenderDomain: (value) => (notSenderDomain = value),
-        setNotSenderEmail: (value) => (notSenderEmail = value),
-        setNotRecipient: (value) => (notRecipient = value),
-        setNotSubject: (value) => (notSubject = value),
-        setSelectedSenders: (value) => (selectedSenders = value),
-        setDateFrom: (value) => (dateFrom = value),
-        setDateTo: (value) => (dateTo = value),
-        setSortBy: (value) => (sortBy = value),
-        showToast: (message, type) => showToast(message, type),
-      }
-    );
-  }
-  return _savedSearchFiltersActions;
-}
-
-async function loadSavedSearchFilters() {
-  const actions = await getSavedSearchFilters();
-  await actions.loadSavedSearchFilters();
-}
-
-async function saveFilter(input: SaveFilterInput) {
-  const actions = await getSavedSearchFilters();
-  await actions.saveFilter(input);
-}
-
-async function renameFilter(id: string, name: string) {
-  const actions = await getSavedSearchFilters();
-  await actions.renameFilter(id, name);
-}
-
-async function loadFilter(filter: SavedSearchFilter) {
-  const actions = await getSavedSearchFilters();
-  await actions.loadFilter(filter);
-}
-
-async function clearFilters() {
-  const actions = await getSavedSearchFilters();
-  await actions.clearFilters();
-}
-
-async function deleteFilter(id: string) {
-  const actions = await getSavedSearchFilters();
-  await actions.deleteFilter(id);
-}
+const searchFilterController = createSearchFilterController(ext, {
+  state: {
+    get savedSearchFilters() {
+      return savedSearchFilters;
+    },
+  },
+  setters: {
+    setSavedSearchFilters: (filters) => (savedSearchFilters = filters),
+    setSearchQuery: (value) => (mailboxFilters.searchQuery = value),
+    setOtpOnly: (value) => (mailboxFilters.otpOnly = value),
+    setUnreadOnly: (value) => (mailboxFilters.unreadOnly = value),
+    setHasAttachment: (value) => (mailboxFilters.hasAttachment = value),
+    setSenderDomain: (value) => (mailboxFilters.senderDomain = value),
+    setSenderEmail: (value) => (mailboxFilters.senderEmail = value),
+    setRecipient: (value) => (mailboxFilters.recipient = value),
+    setSubject: (value) => (mailboxFilters.subject = value),
+    setNotSenderDomain: (value) => (mailboxFilters.notSenderDomain = value),
+    setNotSenderEmail: (value) => (mailboxFilters.notSenderEmail = value),
+    setNotRecipient: (value) => (mailboxFilters.notRecipient = value),
+    setNotSubject: (value) => (mailboxFilters.notSubject = value),
+    setSelectedSenders: (value) => (mailboxFilters.selectedSenders = value),
+    setDateFrom: (value) => (mailboxFilters.dateFrom = value),
+    setDateTo: (value) => (mailboxFilters.dateTo = value),
+    setSortBy: (value) => (mailboxFilters.sortBy = value),
+    showToast: (message, type) => showToast(message, type),
+  },
+});
+const { loadSavedSearchFilters, saveFilter, renameFilter, loadFilter, clearFilters, deleteFilter } =
+  searchFilterController;
 
 const stopExtensionStorageSync = useExtensionStorageSync([
   {
     keys: SETTINGS_SYNC_KEYS,
-    onChange: async () => {
+    onChange: async (changes) => {
+      // Fast-path the accent-color echo: the picking context already holds
+      // canonical state, so apply the event's newValue directly. A full
+      // loadSettings() round-trip here can resolve with a STALE value when
+      // picks arrive faster than the 400ms settings-write debounce (the
+      // native color input fires oninput per mousemove while dragging),
+      // visibly snapping the accent color backwards on its own.
+      if (changes.customColor && Object.keys(changes).length === 1) {
+        const v = changes.customColor.newValue;
+        if (typeof v === 'string') {
+          settingsDomainSetters.setCustomColor(v);
+          await applyCustomColor(v);
+        }
+        return;
+      }
       await loadSettings();
       await loadProviderInstances();
     },
   },
   { keys: THEME_SYNC_KEYS, onChange: syncThemeSettings },
+  {
+    keys: ['addressColors'],
+    onChange: (changes) => {
+      const value = changes.addressColors?.newValue;
+      addressColors =
+        typeof value === 'object' && value !== null && !Array.isArray(value)
+          ? Object.fromEntries(
+              Object.entries(value).filter(
+                ([, color]) => typeof color === 'string' && /^#[\da-f]{6}$/i.test(color)
+              )
+            )
+          : {};
+    },
+  },
   {
     keys: TOAST_SYNC_KEYS,
     onChange: (changes) => {
@@ -2817,7 +2668,7 @@ const stopExtensionStorageSync = useExtensionStorageSync([
       toastStore.setEnabled(v !== false);
     },
   },
-  { keys: INBOX_SYNC_KEYS, onChange: () => loadInboxes(true) },
+  { keys: INBOX_SYNC_KEYS, onChange: () => loadAddresses(true) },
   { keys: IDENTITY_SYNC_KEYS, onChange: loadIdentities },
   { keys: FILTER_SYNC_KEYS, onChange: loadSavedSearchFilters },
   { keys: ANALYTICS_SYNC_KEYS, onChange: loadAnalytics },
@@ -2825,27 +2676,38 @@ const stopExtensionStorageSync = useExtensionStorageSync([
   { keys: READ_EMAILS_SYNC_KEYS, onChange: updateUnreadByAddress },
 ]);
 
-// Plain let — must NOT be $state (read+write in same effect → infinite loop)
+// Plain let - must NOT be $state (read+write in same effect → infinite loop)
 let _lastAppliedColor = '';
 let cleanupMountedResources = () => {};
 /** Print intent handed off from popup/sidepanel: prepared HTML + subject for the app tab's print bar. */
-let printIntent = $state<{ html: string; title: string } | null>(null);
 
 $effect(() => {
-  const enabled = inboxColorThemeEnabled;
+  const enabled = addressColorThemeEnabled;
   const address = displayedEmail || selectedEmail;
   const account =
-    allInboxes.find((a) => a.address === selectedEmail || a.address === address) ||
+    allAddresses.find((a) => a.address === selectedEmail || a.address === address) ||
     accounts.find((a) => a.address === selectedEmail || a.address === address);
-  const inboxId = account?.id;
+  const addressId = account?.id;
   const fallback = customColor;
   // Key by inbox id so domain swaps never recolor the theme
   let activeColor = '';
   if (enabled) {
     activeColor =
-      (inboxId && inboxColors[inboxId]) || (address ? inboxColors[address] || '' : '') || '';
-    if (!activeColor && (address || inboxId)) {
-      activeColor = untrack(() => getInboxColor(address || '', inboxId));
+      (addressId && addressColors[addressId]) ||
+      (address ? addressColors[address] || '' : '') ||
+      '';
+    if (!activeColor && (address || addressId)) {
+      activeColor = untrack(() =>
+        getAddressColorAction(address || '', addressId, addressColors, customColor, (updater) => {
+          // Serialized: the same map is written by the domain-rewrite
+          // migration, so this persist must edit what storage holds NOW.
+          void updateAddressColors((current) => {
+            const next = updater(current);
+            addressColors = next;
+            return next;
+          });
+        })
+      );
     }
     if (!activeColor) activeColor = fallback || '#4c662b';
   } else {
@@ -2861,243 +2723,294 @@ $effect(() => {
 });
 
 // --- Initialize on mount ---
-onMount(async () => {
-  window.addEventListener('keydown', handleKeydown);
-  updateUnreadByAddress();
+/** Browser zoom is intentionally disabled for the extension UI - it is
+ * viewport-wide and would scale headers, toolbars and sidebars along with the
+ * content. The ONLY exception is the mail body itself: when a zoom gesture
+ * (Ctrl+wheel / Ctrl+=/-/0) lands over an `.email-body` host, the browser zoom
+ * is still blocked and the same step is re-applied as a scoped CSS `zoom` on
+ * that host only (see @/utils/email/email-body-zoom.js). composedPath() includes
+ * nodes inside EmailBody's open shadow root, which keeps this exception
+ * working across browsers. */
+let globalZoomScale = $state(1);
+let pageZoomSettings = $state<PageZoomSettings>({});
 
-  // Apply user provider JSON overrides (if any) before loading inboxes
+function applyGlobalZoom(): void {
+  if (!layoutRootEl) return;
+  const pageSettings = getPageZoomSetting(pageZoomSettings, activeViewForExpand, globalZoomScale);
+  if (globalZoomEnabled && pageSettings.enabled && pageSettings.scale !== 1) {
+    layoutRootEl.style.zoom = String(pageSettings.scale);
+  } else {
+    layoutRootEl.style.removeProperty('zoom');
+  }
+}
+
+function persistPageZoomSettings(nextSettings: PageZoomSettings): void {
+  pageZoomSettings = nextSettings;
+  void writeWithRetry({ pageZoomSettings });
+  applyGlobalZoom();
+}
+
+function togglePageZoom(view: View, enabled: boolean): void {
+  persistPageZoomSettings(
+    updatePageZoomSetting(pageZoomSettings, view, { enabled }, globalZoomScale)
+  );
+}
+
+function adjustPageZoom(view: View, direction: PageZoomDirection): void {
+  persistPageZoomSettings(changeStoredPageZoom(pageZoomSettings, view, direction, globalZoomScale));
+}
+
+function changeCurrentPageZoom(direction: PageZoomDirection): void {
+  adjustPageZoom(activeViewForExpand, direction);
+}
+
+$effect(() => {
+  void globalZoomEnabled;
+  void globalZoomScale;
+  void pageZoomSettings;
+  void activeViewForExpand;
+  applyGlobalZoom();
+});
+
+onMount(() => {
+  const syncZoomSettings = (changes: Record<string, { newValue?: unknown }>, areaName: string) => {
+    if (areaName !== 'local') return;
+    if (changes.globalZoomScale) {
+      globalZoomScale = normalizePageZoomScale(changes.globalZoomScale.newValue);
+    }
+    if (changes.pageZoomSettings) {
+      pageZoomSettings = normalizePageZoomSettings(changes.pageZoomSettings.newValue);
+    }
+  };
+
+  browser.storage.onChanged.addListener(syncZoomSettings);
+  return () => browser.storage.onChanged.removeListener(syncZoomSettings);
+});
+
+function preventUiZoom(event: KeyboardEvent): void {
+  if (!(event.ctrlKey || event.metaKey)) return;
+  const isZoomIn = event.key === '+' || event.key === '=' || event.code === 'NumpadAdd';
+  const isZoomOut = event.key === '-' || event.key === '_' || event.code === 'NumpadSubtract';
+  const isZoomReset = event.key === '0' || event.code === 'Numpad0';
+  if (!isZoomIn && !isZoomOut && !isZoomReset) return;
+  event.preventDefault();
+  if (globalZoomEnabled) {
+    const pageSettings = getPageZoomSetting(pageZoomSettings, activeViewForExpand, globalZoomScale);
+    if (pageSettings.enabled) {
+      changeCurrentPageZoom(isZoomReset ? 0 : isZoomIn ? 1 : -1);
+    }
+    return;
+  }
+  const host = findEmailBodyHost(event);
+  if (!host) return;
+  if (isZoomReset) resetEmailBodyZoom(host);
+  else stepEmailBodyZoom(host, isZoomIn ? 1 : -1);
+}
+
+function preventUiWheelZoom(event: WheelEvent): void {
+  if (!event.ctrlKey) return;
+  event.preventDefault();
+  if (globalZoomEnabled) {
+    const pageSettings = getPageZoomSetting(pageZoomSettings, activeViewForExpand, globalZoomScale);
+    if (pageSettings.enabled) {
+      changeCurrentPageZoom(event.deltaY < 0 ? 1 : -1);
+    }
+    return;
+  }
+  const host = findEmailBodyHost(event);
+  if (!host) return;
+  stepEmailBodyZoom(host, event.deltaY < 0 ? 1 : -1);
+}
+
+onMount(async () => {
+  window.addEventListener('keydown', keyboardTooltipController.handleKeydown);
+  window.addEventListener('keyup', keyboardTooltipController.handleKeyup);
+  window.addEventListener('blur', keyboardTooltipController.clearDiscovery);
+  window.addEventListener('keydown', preventUiZoom, { capture: true });
+  window.addEventListener('wheel', preventUiWheelZoom, { capture: true, passive: false });
+  try {
+    const stored = (await browser.storage.local.get(['globalZoomScale', 'pageZoomSettings'])) as {
+      globalZoomScale?: unknown;
+      pageZoomSettings?: unknown;
+    };
+    if (typeof stored.globalZoomScale === 'number' && Number.isFinite(stored.globalZoomScale)) {
+      globalZoomScale = normalizePageZoomScale(stored.globalZoomScale);
+    }
+    pageZoomSettings = normalizePageZoomSettings(stored.pageZoomSettings);
+  } catch {
+    /* ignore non-critical zoom preference */
+  }
+  const cleanups: (() => void)[] = [];
+
+  // Start the address bootstrap early; the UI stays behind the explicit gate
+  // (addressBootstrapReady below) until the address state is known.
+  const initialAddressLoad = setupAddressBootstrap();
+  await recordExtensionOpens();
+
+  // Popup/content-script handoffs: open view, print intent, live navigation
+  cleanups.push(await setupViewHandoff());
+
+  // Content-script prompts (setup/renew reason, return-to-form) + import backup
+  cleanups.push(...(await handleContentScriptPrompts()));
+
+  // Locale preload, product-tour flags, misc settings restore
+  cleanups.push(...(await preloadLocaleAndMisc()));
+
+  // Email sync controller + storage/runtime listeners + backup poll
+  const emailSync = setupEmailSync();
+  cleanups.push(emailSync.cleanup);
+
+  // Restore theme settings from storage
+  await restoreThemeFromStorage(
+    ext,
+    (v) => (themeMode = v),
+    (v) => (contrastLevel = v),
+    () => themeController.applyTheme(),
+    () => customColor
+  );
+
+  await initialAddressLoad;
+  addressBootstrapReady = true;
+
+  // Hydrate emails/address metadata behind the bootstrap gate, then run the
+  // post-bootstrap loads (settings, saved filters, analytics, retention).
+  const hydration = startEmailHydration(emailSync.syncEmailsFromStorage);
+  await loadPostBootstrapData(hydration.initialMetadataHydration);
+
+  const appStateRestore = createAppStateRestoreController({
+    ext,
+    context,
+    getLayoutSplit: () => layoutSplit,
+    getLayoutVerticalSplit: () => layoutVerticalSplit,
+    getAllAddresses: () => allAddresses,
+    getEmails: () => emails,
+    getCurrentView: () => currentView,
+    setCurrentView: (value) => (currentView = value),
+    setSettingsSubpage: (value) => (settingsSubpage = value),
+    setPreviousViewBeforeSubpage: (value) => (previousViewBeforeSubpage = value),
+    setMgmtTab: (value) => (mgmtTab = value),
+    setAutofillTab: (value) => {
+      autofillTabValue = value;
+      autofillTabSignal += 1;
+    },
+    setOrganizeTab: (value) => {
+      organizeTabValue = value;
+      organizeTabSignal += 1;
+    },
+    setMgmtSearch: (value) => (mgmtSearch = value),
+    setArchivedSearch: (value) => (archivedSearch = value),
+    setSelectedThread: (value) => (selectedThread = value),
+    setCurrentEmailDetail: (value) => (currentEmailDetail = value),
+    setSplitSecondaryView: (value) => (splitSecondaryView = value),
+    setMailProviderSplitOpen: (value) => (mailProviderSplitOpen = value),
+    setSplitPaneCollapsed: (value) => (splitPaneCollapsed = value),
+    setLoading: (value) => (loading = value),
+    selectAddress,
+    checkMessages,
+    openMessageDetail,
+    evaluateProviderFailoverAfterRefresh,
+    tick,
+  });
+  cleanups.push(appStateRestore.stop);
+  const restoredThread = await appStateRestore.restore(hydration.initialEmailHydration);
+
+  // Form presence badge + OTP runtime toasts
+  cleanups.push(await setupFormDetectionAndOtp());
+
+  cleanupMountedResources = () => {
+    window.removeEventListener('keydown', keyboardTooltipController.handleKeydown);
+    window.removeEventListener('keyup', keyboardTooltipController.handleKeyup);
+    window.removeEventListener('blur', keyboardTooltipController.clearDiscovery);
+    keyboardTooltipController.clearDiscovery();
+    window.removeEventListener('keydown', preventUiZoom, { capture: true });
+    window.removeEventListener('wheel', preventUiWheelZoom, { capture: true });
+    cleanupSystemThemeListener();
+    for (const cleanup of cleanups.reverse()) {
+      cleanup();
+    }
+  };
+});
+
+/** Provider overrides + non-blocking address bootstrap (UI waits on the gate). */
+async function setupAddressBootstrap() {
+  // Apply user provider JSON overrides (if any) before loading addresses
   try {
     await loadProviderOverridesFromStorage(browser);
   } catch {
     /* keep bundled providers */
   }
 
-  // Usage stats: count extension UI opens (direct storage — survives SW restarts)
-  try {
-    const { analytics: a = {} } = (await browser.storage.local.get(['analytics'])) as {
-      analytics?: Record<string, unknown>;
-    };
-    await browser.storage.local.set({
-      analytics: {
-        ...a,
-        extensionOpens: ((a.extensionOpens as number) || 0) + 1,
-      },
-    });
-  } catch {
-    /* ignore */
-  }
+  // Start the address bootstrap as soon as provider overrides are available.
+  // Other startup work can continue while this resolves, but the UI remains
+  // behind the explicit bootstrap gate until the address state is known.
+  return addressActions.loadAddresses(undefined, {
+    deferEmailCounts: true,
+  });
+}
 
-  // Print intent from popup/sidepanel: app.html?printInbox=..&printEmail=..
-  // The app tab owns the user gesture needed for window.print(), so printing
-  // is routed here instead of the popup (which closes when the dialog opens).
-  async function handlePrintIntent() {
-    if (context !== 'app') return;
-    let inbox = '';
-    let messageId = '';
-    try {
-      const u = new URL(typeof location !== 'undefined' ? location.href : '');
-      inbox = u.searchParams.get('printInbox') || '';
-      messageId = u.searchParams.get('printEmail') || '';
-      if (inbox && messageId) {
-        for (const k of ['printInbox', 'printEmail']) u.searchParams.delete(k);
-        const next = u.pathname + (u.searchParams.toString() ? `?${u.searchParams}` : '') + u.hash;
-        try {
-          history.replaceState(null, '', next);
-        } catch {
-          /* ignore */
-        }
-      }
-    } catch {
-      /* ignore URL parse */
-    }
-    if (!inbox || !messageId) return;
-    const prepared = await prepareEmailPrintFromStorage(inbox, messageId);
-    if (!prepared) {
-      showToast(get(t)('inbox.printNotFound'));
-      return;
-    }
-    printIntent = prepared;
-    // Best-effort auto-print (works where activation rules allow; Chrome may
-    // ignore it silently — the print bar lets the user click once to force it).
-    printHtmlDocument(prepared.html, prepared.title);
-  }
+/**
+ * Usage stats: count this UI open in the background (`recordExtensionOpen`).
+ *
+ * The background OWNS the `analytics` record - it increments the same key
+ * under `analytics_lock` for page visits, read mail, fetch timings and storage
+ * trends (`background/address/analytics.ts`) - so the count is made there. The
+ * local whole-key write this replaces read the record, added one, and wrote it
+ * back: every count the background made in that window (from any surface, or
+ * from another open popup) was overwritten by the stale copy. `getAnalytics`
+ * already reads the key back through the same background module, so the two
+ * halves of the counter now agree on who writes it.
+ *
+ * Fire-and-forget: a usage counter must never hold the shell's boot on a cold
+ * service worker, and a rejected send is not worth an error to the user.
+ */
+function recordExtensionOpens(): void {
+  browser.runtime.sendMessage({ type: 'recordExtensionOpen' }).catch(/* ignore */);
+}
 
-  // Content-script / context-menu handoff: open a specific view
-  async function applyOpenViewHandoff(forced?: {
-    openView?: string;
-    openIdentityCreate?: boolean;
-    openIdentityEditId?: string;
-    autofillTab?: string;
-  }) {
-    let openView = forced?.openView || '';
-    let openIdentityCreate = !!forced?.openIdentityCreate;
-    let openIdentityEditId = forced?.openIdentityEditId || '';
-    let handoffAutofillTab = forced?.autofillTab || '';
+/** Popup/content-script handoffs: open view, print intent, live navigation. */
+async function setupViewHandoff(): Promise<() => void> {
+  // Print intent from popup/sidepanel - delegated to print-intent module
+  const handlePrintIntent = () =>
+    handlePrintIntentFn(
+      context,
+      (m, t) => showToast(m, t as ToastType | undefined),
+      (key) => $t(key) as string
+    );
 
-    // Cold-start: app.html?view=autofill&identityCreate=1&identityEdit=id&tab=profiles
-    if (!openView && !openIdentityCreate && !openIdentityEditId) {
-      try {
-        const u = new URL(typeof location !== 'undefined' ? location.href : '');
-        openView = u.searchParams.get('view') || '';
-        handoffAutofillTab = u.searchParams.get('tab') || handoffAutofillTab;
-        if (u.searchParams.get('identityCreate') === '1') {
-          openIdentityCreate = true;
-          openView = openView || 'autofill';
-        }
-        const edit = u.searchParams.get('identityEdit') || '';
-        if (edit) {
-          openIdentityEditId = edit;
-          openView = openView || 'autofill';
-        }
-        // Strip handoff params so refresh does not re-open dialogs
-        if (openView || openIdentityCreate || openIdentityEditId) {
-          for (const k of ['view', 'tab', 'identityCreate', 'identityEdit', 'reason']) {
-            u.searchParams.delete(k);
-          }
-          const next =
-            u.pathname + (u.searchParams.toString() ? `?${u.searchParams}` : '') + u.hash;
-          try {
-            history.replaceState(null, '', next);
-          } catch {
-            /* ignore */
-          }
-        }
-      } catch {
-        /* ignore URL parse */
-      }
-    }
-
-    if (!openView && !openIdentityCreate && !openIdentityEditId) {
-      try {
-        const s = (await browser.storage.session.get([
-          'openView',
-          'openIdentityCreate',
-          'openIdentityEditId',
-          'autofillTab',
-        ])) as {
-          openView?: string;
-          openIdentityCreate?: boolean;
-          openIdentityEditId?: string;
-          autofillTab?: string;
-        };
-        openView = s.openView || '';
-        openIdentityCreate = !!s.openIdentityCreate;
-        openIdentityEditId = s.openIdentityEditId || '';
-        handoffAutofillTab = s.autofillTab || handoffAutofillTab;
-        if (openView || openIdentityCreate || openIdentityEditId) {
-          await browser.storage.session.remove([
-            'openView',
-            'openIdentityCreate',
-            'openIdentityEditId',
-            'autofillTab',
-          ]);
-        }
-      } catch {
-        /* session may fail */
-      }
-    }
-    if (!openView && !openIdentityCreate && !openIdentityEditId) {
-      const s = (await browser.storage.local.get([
-        'openView',
-        'openIdentityCreate',
-        'openIdentityEditId',
-        'autofillTab',
-      ])) as {
-        openView?: string;
-        openIdentityCreate?: boolean;
-        openIdentityEditId?: string;
-        autofillTab?: string;
-      };
-      openView = s.openView || '';
-      openIdentityCreate = !!s.openIdentityCreate;
-      openIdentityEditId = s.openIdentityEditId || '';
-      handoffAutofillTab = s.autofillTab || handoffAutofillTab;
-      if (openView || openIdentityCreate || openIdentityEditId) {
-        await browser.storage.local.remove([
-          'openView',
-          'openIdentityCreate',
-          'openIdentityEditId',
-          'autofillTab',
-        ]);
-      }
-    }
-    if (!openView && !openIdentityCreate && !openIdentityEditId) return;
-
-    if (
-      openView === 'identities' ||
-      openView === 'autofill' ||
-      openIdentityCreate ||
-      openIdentityEditId
-    ) {
-      // Prefer profiles tab for identity create/edit handoff
-      let tabPref = handoffAutofillTab || 'profiles';
-      try {
-        if (!openIdentityCreate && !openIdentityEditId && !handoffAutofillTab) {
-          const t = (await browser.storage.local.get(['autofillTab'])) as {
-            autofillTab?: string;
-          };
-          tabPref = t.autofillTab || tabPref;
-        }
-        await browser.storage.local.remove(['autofillTab']);
-      } catch {
-        /* ignore */
-      }
-      if (
-        !openIdentityCreate &&
-        !openIdentityEditId &&
-        (openView === 'loginInfo' || tabPref === 'credentials')
-      ) {
-        autofillTabValue = 'credentials';
-      } else {
-        autofillTabValue = 'profiles';
-      }
-      currentView = 'autofill';
+  // Content-script / context-menu handoff - delegated to view-handoff module
+  const _viewHandoffDeps = {
+    ext,
+    context,
+    setCurrentView: (v: string) => {
+      // view-handoff validates, but this is the last line of defense: an
+      // unknown id here would blank the main pane (AppShell renders the
+      // `{:else}` fallback content only for `mailbox`).
+      currentView = isView(v) ? v : 'mailbox';
+    },
+    setAutofillTabValue: (v: 'profiles' | 'credentials' | 'sites') => {
+      autofillTabValue = v;
+    },
+    incrementAutofillTabSignal: () => {
       autofillTabSignal += 1;
-      // Bump after view switch so IdentitiesView mounts then sees the signal
+    },
+    incrementIdentityCreateSignal: () => {
+      identityCreateSignal += 1;
+    },
+    setIdentityEditIdSignal: (v: string) => {
+      identityEditIdSignal = v;
+    },
+    setSelectedEmail: (v: string) => {
+      selectedEmail = v;
+    },
+    setDisplayedEmail: (v: string) => {
+      displayedEmail = v;
+    },
+    tick: async () => {
       await tick();
-      await tick();
-      if (openIdentityCreate) identityCreateSignal += 1;
-      if (openIdentityEditId) {
-        // Clear then set so re-editing the same id always fires IdentitiesView effect
-        identityEditIdSignal = '';
-        await tick();
-        identityEditIdSignal = openIdentityEditId;
-      }
-    } else if (openView === 'loginInfo') {
-      currentView = 'autofill';
-      autofillTabValue = 'credentials';
-      autofillTabSignal += 1;
-    } else if (openView === 'addresses') {
-      currentView = 'addresses';
-    } else if (openView === 'mailbox') {
-      currentView = 'mailbox';
-    } else if (openView === 'settings') {
-      currentView = 'settings';
-    } else if (openView === 'about') {
-      currentView = 'about';
-    } else if (openView === 'organize') {
-      currentView = 'organize';
-    } else if (openView === 'analytics' || openView === 'activity') {
-      currentView = 'analytics';
-    }
-
-    // Sync selected mailbox from activeInboxId (context menu create / address pick)
-    try {
-      const { activeInboxId, inboxes = [] } = (await browser.storage.local.get([
-        'activeInboxId',
-        'inboxes',
-      ])) as { activeInboxId?: string; inboxes?: Account[] };
-      if (activeInboxId) {
-        const acct = inboxes.find((a) => a.id === activeInboxId);
-        if (acct?.address) {
-          selectedEmail = acct.address;
-          displayedEmail = acct.address;
-        }
-      }
-    } catch {
-      /* ignore */
-    }
-  }
+    },
+  };
+  const applyOpenViewHandoff = (forced?: Parameters<typeof applyOpenViewHandoffFn>[1]) =>
+    applyOpenViewHandoffFn(_viewHandoffDeps, forced);
 
   try {
     await applyOpenViewHandoff();
@@ -3109,7 +3022,8 @@ onMount(async () => {
 
   // Live navigation from context menu / content identity handoff while UI is already open
   try {
-    const onNavigateViewMessage = (message: unknown) => {
+    const onNavigateViewMessage = (message: unknown, sender: { url?: string }) => {
+      if (!sender.url?.startsWith(location.origin)) return;
       if (!message || typeof message !== 'object') return;
       const m = message as {
         type?: string;
@@ -3125,7 +3039,7 @@ onMount(async () => {
       ) {
         void (async () => {
           try {
-            // Apply extras directly — do not only set openView (that dropped create/edit)
+            // Apply extras directly - do not only set openView (that dropped create/edit)
             await applyOpenViewHandoff({
               openView:
                 m.view ||
@@ -3143,31 +3057,36 @@ onMount(async () => {
       }
     };
     browser.runtime.onMessage.addListener(onNavigateViewMessage);
-    const onOpenViewChanges = (changes: Record<string, unknown>, area: string) => {
+    const onOpenViewChanges = (changes: Record<string, { newValue?: unknown }>, area: string) => {
       if (area !== 'local' && area !== 'session') return;
       if (
         changes.openView ||
         changes.openViewAt ||
-        changes.activeInboxId ||
+        changes.activeAddressId ||
         changes.openIdentityCreate ||
         changes.openIdentityEditId ||
         changes.autofillTab
       ) {
+        // A popup-targeted identity handoff belongs exclusively to the popup.
+        if (context !== 'popup' && changes.openExtensionTarget?.newValue === 'popup') return;
         void applyOpenViewHandoff();
       }
     };
     browser.storage.onChanged.addListener(onOpenViewChanges);
-    // Register for cleanup
-    const previousCleanupA = cleanupMountedResources;
-    cleanupMountedResources = () => {
+    return () => {
       browser.runtime.onMessage.removeListener(onNavigateViewMessage);
       browser.storage.onChanged.removeListener(onOpenViewChanges);
-      previousCleanupA();
     };
   } catch {
     /* ignore */
   }
 
+  return () => {};
+}
+
+/** Content-script prompts (setup/renew reason, return-to-form) + import-backup flag. */
+async function handleContentScriptPrompts(): Promise<(() => void)[]> {
+  const cleanups: (() => void)[] = [];
   // Content-script handoff: open for setup / renew, then remind user to return to the form
   try {
     let reason = '';
@@ -3187,8 +3106,23 @@ onMount(async () => {
       if (s.pendingAutofillReturn) {
         // Keep flag until first live inbox exists
       }
-      if (reason)
-        await browser.storage.session.remove(['openExtensionReason', 'openExtensionHint']);
+      if (reason) {
+        await browser.storage.session.remove([
+          'openExtensionReason',
+          'openExtensionHint',
+          'openExtensionAt',
+        ]);
+        // Mirror cleanup: openExtensionUiInternal writes these keys (plus the
+        // openExtensionAt timestamp marker) to session - and to local ONLY when
+        // session storage is unavailable (session-less browsers). Purge local
+        // with the consume so a session-less fallback copy can never replay a
+        // stale handoff on a later open (write-once, read-once).
+        await browser.storage.local.remove([
+          'openExtensionReason',
+          'openExtensionHint',
+          'openExtensionAt',
+        ]);
+      }
     } catch {
       /* ignore */
       const s = (await browser.storage.local.get(['openExtensionReason', 'openExtensionHint'])) as {
@@ -3197,7 +3131,12 @@ onMount(async () => {
       };
       reason = s.openExtensionReason || '';
       hint = s.openExtensionHint || '';
-      if (reason) await browser.storage.local.remove(['openExtensionReason', 'openExtensionHint']);
+      if (reason)
+        await browser.storage.local.remove([
+          'openExtensionReason',
+          'openExtensionHint',
+          'openExtensionAt',
+        ]);
     }
     if (hint) {
       showToast(hint, 'info');
@@ -3212,18 +3151,25 @@ onMount(async () => {
 
   // When first address appears after pending autofill, prompt return to form
   try {
-    const onInboxReady = (changes: Record<string, { newValue?: unknown }>, area: string) => {
-      if (area !== 'local' || !changes.inboxes) return;
+    const onAddressReady = (changes: Record<string, { newValue?: unknown }>, area: string) => {
+      if (area !== 'local' || !changes.addresses) return;
       void (async () => {
         try {
           const flags = (await browser.storage.session.get(['pendingAutofillReturn'])) as {
             pendingAutofillReturn?: boolean;
           };
           if (!flags.pendingAutofillReturn) return;
-          const list = changes.inboxes.newValue as unknown[];
+          const list = changes.addresses.newValue as unknown[];
           if (Array.isArray(list) && list.length > 0) {
             showToast($t('contentAutofill.returnToForm'), 'success');
             await browser.storage.session.remove([
+              'pendingAutofillReturn',
+              'pendingAutofillUrl',
+              'pendingAutofillAt',
+            ]);
+            // Purge legacy persistent copies: older builds wrote these keys to
+            // storage.local via setStorageViaBg before the session-handoff fix.
+            await browser.storage.local.remove([
               'pendingAutofillReturn',
               'pendingAutofillUrl',
               'pendingAutofillAt',
@@ -3234,13 +3180,8 @@ onMount(async () => {
         }
       })();
     };
-    browser.storage.onChanged.addListener(onInboxReady);
-    // Register for cleanup so it doesn't leak if the component re-mounts
-    const previousCleanupB = cleanupMountedResources;
-    cleanupMountedResources = () => {
-      browser.storage.onChanged.removeListener(onInboxReady);
-      previousCleanupB();
-    };
+    browser.storage.onChanged.addListener(onAddressReady);
+    cleanups.push(() => browser.storage.onChanged.removeListener(onAddressReady));
   } catch {
     /* ignore */
   }
@@ -3255,7 +3196,9 @@ onMount(async () => {
           openImportBackup?: boolean;
         };
         flag = !!s.openImportBackup;
-        if (flag) await browser.storage.session.remove('openImportBackup');
+        // openImportAt is the write-once timestamp marker: purge it with the
+        // flag so no stale copy lingers in session (local already handles it).
+        if (flag) await browser.storage.session.remove(['openImportBackup', 'openImportAt']);
       } catch {
         /* session may be unavailable */
       }
@@ -3267,7 +3210,7 @@ onMount(async () => {
         if (flag) await browser.storage.local.remove(['openImportBackup', 'openImportAt']);
       }
       if (flag) {
-        showImportBackupDialog = true;
+        overlaySetters.setShowImportBackupDialog(true);
       }
     } catch {
       /* ignore */
@@ -3283,13 +3226,17 @@ onMount(async () => {
       }
     };
     browser.storage.onChanged.addListener(onImportFlag);
-    // Store cleanup with other mount cleanups below if available
-    (window as unknown as { __importFlagListener?: typeof onImportFlag }).__importFlagListener =
-      onImportFlag;
+    cleanups.push(() => browser.storage.onChanged.removeListener(onImportFlag));
   } catch {
     /* ignore */
   }
 
+  return cleanups;
+}
+
+/** Locale preload, product-tour flags, thread grouping, quota banner, blocklist. */
+async function preloadLocaleAndMisc(): Promise<(() => void)[]> {
+  const cleanups: (() => void)[] = [];
   // Preload locale JSON for tSync helpers (timeAgo etc.) so list never shows raw keys
   try {
     const stored = (await browser.storage.local.get(['locale', 'preferredLanguage'])) as {
@@ -3314,12 +3261,13 @@ onMount(async () => {
       if (area !== 'local') return;
       if (changes.pendingProductTour?.newValue === true) {
         void (async () => {
-          await loadInboxes(true);
+          await loadAddresses(true);
           await startProductTour();
         })();
       }
     };
     browser.storage.onChanged.addListener(onTourFlag);
+    cleanups.push(() => browser.storage.onChanged.removeListener(onTourFlag));
   } catch {
     /* ignore */
   }
@@ -3328,16 +3276,16 @@ onMount(async () => {
   try {
     const pending = await isPendingProductTour();
     const done = await isProductTourCompleted();
-    const { inboxes: tourInboxes = [] } = (await browser.storage.local.get(['inboxes'])) as {
-      inboxes?: Account[];
+    const { addresses: tourAddresses = [] } = (await browser.storage.local.get(['addresses'])) as {
+      addresses?: Address[];
     };
-    const hasInbox = Array.isArray(tourInboxes) && tourInboxes.length > 0;
-    if (pending && !done && hasInbox) {
+    const hasAddress = Array.isArray(tourAddresses) && tourAddresses.length > 0;
+    if (pending && !done && hasAddress) {
       setTimeout(() => {
         void startProductTour();
       }, 400);
-    } else if (pending && !hasInbox) {
-      // Wait until first address is created (onboarding) — do not show tour on empty shell
+    } else if (pending && !hasAddress) {
+      // Wait until first address is created (onboarding) - do not show tour on empty shell
       await clearPendingProductTour();
     }
   } catch {
@@ -3373,129 +3321,84 @@ onMount(async () => {
 
   // Load autofill blocklist
   try {
-    const { autofillBlocklist: stored = [] } = (await browser.storage.local.get([
-      'autofillBlocklist',
-    ])) as { autofillBlocklist?: string[] };
-    autofillBlocklist = stored;
+    autofillBlocklist = await getAutofillBlocklist();
   } catch (error) {
     logDebug(`Could not load autofill blocklist: ${String(error)}`);
   }
 
+  return cleanups;
+}
+
+/** Email sync controller + storage/runtime listeners + backup storage poll. */
+function setupEmailSync(): {
+  syncEmailsFromStorage: (reason: 'change' | 'poll' | 'initial') => Promise<void>;
+  cleanup: () => void;
+} {
   /**
-   * Resolve stored mail bag for the active address only.
-   * Exact match first, then case-insensitive - never fall back to “same username
-   * different domain/account” (that showed mails from the wrong inbox).
-   * Optionally also try `displayedEmail` when multi-domain cycling changes the domain.
+   * Apply storedEmails → UI - delegated to email-sync module.
+   * The controller adds staleness guards so a slow read never overwrites
+   * a newer result after the user already switched mailboxes.
    */
-  /** Only exact / case-insensitive address key - never merge another inbox's bag. */
-  function resolveStoredEmailBags(
-    storedEmails: Record<string, Email[]>,
-    address: string,
-    _aliasAddress?: string
-  ): { key: string; list: Email[] } {
-    if (!address) return { key: address, list: [] };
-    if (storedEmails[address]) return { key: address, list: storedEmails[address] || [] };
-    const lower = address.toLowerCase();
-    for (const [k, list] of Object.entries(storedEmails)) {
-      if (k.toLowerCase() === lower) return { key: k, list: list || [] };
-    }
-    return { key: address, list: [] };
-  }
-
-  /**
-   * Apply storedEmails → UI without wiping a non-empty list when storage is empty
-   * (common race: API-backed list is showing while storage key/domain hasn't caught up).
-   */
-  async function syncEmailsFromStorage(reason: 'change' | 'poll') {
-    if (!selectedEmail || document.hidden) return;
-    // Capture selection at start - user may switch address while we await storage
-    const forAddress = selectedEmail;
-    const forAlias =
-      displayedEmail && displayedEmail !== selectedEmail ? displayedEmail : undefined;
-    try {
-      const {
-        storedEmails = {},
-        readEmails = {},
-        latestOtp,
-        activeInboxId,
-      } = (await ext.storage.local.get([
-        'storedEmails',
-        'readEmails',
-        'latestOtp',
-        'activeInboxId',
-      ])) as {
-        storedEmails?: Record<string, Email[]>;
-        readEmails?: Record<string, boolean>;
-        latestOtp?: { otp: string; sender: string; senderName: string; context: string };
-        activeInboxId?: string;
-      };
-      // Drop stale sync if user already navigated to another inbox
-      if (selectedEmail !== forAddress) return;
-      if (activeInboxId) {
-        const acct = allInboxes.find((a) => a.id === activeInboxId);
-        if (acct?.address && acct.address !== forAddress && acct.address !== forAlias) {
-          // active id points elsewhere - don't overwrite UI for old address
-          return;
-        }
-      }
-
-      const { key, list: inboxEmails } = resolveStoredEmailBags(storedEmails, forAddress, forAlias);
-
-      // Never blank the visible list with empty storage - but only if in-memory
-      // mails actually belong to this address (don't keep prev inbox's list).
-      if (inboxEmails.length === 0 && emails.length > 0 && selectedEmail === forAddress) {
-        const addrLower = forAddress.toLowerCase();
-        const belongs = emails.every((e) => {
-          const own = (e.original_inbox || '').toLowerCase();
-          return !own || own === addrLower;
-        });
-        if (belongs) {
-          unreadByAddress = computeUnreadCounts(storedEmails, readEmails);
-          return;
-        }
-      }
-
-      if (selectedEmail !== forAddress) return;
-      // Pass the provider's configured message retention so the display layer
-      // never drifts from messageRetentionDuration in providers.jsonc.
-      let retentionMs: number | undefined;
-      try {
-        const acct = allInboxes.find((a) => a.address === key || a.address === forAddress);
-        if (acct?.provider)
-          retentionMs = loadProviderConfig(acct.provider).expiry?.messageRetentionDuration;
-      } catch {
-        /* ignore — fall back to default */
-      }
-      inboxSetters.setEmails([
-        ...mapEmailsForDisplay(inboxEmails, readEmails, key || forAddress, retentionMs),
-      ]);
-      unreadByAddress = computeUnreadCounts(storedEmails, readEmails);
-      const otpResult = latestOtp || extractLatestOtp(storedEmails, context);
-      if (otpResult) {
-        inboxSetters.setLatestOtp(otpResult.otp);
-        inboxSetters.setLatestOtpSender(otpResult.sender);
-        inboxSetters.setLatestOtpSenderName(otpResult.senderName);
-        inboxSetters.setOtpContext(otpResult.context);
-      } else if (reason === 'change') {
-        // Only clear OTP strip on real storage changes when no OTP present
-        inboxSetters.setLatestOtp('------');
-        inboxSetters.setLatestOtpSender('');
-        inboxSetters.setLatestOtpSenderName('');
-        inboxSetters.setOtpContext('');
-      }
-    } catch (e) {
-      logError(`Error syncing emails from storage (${reason})`, e);
-    }
-  }
+  const _emailSyncCtrl = createEmailSyncController({
+    ext,
+    getSelectedEmail: () => selectedEmail,
+    getDisplayedEmail: () => displayedEmail,
+    getAllAddresses: () => allAddresses,
+    getEmails: () => emails,
+    context,
+    setAllStoredEmails: (v) => {
+      allStoredEmails = v;
+    },
+    setEmails: (v) => {
+      addressSetters.setEmails(v);
+    },
+    setLatestOtp: (v) => {
+      addressSetters.setLatestOtp(v);
+    },
+    setLatestOtpSender: (v) => {
+      addressSetters.setLatestOtpSender(v);
+    },
+    setLatestOtpSenderName: (v) => {
+      addressSetters.setLatestOtpSenderName(v);
+    },
+    setOtpContext: (v) => {
+      addressSetters.setOtpContext(v);
+    },
+    refreshUnreadCounts: () => updateUnreadByAddress(),
+  });
+  const syncEmailsFromStorage = (reason: 'change' | 'poll' | 'initial') =>
+    _emailSyncCtrl.sync(reason);
 
   // Listen for storedEmails storage changes (set by background periodic check)
   const handleStorageChange = async (
     changes: Record<string, { oldValue?: unknown; newValue?: unknown }>
   ) => {
-    if (
-      (changes.storedEmails || changes.archivedEmails || changes.readEmails || changes.inboxes) &&
-      selectedEmail
-    ) {
+    // Empty bags are omitted from broad count projections. Apply the changed
+    // bag itself so retained tabs can observe deletion, including inactive
+    // inboxes and a context whose visible-mailbox refresh is currently paused.
+    for (const [key, change] of Object.entries(changes)) {
+      if (!key.startsWith('storedEmailsByAddress_')) continue;
+      let ownerKey: string;
+      try {
+        ownerKey = decodeURIComponent(key.slice('storedEmailsByAddress_'.length));
+      } catch {
+        // A malformed unrelated storage key cannot identify an open inbox.
+        continue;
+      }
+      const owner = allAddresses.find(
+        (address) => address.id === ownerKey || address.address === ownerKey
+      )?.address;
+      if (owner && (change.newValue === undefined || Array.isArray(change.newValue)))
+        allStoredEmails = { ...allStoredEmails, [owner]: (change.newValue as Email[]) || [] };
+    }
+    const hasEmailStorageChange = Object.keys(changes).some(
+      (key) =>
+        key === 'readEmails' ||
+        key === 'addresses' ||
+        key.startsWith('storedEmailsByAddress_') ||
+        key.startsWith('archivedEmailsByAddress_')
+    );
+    if (hasEmailStorageChange && selectedEmail) {
       await syncEmailsFromStorage('change');
     }
     if (changes.threadGrouping) {
@@ -3524,372 +3427,197 @@ onMount(async () => {
   };
   browser.runtime.onMessage.addListener(handleContentMessage);
 
-  // Debounced storage poll function
-  let pollTimeout: ReturnType<typeof setTimeout> | null = null;
-  const debouncedPoll = async () => {
-    if (pollTimeout) clearTimeout(pollTimeout);
-    pollTimeout = setTimeout(async () => {
-      await syncEmailsFromStorage('poll');
-    }, 500); // Debounce for 500ms
-  };
+  // A visible app/sidepanel refreshes the selected mailbox from the background
+  // on the persisted cadence. Popup remains storage-driven because it is short
+  // lived; this prevents hidden surfaces from creating provider traffic.
+  let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+  let refreshGeneration = 0;
+  let refreshIntervalMs = 0;
 
-  // Poll storage every 10 seconds as backup (more reliable than storage.onChanged)
-  // Only poll when page is visible to save resources
-  const pollInterval = setInterval(debouncedPoll, 10000);
-
-  cleanupMountedResources = () => {
-    window.removeEventListener('keydown', handleKeydown);
-    browser.storage.onChanged.removeListener(handleStorageChange);
-    browser.storage.onChanged.removeListener(handleBlocklistChange);
-    browser.runtime.onMessage.removeListener(handleContentMessage);
-    clearInterval(pollInterval);
-    if (pollTimeout) clearTimeout(pollTimeout);
-    cleanupSystemThemeListener();
+  const clearRefreshTimer = () => {
+    if (refreshTimer) {
+      clearTimeout(refreshTimer);
+      refreshTimer = null;
+    }
   };
-
-  // Restore theme settings
-  const themeData = (await ext.storage.local.get(['themeMode', 'contrastLevel'])) as {
-    themeMode?: string;
-    contrastLevel?: string;
+  const scheduleVisibleRefresh = () => {
+    clearRefreshTimer();
+    if (
+      context === 'popup' ||
+      typeof document === 'undefined' ||
+      document.visibilityState !== 'visible'
+    ) {
+      return;
+    }
+    if (refreshIntervalMs <= 0) return;
+    const generation = ++refreshGeneration;
+    refreshTimer = setTimeout(async () => {
+      refreshTimer = null;
+      if (generation !== refreshGeneration || document.visibilityState !== 'visible') return;
+      try {
+        const address = allAddresses.find(
+          (candidate) => candidate.address.toLowerCase() === selectedEmail.toLowerCase()
+        );
+        if (address) await checkMessages(address.id);
+      } finally {
+        if (generation === refreshGeneration) {
+          scheduleVisibleRefresh();
+        }
+      }
+    }, refreshIntervalMs);
   };
-  if (
-    themeData.themeMode === 'light' ||
-    themeData.themeMode === 'system' ||
-    themeData.themeMode === 'dark'
-  ) {
-    themeMode = themeData.themeMode;
-  }
-  if (
-    themeData.contrastLevel === 'standard' ||
-    themeData.contrastLevel === 'medium' ||
-    themeData.contrastLevel === 'high'
-  ) {
-    contrastLevel = themeData.contrastLevel;
-  }
-  applyTheme();
-  await loadInboxes();
+  const loadRefreshInterval = async () => {
+    try {
+      refreshIntervalMs = await getAutoRefreshInterval();
+      scheduleVisibleRefresh();
+    } catch (error) {
+      logError('Failed to load mailbox refresh interval', error);
+    }
+  };
+  const handleVisibilityChange = () => {
+    if (document.visibilityState === 'visible') {
+      void syncEmailsFromStorage('change');
+      void loadRefreshInterval();
+    } else {
+      ++refreshGeneration;
+      clearRefreshTimer();
+    }
+  };
+  const handleRefreshSettingChange = (
+    changes: Record<string, { newValue?: unknown }>,
+    area: string
+  ) => {
+    if (area !== 'local' || !changes.autoRefreshInterval) return;
+    const value = changes.autoRefreshInterval.newValue;
+    refreshIntervalMs =
+      typeof value === 'number' && Number.isFinite(value)
+        ? value === 0
+          ? 0
+          : Math.max(10_000, Math.min(3_600_000, value))
+        : 30_000;
+    scheduleVisibleRefresh();
+  };
+  if (typeof document !== 'undefined')
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+  browser.storage.onChanged.addListener(handleRefreshSettingChange);
+  void loadRefreshInterval();
+
+  return {
+    syncEmailsFromStorage,
+    cleanup: () => {
+      browser.storage.onChanged.removeListener(handleStorageChange);
+      browser.storage.onChanged.removeListener(handleBlocklistChange);
+      browser.storage.onChanged.removeListener(handleRefreshSettingChange);
+      browser.runtime.onMessage.removeListener(handleContentMessage);
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', handleVisibilityChange);
+      }
+      _emailSyncCtrl.cancel();
+      ++refreshGeneration;
+      clearRefreshTimer();
+    },
+  };
+}
+
+/** Deferred mailbox metadata hydration behind the bootstrap gate. */
+function startEmailHydration(
+  syncEmailsFromStorage: (reason: 'change' | 'poll' | 'initial') => Promise<void>
+) {
+  // Start broad legacy-map hydration only after the active shell is eligible to
+  // render. This keeps inactive-mailbox counts and cached-message deserialization
+  // off the critical address/bootstrap path while preserving the current storage
+  // schema and its backup compatibility. Keep the mailbox list in its existing
+  // skeleton state until this first cached-data pass completes, avoiding an
+  // empty-mailbox flash between the two bootstrap stages.
+  loadingEmails = true;
+  const initialEmailHydration = syncEmailsFromStorage('initial').finally(() => {
+    loadingEmails = false;
+  });
+  // Do not hold the active mailbox skeleton for inactive-mailbox counts. The
+  // broad logical-map pass updates badges and address totals after first paint.
+  const initialMetadataHydration = initialEmailHydration.then(() => updateUnreadByAddress());
+  void initialMetadataHydration.catch((error) => {
+    logError('Deferred mailbox metadata hydration failed', error);
+  });
+  return { initialEmailHydration, initialMetadataHydration };
+}
+
+/** Post-bootstrap loads (settings, saved filters, analytics, retention). */
+async function loadPostBootstrapData(initialMetadataHydration: Promise<unknown>) {
   await loadSettings();
   await loadSavedSearchFilters();
   await loadAnalytics();
-  checkRetentionCleanup();
+  // Reuse the already-hydrated global map instead of deserializing it again for
+  // the retention prompt during the same startup pass. If hydration failed,
+  // leave the override unset so the retention check preserves its full-read
+  // fallback rather than undercounting stale mail.
+  const metadataHydrated = await initialMetadataHydration.catch((error) => {
+    logError('Initial mailbox metadata hydration failed before retention check', error);
+    return false;
+  });
+  await checkRetentionCleanup(metadataHydrated ? allStoredEmails : undefined);
+}
 
-  // App context: restore state that was saved when expanding popup to app window
-  // Capture the restored message thread so we can re-apply it AFTER the
-  // background checkMessages refresh replaces `emails` (otherwise the split
-  // pane MessageDetail can render empty because its thread objects are stale).
-  let restoredThread: Email[] | null = null;
-  if (context === 'app') {
-    const expandedAppStateData = (await ext.storage.local.get(['expandedAppState'])) as {
-      expandedAppState?: {
-        currentView?: View;
-        settingsSubpage?: string | null;
-        previousViewBeforeSubpage?: View | null;
-        openMessageInSplit?: boolean;
-        mailProviderSplitOpen?: boolean;
-        mgmtTab?: string;
-        mgmtSearch?: string;
-        selectedEmail?: string;
-        selectedThread?: Email[];
-        currentEmailDetail?: Account | null;
-        archivedSearch?: string;
-      };
-    };
-    const expandedAppState = expandedAppStateData.expandedAppState;
-    if (expandedAppState) {
-      await ext.storage.local.remove(['expandedAppState']);
-      // Only capture restoredThread when we are restoring a message-thread view.
-      // Do not set it for secondary views (keybindings, settings etc.) even if
-      // selectedThread happens to be non-empty in storage — otherwise the
-      // checkMessages().then() callback would overwrite currentView with 'main'.
-      const isThreadRestore =
-        expandedAppState.openMessageInSplit ||
-        expandedAppState.currentView === 'mailView' ||
-        expandedAppState.currentView === 'mailbox';
-      if (isThreadRestore && expandedAppState.selectedThread?.length) {
-        restoredThread = expandedAppState.selectedThread;
-      }
-
-      if (expandedAppState.mgmtTab) mgmtTab = expandedAppState.mgmtTab;
-      if (expandedAppState.mgmtSearch !== undefined) mgmtSearch = expandedAppState.mgmtSearch;
-      if (expandedAppState.archivedSearch !== undefined) {
-        archivedSearch = expandedAppState.archivedSearch;
-      }
-
-      if (
-        expandedAppState.selectedEmail &&
-        allInboxes.some((inbox: Account) => inbox.address === expandedAppState.selectedEmail)
-      ) {
-        await selectAccount(expandedAppState.selectedEmail);
-      }
-
-      // Restore a settings subpage if we were on one (so it lands in the split
-      // pane on the wide app instead of being lost).
-      if (expandedAppState.settingsSubpage) {
-        settingsSubpage = expandedAppState.settingsSubpage;
-        previousViewBeforeSubpage = expandedAppState.previousViewBeforeSubpage ?? null;
-      }
-
-      const isMessageRestore =
-        expandedAppState.openMessageInSplit ||
-        (expandedAppState.currentView === 'mailView' && !!expandedAppState.selectedThread?.length);
-      if (isMessageRestore && expandedAppState.selectedThread?.length) {
-        const restoredMsgThread = expandedAppState.selectedThread;
-        // Optimistically restore the thread. When the app is wide (split capable)
-        // route into the mailbox host so the detail lands in the split pane;
-        // otherwise fall back to the full-page mailView. The updateWide()
-        // handoff migrates mailView → mailbox once the container measures wide,
-        // so an early narrow measurement here does not strand the split.
-        const isWide = layoutSplit || layoutVerticalSplit;
-        currentView = isWide ? 'mailbox' : 'mailView';
-        selectedThread = restoredMsgThread;
-        splitPaneCollapsed = false;
-        // Re-apply after paint AND after the background refresh replaces `emails`,
-        // remapping the restored thread to fresh Email objects so the split-pane
-        // MailView does not render empty/stale content.
-        const remapThread = () => {
-          const fresh = restoredMsgThread
-            .map((m) => emails.find((e) => e.id === m.id))
-            .filter((e): e is Email => !!e);
-          if (fresh.length > 0) {
-            selectedThread = fresh;
-          } else {
-            selectedThread = restoredMsgThread;
-          }
-          splitPaneCollapsed = false;
-        };
-        void tick().then(remapThread);
-        setTimeout(remapThread, 600);
-      } else if (
-        expandedAppState.currentView === 'addressView' &&
-        expandedAppState.currentEmailDetail
-      ) {
-        currentEmailDetail = expandedAppState.currentEmailDetail;
-        const isWide = layoutSplit || layoutVerticalSplit;
-        currentView = isWide ? 'addresses' : 'addressView';
-      } else if (expandedAppState.currentView) {
-        // Secondary views (keybindings, mailProvider, etc.) live in the split
-        // pane when the app is wide.  layoutSplit is already computed here
-        // because the sync second onMount (ResizeObserver) ran before this
-        // async block resumed.
-        if (
-          (layoutSplit || layoutVerticalSplit) &&
-          isSettingsSplitView(expandedAppState.currentView)
-        ) {
-          splitSecondaryView = expandedAppState.currentView;
-          currentView = 'settings';
-        } else {
-          currentView = expandedAppState.currentView;
-        }
-      }
-
-      // Restore mailbox-split mail provider pane (set AFTER currentView is resolved
-      // so the correct split host is active).
-      if (expandedAppState.mailProviderSplitOpen && (layoutSplit || layoutVerticalSplit)) {
-        // This pane is only shown in the mailbox split pane (currentView === 'mailbox');
-        // ensure we're in a state that has a split host.
-        if (
-          currentView === 'mailbox' ||
-          currentView === 'settings' ||
-          currentView === 'addresses'
-        ) {
-          mailProviderSplitOpen = true;
-        }
-      }
-
-      // ── CRITICAL: Force the split pane visible for any restore that puts content ──
-      // ── in the right pane.  The splitPaneCollapsed storage read (in the 4th       ──
-      // ── onMount) resolves AFTER this block runs and can re-collapse the pane,     ──
-      // ── hiding the restored view.  Override it unconditionally here so the user   ──
-      // ── actually sees what they expanded.  They can collapse again if desired.    ──
-      if (
-        (currentView === 'mailbox' && selectedThread.length > 0) ||
-        splitSecondaryView !== null ||
-        mailProviderSplitOpen
-      ) {
-        // Force splitPaneCollapsed = false directly (not via expandSplitPane() which
-        // also writes storage — we don't want to permanently change their preference,
-        // just ensure visibility for this session's restore).
-        splitPaneCollapsed = false;
-      }
-    }
-
-    // Check for expanded email from the message detail expand button
-    const expandedEmailData = (await ext.storage.local.get([
-      'expandedEmailId',
-      'expandedInboxAddress',
-      'expandedInboxId',
-      'expandedMessage',
-    ])) as {
-      expandedEmailId?: string;
-      expandedInboxAddress?: string;
-      expandedInboxId?: string;
-      expandedMessage?: Email;
-    };
-    if (expandedEmailData.expandedMessage || expandedEmailData.expandedEmailId) {
-      const { expandedEmailId, expandedInboxAddress, expandedInboxId, expandedMessage } =
-        expandedEmailData;
-      await ext.storage.local.remove([
-        'expandedEmailId',
-        'expandedInboxAddress',
-        'expandedInboxId',
-        'expandedMessage',
-      ]);
-
-      const inbox = allInboxes.find(
-        (i: Account) => i.id === expandedInboxId || i.address === expandedInboxAddress
-      );
-      if (inbox) {
-        await selectAccount(inbox.address);
-      }
-
-      const email = expandedMessage || emails.find((e: Email) => e.id === expandedEmailId);
-      if (email) {
-        openMessageDetail([email]);
-      }
-    }
-  }
-
-  // Check for pending email open from notification click
-  const pendingEmailOpen = (await ext.storage.local.get(['pendingEmailOpen'])) as {
-    pendingEmailOpen?: { emailId: string; inboxId: string };
-  };
-  if (pendingEmailOpen.pendingEmailOpen) {
-    const { emailId, inboxId } = pendingEmailOpen.pendingEmailOpen;
-    // Clear the pending email open
-    await ext.storage.local.remove(['pendingEmailOpen']);
-
-    // Find the inbox address from allInboxes list
-    const inbox = allInboxes.find((i: Account) => i.id === inboxId);
-    if (inbox) {
-      // Select this inbox
-      await selectAccount(inbox.address);
-
-      // Load emails for this inbox
-      loading = true;
-      await checkMessages(inbox.id);
-      loading = false;
-
-      // Auto-open the email detail for the specific email
-      const targetEmail = emails.find((e: Email) => e.id === emailId);
-      if (targetEmail) {
-        openMessageDetail([targetEmail]);
-      }
-    }
-  } else {
-    const result = (await ext.storage.local.get(['activeInboxId'])) as { activeInboxId?: string };
-    if (result.activeInboxId) {
-      // Paint cached emails immediately — do NOT block UI on slow APIs
-      await syncEmailsFromStorage('poll');
-      // Soft refresh in background (loadingEmails only inside checkMessages)
-      const activeId = result.activeInboxId;
-      void checkMessages(activeId).then(() => {
-        // Re-apply the restored message thread against the FRESH emails list so
-        // the split-pane MessageDetail shows the message (its old Email objects
-        // were replaced by the checkMessages refresh). Only override currentView
-        // when we were actually restoring a message-thread view — do NOT touch
-        // currentView when a secondary settings view (keybindings etc.) is active,
-        // as that would destroy the split-pane routing we just set up.
-        if (restoredThread && restoredThread.length > 0) {
-          const fresh = restoredThread
-            .map((m) => emails.find((e) => e.id === m.id))
-            .filter((e): e is Email => !!e);
-          if (fresh.length > 0) {
-            selectedThread = fresh;
-          }
-          // Only set 'main' if we are currently showing the message thread view.
-          // If splitSecondaryView is active (user was on keybindings etc.), leave
-          // currentView alone so the secondary view stays in the split pane.
-          if (currentView === 'mailbox' || currentView === 'mailView') {
-            const isWide = layoutSplit || layoutVerticalSplit;
-            currentView = isWide ? 'mailbox' : 'mailView';
-          }
-        }
-        void evaluateProviderFailoverAfterRefresh(activeId);
-      });
-    }
-  }
-  // Check form detection from active tab via messaging (+ poll while open)
-  const pollFormDetected = async (tabId?: number) => {
-    try {
-      let id = tabId;
-      if (id == null) {
-        const [tab] = await ext.tabs.query({ active: true, currentWindow: true });
-        id = tab?.id;
-      }
-      if (id == null) {
-        formDetected = false;
-        return;
-      }
-      const response = await ext.tabs.sendMessage(id, { type: 'checkFormDetected' });
-      formDetected = response?.formDetected || false;
-    } catch {
-      /* ignore */
-      formDetected = false;
-    }
-  };
-  await pollFormDetected();
-  // Low-frequency safety poll only — primary signals are tab URL/status + content messages
-  const formPollInterval = setInterval(() => {
-    void pollFormDetected();
-  }, 12000);
-  const handleTabActivated = async (activeInfo: { tabId: number }) => {
-    await pollFormDetected(activeInfo.tabId);
-  };
-  const handleTabUpdated = (
-    tabId: number,
-    changeInfo: { url?: string; status?: string },
-    tab: { active?: boolean }
-  ) => {
-    if (tab.active && (changeInfo.url || changeInfo.status === 'complete')) {
-      // SPA navigations: clear strip immediately then re-probe
-      if (changeInfo.url) formDetected = false;
-      void pollFormDetected(tabId);
-    }
-  };
-  const handleRuntimeMessage = (message: unknown) => {
+/** Form presence badge + OTP runtime toast messages. */
+async function setupFormDetectionAndOtp(): Promise<() => void> {
+  // Keep the form-presence badge synchronized with the active tab. OTP-related
+  // runtime messages remain handled by the layout because they drive toasts.
+  await formDetectionController.start();
+  const handleOtpRuntimeMessage = (message: unknown) => {
     if (
-      message &&
-      typeof message === 'object' &&
-      (message as { type?: string }).type === 'formPresence'
+      !message ||
+      typeof message !== 'object' ||
+      !('type' in message) ||
+      ((message as { type?: string }).type !== 'otpCopied' &&
+        (message as { type?: string }).type !== 'otpAutoCopied')
     ) {
-      formDetected = !!(message as { formDetected?: boolean }).formDetected;
+      return;
     }
+    const typed = message as { type: 'otpCopied' | 'otpAutoCopied'; ok?: boolean };
+    const ok = !!typed.ok;
+    showToast(
+      typed.type === 'otpCopied'
+        ? ok
+          ? $t('inbox.otpCopied')
+          : $t('toasts.otpCopyFailed')
+        : ok
+          ? $t('toasts.otpAutoCopied')
+          : $t('toasts.otpCopyFailed'),
+      ok ? 'success' : 'error'
+    );
   };
-  ext.tabs.onActivated.addListener(handleTabActivated);
-  ext.tabs.onUpdated.addListener(handleTabUpdated);
-  try {
-    ext.runtime.onMessage.addListener(handleRuntimeMessage);
-  } catch {
-    /* ignore */
-  }
+  ext.runtime.onMessage.addListener(handleOtpRuntimeMessage);
 
-  const previousCleanup = cleanupMountedResources;
-  cleanupMountedResources = () => {
-    previousCleanup();
-    clearInterval(formPollInterval);
-    ext.tabs.onActivated.removeListener(handleTabActivated);
-    ext.tabs.onUpdated.removeListener(handleTabUpdated);
-    try {
-      ext.runtime.onMessage.removeListener(handleRuntimeMessage);
-    } catch {
-      /* ignore */
-    }
+  // Background vault auto-lock (idle timer / rotation): toast the lock and
+  // bump the refresh signal so vault-dependent views (saved-logins list)
+  // re-read the lock state instead of showing stale unlocked data.
+  const handleVaultLockMessage = (message: unknown) => {
+    if ((message as { type?: string })?.type !== 'vaultLocked') return;
+    vaultLockSignal += 1;
+    showToast($t('savedLoginInfo.vaultLockedTitle'));
   };
-});
+  ext.runtime.onMessage.addListener(handleVaultLockMessage);
+
+  return () => {
+    formDetectionController.stop();
+    ext.runtime.onMessage.removeListener(handleOtpRuntimeMessage);
+    ext.runtime.onMessage.removeListener(handleVaultLockMessage);
+  };
+}
 
 onDestroy(() => {
+  keyboardTooltipController.clearDiscovery();
   stopExtensionStorageSync();
   cleanupMountedResources();
+  confirmController.dispose();
 });
-
-let cheatSheetOpen = $state(false);
 
 let paletteCommands = $derived.by((): PaletteCommand[] => {
   const go = (view: View) => {
     accountSelectorDropdownOpen = false;
     currentView = view;
   };
-  return [
+  const navigationCommands: PaletteCommand[] = [
     {
       id: 'mailbox',
       label: $t('nav.mailbox') as string,
@@ -3912,10 +3640,21 @@ let paletteCommands = $derived.by((): PaletteCommand[] => {
       run: () => go('autofill'),
     },
     {
+      id: 'sites',
+      label: $t('nav.sites') as string,
+      icon: 'globe',
+      keywords: 'website login account domain',
+      run: () => {
+        autofillTabValue = 'sites';
+        autofillTabSignal += 1;
+        go('autofill');
+      },
+    },
+    {
       id: 'settings',
-      label: $t('nav.settings') as string,
+      label: $t('common.settings') as string,
       icon: 'settings',
-      keywords: 'preferences',
+      keywords: 'preferences configuration options',
       run: () => go('settings'),
     },
     {
@@ -3927,10 +3666,10 @@ let paletteCommands = $derived.by((): PaletteCommand[] => {
     },
     {
       id: 'create',
-      label: $t('account.newMailAddress') as string,
-      icon: 'plus',
+      label: $t('address.newMailAddress') as string,
+      icon: 'add',
       keywords: 'new address generate',
-      run: () => openCreateInboxDialog(),
+      run: () => openCreateAddressDialog(),
     },
     {
       id: 'search',
@@ -3940,7 +3679,7 @@ let paletteCommands = $derived.by((): PaletteCommand[] => {
       hint: '/',
       run: () => {
         if (currentView !== 'mailbox') currentView = 'mailbox';
-        queueMicrotask(() => void focusAppSearch());
+        queueMicrotask(() => void keyboardTooltipController.focusAppSearch());
       },
     },
     {
@@ -3948,7 +3687,7 @@ let paletteCommands = $derived.by((): PaletteCommand[] => {
       label: $t('common.refresh') as string,
       icon: 'refresh',
       keywords: 'reload',
-      run: () => void refreshInbox(),
+      run: () => void refreshMailbox(),
     },
     {
       id: 'shortcuts',
@@ -3957,239 +3696,92 @@ let paletteCommands = $derived.by((): PaletteCommand[] => {
       keywords: 'cheat sheet help',
       hint: '?',
       run: () => {
-        cheatSheetOpen = true;
+        overlaySetters.setCheatSheetOpen(true);
       },
+    },
+  ];
+
+  const credentialCommands: PaletteCommand[] = savedLogins.map((login, index) => {
+    const website = login.website || login.domain || '';
+    let domain = login.domain || website;
+    try {
+      if (website.startsWith('http')) domain = new URL(website).hostname;
+    } catch {
+      /* Keep the stored domain when the website value is malformed. */
+    }
+    const query = domain || login.email || login.username || '';
+    return {
+      id: `credential:${login.id ?? `${domain}:${login.timestamp}:${index}`}`,
+      label: domain || login.email || login.username || $t('nav.credentials'),
+      hint: $t('nav.credentials') as string,
+      icon: 'lock',
+      queryOnly: true,
+      keywords: `${login.website || ''} ${login.email || ''} ${login.username || ''} saved login credential password`,
+      run: () => {
+        paletteWebsiteFilter = query;
+        paletteWebsiteFilterSignal += 1;
+        loginInfoEmailFilter = '';
+        autofillTabValue = 'credentials';
+        autofillTabSignal += 1;
+        go('autofill');
+      },
+    };
+  });
+
+  const addressById = new Map(allAddresses.map((address) => [address.id, address]));
+  const addressByEmail = new Map(
+    allAddresses.map((address) => [address.address.toLowerCase(), address])
+  );
+  const relatedAddressDomains = new Map<string, Set<string>>();
+  for (const login of savedLogins) {
+    const relatedAddress =
+      (login.addressId ? addressById.get(login.addressId) : undefined) ??
+      (login.email ? addressByEmail.get(login.email.toLowerCase()) : undefined);
+    if (!relatedAddress) continue;
+    const domains = relatedAddressDomains.get(relatedAddress.id) ?? new Set<string>();
+    if (login.domain) domains.add(login.domain);
+    if (login.website) domains.add(login.website);
+    relatedAddressDomains.set(relatedAddress.id, domains);
+  }
+
+  const inboxCommands: PaletteCommand[] = allAddresses
+    .filter((address) => relatedAddressDomains.has(address.id))
+    .map((address) => {
+      const domains = [...(relatedAddressDomains.get(address.id) ?? [])];
+      return {
+        id: `related-inbox:${address.id}`,
+        label: address.address,
+        hint: $t('nav.mailbox') as string,
+        icon: 'mail',
+        queryOnly: true,
+        keywords: `${domains.join(' ')} related inbox email address mailbox`,
+        run: () => {
+          currentEmailDetail = address;
+          void navigateFromAddressToMailbox();
+        },
+      };
+    });
+
+  return [
+    ...navigationCommands,
+    ...credentialCommands,
+    ...inboxCommands,
+    {
+      id: 'export-backup',
+      label: $t('backup.exportTitle') as string,
+      icon: 'download',
+      keywords: 'export backup data download save archive',
+      run: () => exportData(),
     },
   ];
 });
 
 // --- Keyboard shortcuts ---
-function focusAppSearch() {
-  // Prefer current page search; fall back to mailbox search (navigate if needed)
-  const selectors = [
-    '[data-mailbox-search] input',
-    '#mailbox-search',
-    'input[type="search"]',
-    'input[placeholder*="Search" i]',
-    'input[placeholder*="search" i]',
-  ];
-  for (const sel of selectors) {
-    const el = document.querySelector<HTMLInputElement>(sel);
-    if (el && !el.disabled && el.offsetParent !== null) {
-      el.focus();
-      el.select?.();
-      return true;
-    }
-  }
-  return false;
-}
-
-function navigateMessageList(direction: 'next' | 'prev') {
-  // Only navigate when mailbox list is available (mailbox or message detail / split)
-  if (currentView !== 'mailbox' && currentView !== 'mailView') {
-    currentView = 'mailbox';
-  }
-  const list = activeNavigationList;
-  if (!list.length) {
-    showToast($t('inbox.noMessagesToNavigate'), 'info');
-    return;
-  }
-  let idx = currentNavigationIndex;
-  if (idx < 0) {
-    idx = direction === 'next' ? -1 : 0;
-  }
-  const nextIdx = direction === 'next' ? idx + 1 : idx - 1;
-  if (nextIdx < 0 || nextIdx >= list.length) {
-    showToast(
-      direction === 'next' ? $t('inbox.endOfMessageList') : $t('inbox.startOfMessageList'),
-      'info'
-    );
-    return;
-  }
-  openMessageDetail(list[nextIdx].emails);
-}
-
-function handleKeydown(event: KeyboardEvent) {
-  const target = event.target as HTMLElement;
-  const isInput =
-    target &&
-    (target.tagName === 'INPUT' ||
-      target.tagName === 'TEXTAREA' ||
-      target.tagName === 'SELECT' ||
-      target.isContentEditable);
-
-  // Suppress global shortcuts while a blocking modal is open (only Escape to
-  // close the dialog is allowed, handled inside handleKeydownAction).
-  const modalOpen =
-    !!confirmDialog ||
-    qrDialogOpen ||
-    createInboxDialogOpen ||
-    commandPaletteOpen ||
-    cheatSheetOpen ||
-    exportWizardOpen ||
-    showExportBackupDialog ||
-    showImportBackupDialog ||
-    addressViewTagDialogOpen;
-
-  if (!isInput && !modalOpen && event.key === '?') {
-    event.preventDefault();
-    cheatSheetOpen = !cheatSheetOpen;
-    return;
-  }
-
-  // "/" focuses search on any page (before other handlers steal it)
-  if (
-    !isInput &&
-    !modalOpen &&
-    event.key === '/' &&
-    !event.ctrlKey &&
-    !event.metaKey &&
-    !event.altKey
-  ) {
-    event.preventDefault();
-    if (!focusAppSearch()) {
-      // Navigate to mailbox so mailbox search exists, then focus
-      if (currentView !== 'mailbox' && currentView !== 'mailView') {
-        currentView = 'mailbox';
-      }
-      queueMicrotask(() => {
-        if (!focusAppSearch()) {
-          // last resort after view paint
-          setTimeout(() => void focusAppSearch(), 50);
-        }
-      });
-    }
-    return;
-  }
-
-  // Ctrl/Cmd+K command palette
-  if (
-    !isInput &&
-    !modalOpen &&
-    (event.key === 'k' || event.key === 'K') &&
-    (event.ctrlKey || event.metaKey) &&
-    !event.altKey
-  ) {
-    event.preventDefault();
-    commandPaletteOpen = !commandPaletteOpen;
-    return;
-  }
-
-  handleKeydownAction(
-    event,
-    {
-      currentView,
-      mgmtTab,
-      selectedAddresses,
-      mgmtSearch,
-      qrDialogOpen,
-      confirmDialog,
-      selectedMessage: selectedThread,
-      currentEmailDetail,
-      modalOpen,
-    },
-    {
-      refreshInbox,
-      createInbox,
-      copyEmail,
-      copyOtp,
-      closeConfirm,
-      closeQrDialog,
-      setCurrentView: (view) => (currentView = view as View),
-      setSelectedAddresses: (addresses) => (selectedAddresses = addresses),
-      setMgmtSearch: (search) => (mgmtSearch = search),
-      setSelectedMessage: (message: Email[] | null) => (selectedThread = message ?? []),
-      setCurrentEmailDetail: (detail: Account | null) => (currentEmailDetail = detail),
-      toggleAccountSelector: () => {
-        if (currentView !== 'mailbox') currentView = 'mailbox';
-        accountSelectorDropdownOpen = !accountSelectorDropdownOpen;
-      },
-      focusSearch: () => {
-        if (!focusAppSearch()) {
-          if (currentView !== 'mailbox') currentView = 'mailbox';
-          queueMicrotask(() => void focusAppSearch());
-        }
-      },
-      navigateMessageList,
-    },
-    keybindings
-  );
-}
-
 // --- Global Tooltip Logic ---
-let activeTooltip = $state<{ text: string; x: number; y: number } | null>(null);
-let tooltipTimeout: ReturnType<typeof setTimeout> | null = null;
-let hoveredElement: HTMLElement | null = null;
-let tooltipRef = $state<HTMLElement | null>(null);
 
-function handleMouseOver(e: MouseEvent) {
-  const target = (e.target as HTMLElement).closest('[title], [data-tooltip]') as HTMLElement;
-  if (!target) return;
-  if (hoveredElement === target) return;
-
-  clearTooltip();
-  hoveredElement = target;
-
-  let text = target.getAttribute('data-tooltip') || '';
-  if (!text && target.hasAttribute('title')) {
-    text = target.getAttribute('title') || '';
-    target.setAttribute('data-tooltip', text);
-    target.removeAttribute('title');
-  }
-
-  if (!text) return;
-
-  tooltipTimeout = setTimeout(() => {
-    const rect = target.getBoundingClientRect();
-    let x = rect.left + rect.width / 2;
-    let y = rect.bottom + 6;
-
-    activeTooltip = { text, x, y };
-  }, 400);
-}
-
-function handleMouseOut(e: MouseEvent) {
-  if (hoveredElement && !hoveredElement.contains(e.relatedTarget as Node)) {
-    clearTooltip();
-  }
-}
-
-function clearTooltip() {
-  if (tooltipTimeout) {
-    clearTimeout(tooltipTimeout);
-    tooltipTimeout = null;
-  }
-  activeTooltip = null;
-  hoveredElement = null;
-}
-
-$effect(() => {
-  if (activeTooltip && tooltipRef) {
-    const rect = tooltipRef.getBoundingClientRect();
-    const padding = 8;
-    let left = activeTooltip.x;
-    let top = activeTooltip.y;
-
-    if (left - rect.width / 2 < padding) {
-      left = rect.width / 2 + padding;
-    }
-    if (left + rect.width / 2 > window.innerWidth - padding) {
-      left = window.innerWidth - rect.width / 2 - padding;
-    }
-
-    if (top + rect.height > window.innerHeight - padding) {
-      const targetRect = hoveredElement?.getBoundingClientRect();
-      if (targetRect) {
-        top = targetRect.top - rect.height - 6;
-      }
-    }
-
-    tooltipRef.style.left = `${left}px`;
-    tooltipRef.style.top = `${top}px`;
-    tooltipRef.style.transform = 'translate(-50%, 0)';
-    tooltipRef.style.opacity = '1';
-  }
-});
+$effect(() =>
+  keyboardTooltipController.positionTooltip(overlayState.tooltipRef, overlayState.activeTooltip)
+);
 
 onMount(() => {
   // Global contextmenu lock: Disable native browser right-click everywhere across
@@ -4197,7 +3789,7 @@ onMount(() => {
   // ([data-selectable-text]), editable form controls (input, textarea, etc.), or
   // when the user already has an active text selection (right-click-to-copy).
   /** True when the target sits inside a selectable/editable region, walking
-   * THROUGH shadow roots — the email body renders in a Shadow DOM (EmailBody)
+   * THROUGH shadow roots - the email body renders in a Shadow DOM (EmailBody)
    * where a plain `closest()` from a document listener can't see past the
    * boundary. Returns true if any ancestor up the composed tree matches. */
   const hitSelectableRegion = (target: EventTarget | null): boolean => {
@@ -4215,7 +3807,7 @@ onMount(() => {
     if (hitSelectableRegion(e.target)) {
       return; // Allow native context menu / text selection / input actions
     }
-    // Allow the native menu when the user right-clicks an existing selection —
+    // Allow the native menu when the user right-clicks an existing selection -
     // this keeps copy working on any read-only text (OTP, QR data, activity log,
     // email headers) without having to tag every element with data-selectable-text.
     if (typeof window.getSelection === 'function') {
@@ -4228,96 +3820,42 @@ onMount(() => {
   };
   window.addEventListener('contextmenu', handleGlobalContextMenu, { capture: true });
 
-  window.addEventListener('mouseover', handleMouseOver, { passive: true });
-  window.addEventListener('mouseout', handleMouseOut, { passive: true });
-  window.addEventListener('mousedown', clearTooltip, { passive: true });
-  window.addEventListener('scroll', clearTooltip, { capture: true, passive: true });
-  const updateWide = () => {
-    const wasSplit = layoutSplit;
-    const wasWide = layoutWide;
-    // Use container width (ResizeObserver) rather than window.innerWidth so the
-    // sidepanel layout responds to panel width, not the total browser window width.
-    const w = layoutRootEl ? layoutRootEl.getBoundingClientRect().width : window.innerWidth;
-    layoutWide = context !== 'popup' && w >= 800;
-    layoutSplit = context !== 'popup' && w >= 1280;
-    // Trigger brief crossfade when crossing either responsive threshold
-    if (layoutSplit !== wasSplit || layoutWide !== wasWide) {
-      splitModeFlash = true;
-      window.setTimeout(() => {
-        splitModeFlash = false;
-      }, 220);
-    }
-    // Improvement C: view handoff when entering/leaving split mode (Layout 2 or 3, width ≥800px).
-    // Secondary settings views (from the view-registry) migrate to split mode
-    // (settings hub on left, detail on right) when layout enters wide split mode.
-    if (layoutWide && !wasWide) {
-      if (currentView === 'mailView' && selectedThread.length > 0) {
-        currentView = 'mailbox';
-      } else if (currentView === 'addressView' && currentEmailDetail) {
-        // Email detail with an active record → keep addresses in main pane
-        currentView = 'addresses';
-      } else if (isSettingsSplitView(currentView)) {
-        // Secondary settings view → migrate to split: hub left, detail right
-        splitSecondaryView = currentView;
-        currentView = 'settings';
-      }
-    } else if (!layoutWide && wasWide) {
-      if (currentView === 'mailbox' && selectedThread.length > 0) {
-        currentView = 'mailView';
-      } else if (currentView === 'addresses' && currentEmailDetail) {
-        currentView = 'addressView';
-      } else if (currentView === 'settings' && splitSecondaryView) {
-        // Restore secondary view to full-page when leaving split mode
-        currentView = splitSecondaryView;
-        splitSecondaryView = null;
-      }
-      // Ensure current content is routable from bottom nav when leaving wide layout
-      if (currentView === 'addresses' && !currentEmailDetail) {
-        currentView = 'mailbox';
-      }
-    }
-  };
-  updateWide();
-  // ResizeObserver for container-based responsive breakpoints (Improvement A).
-  // Fires whenever the root layout element changes width (e.g. user resizes sidepanel).
-  // Falls back to window resize for popup context where layoutRootEl may not be set.
-  if (typeof ResizeObserver !== 'undefined') {
-    _layoutRo = new ResizeObserver(updateWide);
-    if (layoutRootEl) _layoutRo.observe(layoutRootEl);
-  }
-  // Keep window resize as fallback and for popup context
-  window.addEventListener('resize', updateWide, { passive: true });
-  void browser.storage.local
-    .get(['uiDensity', 'splitListWidthPx', 'splitPaneCollapsed'])
-    .then((r) => {
-      const d = (r as { uiDensity?: string }).uiDensity;
-      if (d === 'compact' || d === 'comfortable') uiDensity = d;
-      const w = (r as { splitListWidthPx?: number }).splitListWidthPx;
-      if (typeof w === 'number' && w >= 260) splitListWidthPx = w;
-      const collapsed = (r as { splitPaneCollapsed?: boolean }).splitPaneCollapsed;
-      if (typeof collapsed === 'boolean') {
-        // Don't re-collapse the split pane if a detail view was just restored
-        // via "Open in App" — the restore block already forced it open so the
-        // user sees the restored content. Re-collaring here would hide it.
-        const detailActive =
-          selectedThread.length > 0 || currentEmailDetail != null || splitSecondaryView != null;
-        splitPaneCollapsed = detailActive ? false : collapsed;
-      }
-      // Re-observe after layoutRootEl may have been bound during loading
-      if (_layoutRo && layoutRootEl) _layoutRo.observe(layoutRootEl);
+  window.addEventListener('mouseover', keyboardTooltipController.handleMouseOver, {
+    passive: true,
+  });
+  window.addEventListener('mouseout', keyboardTooltipController.handleMouseOut, { passive: true });
+  window.addEventListener('mousedown', keyboardTooltipController.clearTooltip, { passive: true });
+  window.addEventListener('scroll', keyboardTooltipController.clearTooltip, {
+    capture: true,
+    passive: true,
+  });
+
+  // The $effect teardown below does NOT run when the popup/sidepanel window
+  // itself closes - without this, queued read-state ops die in the debounce
+  // timer. flushQueuedEmailReadState runs its sync prefix (clear timer, drain
+  // ops, enqueue the write) synchronously, so pagehide still dispatches it.
+  // Debounced settings toggles have the same stranding window, so they flush
+  // alongside (synchronous dispatch; a failed write re-queues for next time).
+  const handlePagehide = () => {
+    void flushQueuedEmailReadState().catch(() => {
+      // The flush already logs and retains failed operations in this context.
     });
-  const onDensityStorage = (changes: Record<string, { newValue?: unknown }>, area: string) => {
-    if (area !== 'local' || !changes.uiDensity) return;
-    const d = changes.uiDensity.newValue;
-    if (d === 'compact' || d === 'comfortable') uiDensity = d;
+    flushPendingSettingsWrites(browser);
   };
-  browser.storage.onChanged.addListener(onDensityStorage);
+  window.addEventListener('pagehide', handlePagehide);
+
+  layoutMeasurementController.start();
+
+  // Layout measurement, resize scheduling, and preference hydration are owned by
+  // the dedicated controller above.
   return () => {
+    void flushQueuedEmailReadState().catch(() => {
+      // The flush already logs and retains failed operations in this context.
+    });
+    flushPendingSettingsWrites(browser);
+    window.removeEventListener('pagehide', handlePagehide);
     window.removeEventListener('contextmenu', handleGlobalContextMenu, { capture: true });
-    window.removeEventListener('resize', updateWide);
-    _layoutRo?.disconnect();
-    _layoutRo = null;
-    browser.storage.onChanged.removeListener(onDensityStorage);
+    layoutMeasurementController.stop();
   };
 });
 
@@ -4327,2133 +3865,424 @@ onMount(() => {
 $effect(() => {
   const el = bottomFloatingLayerEl;
   if (!el || typeof ResizeObserver === 'undefined') return;
-  const ro = new ResizeObserver((entries) => {
-    for (const entry of entries) {
-      const rect = entry.target.getBoundingClientRect();
-      // Minimum 36 = FAB min-height (2.25rem). Protects against 0-height pre-render flash.
-      const height = Math.max(36, Math.ceil(rect.height));
-      if (height !== bottomSafeAreaPx) {
-        bottomSafeAreaPx = height;
-      }
-    }
-  });
   // Prefer the inner footer-float (has real block height) over the wrapper (height=0).
   const target = el.querySelector('.footer-float') ?? el;
-  ro.observe(target);
-  return () => ro.disconnect();
-});
-
-$effect(() => {
-  const el = layoutRootEl;
-  const ro = _layoutRo;
-  if (!el || !ro) return;
-  ro.observe(el);
-  return () => ro.unobserve(el);
+  const badge = overlayState.demoModeActive ? el.querySelector('[data-demo-exit]') : null;
+  const measure = () => {
+    const rect = target.getBoundingClientRect();
+    // The demo exit control floats above the island and must not cover a dock
+    // or a selected-items strip. Include its measured bounds in the safe area.
+    const badgeHeight = badge
+      ? el.getBoundingClientRect().bottom - badge.getBoundingClientRect().top
+      : 0;
+    // Scroll-hide translates the island; its translation must not change this reserve.
+    const height = Math.max(36, Math.ceil(Math.max(rect.height, badgeHeight)));
+    if (height !== bottomSafeAreaPx) {
+      bottomSafeAreaPx = height;
+    }
+  };
+  const releaseFooter = observeResizeOnFrame(target, measure);
+  const releaseBadge = badge ? observeResizeOnFrame(badge, measure) : undefined;
+  measure();
+  return () => {
+    releaseFooter();
+    releaseBadge?.();
+  };
 });
 
 onDestroy(() => {
-  if (typeof window !== 'undefined') {
-    window.removeEventListener('mouseover', handleMouseOver);
-    window.removeEventListener('mouseout', handleMouseOut);
-    window.removeEventListener('mousedown', clearTooltip);
-    window.removeEventListener('scroll', clearTooltip, { capture: true });
+  if (scrollChromeTimer) {
+    clearTimeout(scrollChromeTimer);
+    scrollChromeTimer = null;
   }
+  if (typeof window !== 'undefined') {
+    window.removeEventListener('mouseover', keyboardTooltipController.handleMouseOver);
+    window.removeEventListener('mouseout', keyboardTooltipController.handleMouseOut);
+    window.removeEventListener('mousedown', keyboardTooltipController.clearTooltip);
+    window.removeEventListener('scroll', keyboardTooltipController.clearTooltip, { capture: true });
+  }
+});
+// Register after all layout state is initialized: pre-effects run immediately.
+// Snapshot the outgoing scroller before detaching it (detached scrollTop is 0).
+$effect.pre(() => {
+  const nextKey = activeMessageTabKey;
+  const hiding =
+    !(layoutSplit || layoutVerticalSplit) ||
+    splitPaneCollapsed ||
+    (layoutVerticalSplit && $activeSelectionStore?.surface === 'mailbox') ||
+    currentView !== 'mailbox';
+  untrack(() => {
+    const node = document.querySelector<HTMLElement>(
+      '[data-message-tab-panel] [data-message-scroll]'
+    );
+    const key = node?.dataset.messageScrollKey;
+    if (node && key && (hiding || key !== nextKey)) onMessageScroll(key, node.scrollTop);
+  });
 });
 </script>
 
 <ErrorBoundary>
+  {#if shortcutDiscoveryOpen}
+    <ShortcutDiscovery {currentView} {keybindings} hasMessages={activeNavigationList.length > 0} hasEmail={!!selectedEmail} hasOtp={!!latestOtp && latestOtp !== '------'} hasSelectableRows={Array.from(document.querySelectorAll<HTMLElement>('[data-selectable-row]')).some((row) => row.offsetParent !== null)} />
+  {/if}
   <!--
-    Header/footer MUST NOT use z-index stacking contexts.
-    View overlays use position:fixed; if chrome is z-10 and content is z-0,
-    header/footer paint ABOVE fixed dialogs inside content (stacking trap).
+    BINDING POLICY (audit 2026-09): AppShell declares these props as
+    $bindable because the shell WRITES them internally (nav clicks, split
+    panes, multi-select, tab deep-links, ...) while AppLayout OWNS them and
+    consumes them in layout/keyboard/logic code. Passing them one-way
+    silently desyncs the two copies - the keyboard controller then acted on
+    a stale view (Escape-back broken after mouse navigation). Every prop
+    below where BOTH sides write is therefore bound.
+
+    Deliberately left one-way (AppLayout is a passive initializer and never
+    reads the value back):
+    - organizeTabValue/organizeTabSignal, tagCreateSignal, labelCreateSignal,
+      savedLoginsFocusSignal - deep-link triggers fired only inside the
+      shell's own nav/fab; AppLayout merely seeds defaults.
+    - loginInfoEmailFilter, identitiesEmailFilter - cross-nav filters set
+      by panes rendered inside the shell.
+    - mailboxListTab, activeMailboxLabel - mailbox folder/label UI state owned by
+      the shell's list layer. (A list's SELECTION is not threaded as a prop: each
+      list publishes it into `@/utils/ui/selection-registry.js`, which is how the
+      shell's one strip reaches lists rendered through other chains.)
+    - sortBy, otpOnly, hasAttachment, senderDomain…dateTo - reactive projections of
+      AppLayout mailboxFilters, derived rather than destructured once. List filtering
+      must route through mailboxFilters.* setters (applySearchQuery etc.)
+      so filteredEmails recomputes; binding the mirror would bypass the
+      store, so these stay one-way by design.
   -->
-  <div
-    class="flex justify-center items-stretch bg-md-background overflow-x-hidden
-      {context === 'popup' ? 'w-[360px] h-[600px] min-h-0' : 'min-h-screen'}
-      {context === 'sidepanel' || context === 'app' ? 'h-screen w-full' : ''}"
-  >
-    <!--
-      Popup: exactly 360×600, no outer padding (padding was clipping ~8–15px).
-      Sidepanel/app: fill host; no fixed phone frame.
-    -->
-    <div
-      bind:this={layoutRootEl}
-      class="relative bg-md-surface flex transition-all duration-300 ease-in-out overflow-x-hidden box-border
-        {layoutWide ? 'flex-row' : 'flex-col'}
-        {context === 'popup'
-          ? 'w-[360px] max-w-[360px] min-w-[360px] h-[600px] min-h-[600px] max-h-[600px] p-[7.5px] rounded-none shadow-none overflow-x-auto'
-          : layoutWide
-            ? 'w-full max-w-none h-full min-h-0 max-h-none flex-1 p-0 rounded-none shadow-none'
-            : 'w-full max-w-none h-full min-h-0 max-h-none flex-1 p-[7.5px] rounded-none shadow-none'}"
-      style="--footer-safe: {layoutWide ? '12px' : `${bottomSafeAreaPx}px`}; --bottom-safe-area: {layoutWide ? '12px' : `${bottomSafeAreaPx}px`};"
-    >
-      {#if layoutWide && !(isOffline && !offlineDismissed)}
-        <SidebarNav
-          {currentView}
-          context={context}
-          themeMode={themeMode === 'system' ? 'auto' : themeMode}
-          onThemeChange={(mode) => setThemeMode(mode === 'auto' ? 'system' : mode)}
-          {contrastLevel}
-          onContrastChange={(level) => void setContrastLevel(level)}
-          onNavigate={(view) => {
-            accountSelectorDropdownOpen = false;
-            currentView = view;
-          }}
-          onLogoClick={() => {
-            accountSelectorDropdownOpen = false;
-            currentView = 'about';
-          }}
-          onExpandApp={expandCurrentView}
-          organizeTab={organizeTabValue}
-          autofillTab={autofillTabValue}
-          {mgmtTab}
-          mailboxListTab={mailboxListTab}
-          onMailboxListTab={(tab) => {
-            mailboxListTab = tab as typeof mailboxListTab;
-          }}
-          mailboxLabels={sidebarMailboxLabels}
-          mailboxLabelCounts={mailboxLabelCounts}
-          activeMailboxLabel={activeMailboxLabel}
-          onMailboxLabel={(lab) => {
-            activeMailboxLabel = lab;
-          }}
-          onMailboxFolderDrop={(tab) => {
-            if (tab === 'archived') {
-              mailboxSelectionApi.archive?.();
-              mailboxListTab = 'archived';
-              activeMailboxLabel = null;
-            } else if (tab === 'deleted') {
-              mailboxSelectionApi.delete?.();
-              mailboxListTab = 'deleted';
-              activeMailboxLabel = null;
-            } else if (tab === 'inbox') {
-              if (mailboxListTab === 'archived' || mailboxListTab === 'deleted') {
-                mailboxSelectionApi.restore?.();
-              }
-              mailboxListTab = 'inbox';
-              activeMailboxLabel = null;
-            } else if (tab === 'all') {
-              mailboxListTab = 'all';
-              activeMailboxLabel = null;
-            }
-          }}
-          onMailboxLabelDrop={(lab) => {
-            void mailboxSelectionApi.applyLabel?.(lab);
-            activeMailboxLabel = lab;
-          }}
-          onOrganizeTab={(tab) => {
-            organizeTabValue = tab;
-            organizeTabSignal += 1;
-          }}
-          onAutofillTab={(tab) => {
-            autofillTabValue = tab;
-            autofillTabSignal += 1;
-          }}
-          onMgmtTab={(tab) => {
-            mgmtTab = tab;
-          }}
-          totalUnread={totalUnreadCount}
-          showBack={showHeaderBack}
-          onBack={handleHeaderBack}
-          density={uiDensity}
-          loading={loading || loadingEmails}
-          providerInstances={providerInstances}
-          onCreateInboxWithProvider={handleCreateInboxWithProvider}
-          onOpenProviderSettings={openMailProviderSettings}
-          selectedEmail={selectedEmail}
-          allInboxes={allInboxes}
-          onSelectAccount={(addr) => void selectAccount(addr)}
-          mailboxFolderCounts={mailboxFolderCounts}
-          liveCount={sidebarLiveCount}
-          inactiveCount={sidebarInactiveCount}
-          tagCount={sidebarTagCount}
-          labelCount={sidebarLabelCount}
-          filterCount={sidebarFilterCount}
-          profileCount={sidebarProfileCount}
-          credentialCount={sidebarCredentialCount}
-          onFabClick={(kind) => {
-            // Same handlers as floating Footer FAB
-            if (kind === 'refresh') {
-              const id =
-                allInboxes.find((a) => a.address === selectedEmail)?.id ||
-                accounts.find((a) => a.address === selectedEmail)?.id;
-              if (id) void refreshInbox(id);
-              else void refreshInbox();
-            } else if (kind === 'createAddress') {
-              openCreateInboxDialog();
-            } else if (kind === 'createIdentity') {
-              identityCreateSignal += 1;
-              autofillTabValue = 'profiles';
-              autofillTabSignal += 1;
-              if (currentView !== 'autofill') currentView = 'autofill';
-            } else if (kind === 'createTag') {
-              tagCreateSignal += 1;
-              organizeTabValue = 'tags';
-              organizeTabSignal += 1;
-              if (currentView !== 'organize') currentView = 'organize';
-            } else if (kind === 'createLabel') {
-              labelCreateSignal += 1;
-              organizeTabValue = 'labels';
-              organizeTabSignal += 1;
-              if (currentView !== 'organize') currentView = 'organize';
-            } else if (kind === 'createFilter') {
-              organizeTabValue = 'filters';
-              organizeTabSignal += 1;
-              if (currentView !== 'organize') currentView = 'organize';
-              // Filters are created from mailbox search; open filters tab for management
-            } else if (kind === 'ghostLogin') {
-              autofillTabValue = 'credentials';
-              autofillTabSignal += 1;
-              if (currentView !== 'autofill') currentView = 'autofill';
-              savedLoginsFocusSignal += 1;
-            } else if (kind === 'ghostExpand') {
-              // FAB "expand" on message detail → open the full app window with
-              // the current view (same as the header expand button).
-              void expandCurrentView();
-            } else if (kind === 'ghost') {
-              try {
-                document
-                  .querySelector('.view-crossfade')
-                  ?.scrollTo({ top: 0, behavior: 'smooth' });
-              } catch {
-                /* ignore */
-              }
-            }
-          }}
-        />
-      {/if}
-      <!--
-        Shell content column (right of sidebar). When layoutSplit is on, THIS is not
-        the mainview alone — mainview is the list pane inside each page (data-mainview).
-        Enforce min 360px so sidepanel/app never crush the primary content column.
-      -->
-      <div
-        class="flex flex-col flex-1 min-h-0 relative min-w-0
-          {layoutWide ? 'p-[7.5px]' : ''}"
-        data-density={uiDensity}
-        data-content-shell
-        style={layoutWide || context === 'sidepanel' || context === 'app'
-          ? 'min-width: 360px;'
-          : undefined}
-      >
-      {#if isOffline && !offlineDismissed}
-        <OfflineBanner onDismiss={() => { offlineDismissed = true; }} />
-      {:else if !layoutWide}
-        {@const moreDestViews = new Set([
-          'about',
-          'settings',
-          'organize',
-          'analytics',
-          'tagManagement',
-          'labelManagement',
-          'filtersManagement',
-        ])}
-        {@const shellW = typeof window !== 'undefined' ? window.innerWidth : 360}
-        <!-- Match Footer adaptive nav: 7-wide promotes all; 6-wide keeps Activity+About in More -->
-        {@const promotedInPrimary =
-          shellW >= 520
-            ? new Set(['organize', 'analytics', 'settings', 'about'])
-            : shellW >= 440
-              ? new Set(['organize', 'settings'])
-              : shellW >= 400
-                ? new Set(['organize'])
-                : new Set<string>()}
-        {@const moreNavKey =
-          currentView === 'tagManagement' ||
-          currentView === 'labelManagement' ||
-          currentView === 'filtersManagement'
-            ? 'organize'
-            : currentView}
-        {@const isMoreOnlyPage =
-          moreDestViews.has(currentView) && !promotedInPrimary.has(moreNavKey)}
-        {@const headerPageTitle =
-          currentView === 'about'
-            ? $t('nav.about')
-            : currentView === 'settings'
-              ? $t('nav.settings')
-              : currentView === 'organize' ||
-                  currentView === 'tagManagement' ||
-                  currentView === 'labelManagement' ||
-                  currentView === 'filtersManagement'
-                ? $t('nav.organize')
-                : currentView === 'analytics'
-                  ? $t('nav.activity')
-                  : ''}
-        <Header
-          contrastLevel={contrastLevel}
-          onContrastChange={(level) => void setContrastLevel(level)}
-          themeMode={themeMode === 'system' ? 'auto' : themeMode}
-          onThemeChange={(mode) => setThemeMode(mode === 'auto' ? 'system' : mode)}
-          expandState={{
-            // Capture the detail content the user is actually looking at:
-            // split-pane content first (when visible), else the mainview page.
-            currentView: activeViewForExpand,
-            settingsSubpage: settingsSubpage ?? undefined,
-            previousViewBeforeSubpage,
-            mgmtTab,
-            mgmtSearch,
-            selectedEmail,
-            // $state proxies cannot be structured-cloned into storage.local —
-            // snapshot so the Header's expand write does not throw DataCloneError.
-            selectedThread: $state.snapshot(selectedThread),
-            currentEmailDetail: currentEmailDetail ? $state.snapshot(currentEmailDetail) : null,
-            archivedSearch,
-            // Reliable split-restore trigger: signal the app tab to route an open
-            // message thread into the mailbox split pane when wide.
-            openMessageInSplit: selectedThread.length > 0 || undefined,
-            // Persist mailbox-split state so 'Open in App' restores the provider pane
-            mailProviderSplitOpen: mailProviderSplitOpen || undefined,
-          }}
-          showBack={showHeaderBack}
-          compactLogo={showHeaderBack}
-          morePageChrome={isMoreOnlyPage && !showHeaderBack}
-          pageTitle={isMoreOnlyPage && !showHeaderBack ? headerPageTitle : ''}
-          onBack={handleHeaderBack}
-          onLogoClick={() => {
-            accountSelectorDropdownOpen = false;
-            currentView = 'about';
-          }}
-        />
-      {:else}
-        <!-- Wide layout: back lives in SidebarNav header next to logo -->
-      {/if}
-
-      <!-- Main content - floats under the floating nav; each view has its own end-of-list spacer -->
-      <div
-        class="flex-1 min-h-0 overflow-hidden overflow-x-hidden relative flex flex-col"
-      >
-  {#key currentView}
-  <div class="view-crossfade flex-1 min-h-0 flex flex-col overflow-hidden">
-
-  {#if currentView === 'addresses'}
-    <!-- 3-col: sidebar | mainview (list) | splitview (detail) — gap = padding between panes -->
-    <div class="flex flex-1 min-h-0 overflow-hidden {layoutSplit ? 'flex-row gap-[7.5px]' : layoutVerticalSplit ? 'flex-col gap-2 overflow-y-auto' : 'flex-col'} {splitModeFlash ? 'split-mode-flash' : ''}">
-    <div
-      data-mainview
-      class="relative {layoutSplit
-        ? 'shrink-0 flex flex-col h-full min-h-0'
-        : layoutVerticalSplit
-          ? 'shrink-0 min-h-[300px] max-h-[50%] flex flex-col h-full min-h-0'
-          : 'flex-1 min-h-0 flex flex-col h-full'}"
-      style={layoutSplit
-        ? `width: ${splitListWidthPx}px; min-width: 360px; max-width: min(640px, 55%); flex-shrink: 0;`
-        : 'min-width: 0;'}
-    >
-    {#if AddressesViewComponent}
-      {@const Comp = AddressesViewComponent}
-      <Comp {context}
-    onBack={() => { currentView = 'mailbox'; selectedAddresses = new Set(); mgmtSearch = ''; currentEmailDetail = null; }}
-    mgmtTab={mgmtTab}
-    mgmtSearch={mgmtSearch}
-    selectedAddresses={selectedAddresses}
-    mgmtAccounts={mgmtAccounts}
-    allAccounts={allInboxes}
-    allSelected={allSelected}
-    loadingInboxes={loadingInboxes}
-    storedEmails={allStoredEmails}
-    onTabChange={(tab: string) => { mgmtTab = tab; selectedAddresses = new Set(); }}
-    onSearchChange={(value: string) => mgmtSearch = value}
-    onToggleSelectAll={toggleSelectAll}
-    onToggleSelect={(id: string) => toggleSelect(id)}
-    onArchiveSelected={archiveSelected}
-    onUnarchiveSelected={unarchiveSelected}
-    onDeleteSelected={deleteSelected}
-    onExportSelected={exportSelected}
-    onMarkSelectedRead={async () => {
-      try {
-        const { readEmails = {} } = (await ext.storage.local.get(['readEmails'])) as {
-          readEmails?: Record<string, boolean>;
-        };
-        for (const id of selectedAddresses) {
-          const acc = allInboxes.find((a) => a.id === id);
-          if (!acc?.address) continue;
-          const bag = allStoredEmails[acc.address] || [];
-          for (const e of bag) {
-            readEmails[`${acc.address}_${e.id}`] = true;
-            readEmails[e.id] = true;
-          }
-        }
-        await ext.storage.local.set({ readEmails });
-        showToast($t('toasts.emailsRestored') || 'Marked as read', 'success');
-      } catch {
-        /* ignore */
-      }
+  <AppShell
+    {context}
+    contentReloadRequiredTabId={reloadRequiredTabId}
+    onReloadRequiredTab={reloadContentTab}
+    bind:currentView={currentView}
+    {layoutWide}
+    {layoutSplit}
+    {layoutVerticalSplit}
+    {splitModeFlash}
+    {showSplitPane}
+    {splitPaneCollapsed}
+    {sidebarCollapsed}
+    {sidebarPosition}
+    onToggleSidebarCollapse={toggleSidebarCollapse}
+    onDensityChange={changeDensity}
+    bind:splitListWidthPx={splitListWidthPx}
+    bind:splitSecondaryView={splitSecondaryView}
+    bind:mailProviderSplitOpen={mailProviderSplitOpen}
+    bind:currentEmailDetail={currentEmailDetail}
+    bind:selectedThread={selectedThread}
+    openMessageTabs={messageTabs.tabs}
+    {activeMessageTabKey}
+    {selectMessageTab}
+    {closeMessageTab}
+    {onMessageScroll}
+    bind:selectedAddresses={selectedAddresses}
+    bind:mgmtTab={mgmtTab}
+    bind:mgmtSearch={mgmtSearch}
+    bind:settingsSubpage={settingsSubpage}
+    bind:previousViewBeforeSubpage={previousViewBeforeSubpage}
+    bind:accountSelectorDropdownOpen={accountSelectorDropdownOpen}
+    {organizeTabValue}
+    {organizeTabSignal}
+    bind:autofillTabValue={autofillTabValue}
+    bind:autofillTabSignal={autofillTabSignal}
+    bind:paletteWebsiteFilter={paletteWebsiteFilter}
+    bind:paletteWebsiteFilterSignal={paletteWebsiteFilterSignal}
+    {tagCreateSignal}
+    {labelCreateSignal}
+    bind:identityCreateSignal={identityCreateSignal}
+    {vaultLockSignal}
+    {savedLoginsFocusSignal}
+    bind:automationInitialSender={automationInitialSender}
+    bind:displayedEmail={displayedEmail}
+    {mailboxListTab}
+    {activeMailboxLabel}
+    {sortBy}
+    {otpOnly}
+    {unreadOnly}
+    {hasAttachment}
+    {senderDomain}
+    {senderEmail}
+    {recipient}
+    {subject}
+    {notSenderDomain}
+    {notSenderEmail}
+    {notRecipient}
+    {notSubject}
+    {selectedSenders}
+    {dateFrom}
+    {dateTo}
+    settingsState={settings}
+    settingsSetters={settingsDomainSetters}
+    onApplyAutoRenewToAll={handleApplyAutoRenewToAll}
+    {pageZoomSettings}
+    {globalZoomScale}
+    onTogglePageZoom={togglePageZoom}
+    onChangePageZoom={adjustPageZoom}
+    settingsActions={{
+      updateAutoRefreshInterval,
+      save: saveSettings,
+      toggleDeveloperSettings,
+      toggleEnableLogging,
+      handleProviderChange,
+      saveAutoCopy,
+      saveAutoRenew,
+      saveAutoRenewScope,
+      saveAutoRenewWindowMinutes,
+      handleColorChange,
+      loadProviderInstances,
+      addCustomInstance,
+      hardReset,
     }}
-    onMarkSelectedUnread={async () => {
-      try {
-        const { readEmails = {} } = (await ext.storage.local.get(['readEmails'])) as {
-          readEmails?: Record<string, boolean>;
-        };
-        for (const id of selectedAddresses) {
-          const acc = allInboxes.find((a) => a.id === id);
-          if (!acc?.address) continue;
-          const bag = allStoredEmails[acc.address] || [];
-          for (const e of bag) {
-            delete readEmails[`${acc.address}_${e.id}`];
-            delete readEmails[e.id];
-          }
-        }
-        await ext.storage.local.set({ readEmails });
-        showToast($t('addressView.markAllUnread') || 'Marked as unread', 'success');
-      } catch {
-        /* ignore */
-      }
+    overlayState={overlays}
+    overlaySetters={overlaySetters}
+    overlayActions={{
+      openQrDialog,
+      closeQrDialog,
+      downloadQrCode,
+      copyQrImage,
+      showConfirm,
+      closeConfirm,
+      startProductTour,
+      finishProductTour,
+      skipProductTour,
     }}
-    onTagSelected={openAddressViewTagDialogForSelected}
-    onOpenAddressView={openAddressView}
-    onArchiveAccount={archiveAccount}
-    onUnarchiveAccount={unarchiveAccount}
-    onDeleteAccounts={deleteAccountsDirect}
-    onExportAccountEmails={exportAccountEmails}
-    onGenerateNewAddress={() => openCreateInboxDialog()}
-    onEditAccount={(acc: Account) => openAddressView(acc)}
-    onExtendAccount={extendAccount}
-    onToggleAutoExtend={toggleAutoExtend}
-    onTagAccount={(acc: Account) => openAddressViewTagDialog(acc)}
-    onMarkAccountAllRead={async (acc: Account) => {
-      try {
-        const { readEmails = {} } = (await ext.storage.local.get(['readEmails'])) as {
-          readEmails?: Record<string, boolean>;
-        };
-        const bag = allStoredEmails[acc.address] || [];
-        for (const e of bag) {
-          readEmails[`${acc.address}_${e.id}`] = true;
-          readEmails[e.id] = true;
-        }
-        await ext.storage.local.set({ readEmails });
-        showToast($t('addressView.markAllRead'), 'success');
-      } catch {
-        /* ignore */
-      }
-    }}
-    onMarkAccountAllUnread={async (acc: Account) => {
-      try {
-        const { readEmails = {} } = (await ext.storage.local.get(['readEmails'])) as {
-          readEmails?: Record<string, boolean>;
-        };
-        const bag = allStoredEmails[acc.address] || [];
-        for (const e of bag) {
-          delete readEmails[`${acc.address}_${e.id}`];
-          delete readEmails[e.id];
-        }
-        await ext.storage.local.set({ readEmails });
-        showToast($t('addressView.markAllUnread'), 'success');
-      } catch {
-        /* ignore */
-      }
-    }}
-    onReorderAccounts={reorderAccountsById}
-    highlightAddress={highlightAddress}
-    />
-    {:else}
-      <div class="flex items-center justify-center h-full"><div class="text-sm text-md-on-surface/50">{$t('common.loading')}</div></div>
-    {/if}
-    <!-- Tag dialog in addresses mainview (list pane) when not editing via detail -->
-    {#if addressViewTagDialogOpen && (layoutSplit || layoutVerticalSplit) && addressViewTagTarget?.id !== currentEmailDetail?.id}
-      <TagDialog
-        open={addressViewTagDialogOpen}
-        currentTag={addressViewTagTargets.length > 1 ? null : (addressViewTagTarget?.tag ?? null)}
-        currentTagColor={addressViewTagTargets.length > 1 ? null : (addressViewTagTarget?.tagColor ?? null)}
-        existingTags={allExistingTags}
-        tagColors={allTagColors}
-        onClose={closeAddressViewTagDialog}
-        onSave={saveAddressViewTag}
-        portal={false}
-      />
-    {/if}
-    </div>
-    {#if showSplitPane}
-      <!-- Resizable split divider + collapse toggle -->
-      {#if layoutSplit}
-      <div class="split-divider-col shrink-0 flex flex-col items-center relative z-10" style="width: 20px;">
-        <!-- Collapse toggle button (portrait/horizontal split) -->
-        <button
-          type="button"
-          class="split-collapse-btn absolute top-1/2 -translate-y-1/2 z-20 flex items-center justify-center
-            w-5 h-10 rounded-full bg-md-surface-container border border-md-outline-variant/40
-            text-md-on-surface-variant hover:bg-md-secondary-container hover:text-md-on-secondary-container
-            hover:border-md-secondary transition-all shadow-sm"
-          aria-label={splitPaneCollapsed ? 'Expand detail pane' : 'Collapse detail pane'}
-          onclick={toggleSplitPane}
-        >
-          <Icon name={splitPaneCollapsed ? 'chevronRight' : 'chevronLeft'} class="w-3 h-3" />
-        </button>
-        <!-- Drag-resize handle behind the collapse button -->
-        <button
-          type="button"
-          class="split-resize-handle w-full h-full cursor-col-resize border-0 p-0 bg-transparent
-            hover:bg-md-primary/20 active:bg-md-primary/30"
-          aria-label={$t('common.resizePanes')}
-          onpointerdown={(e) => {
-            const startX = e.clientX;
-            const startW = splitListWidthPx;
-            const parent = (e.currentTarget as HTMLElement).parentElement?.parentElement;
-            const move = (ev: PointerEvent) => {
-              const maxByDetail = Math.max(
-                360,
-                (parent?.clientWidth || 1280) - 360 - 16
-              );
-              splitListWidthPx = Math.min(
-                Math.min(640, maxByDetail),
-                Math.max(360, startW + (ev.clientX - startX))
-              );
-            };
-            const up = () => {
-              window.removeEventListener('pointermove', move);
-              window.removeEventListener('pointerup', up);
-              void browser.storage.local.set({ splitListWidthPx });
-            };
-            window.addEventListener('pointermove', move);
-            window.addEventListener('pointerup', up);
-          }}
-        ></button>
-      </div>
-      {/if}
-      <div
-        data-splitview
-        class="relative flex-1 overflow-hidden flex flex-col rounded-xl bg-md-surface"
-        style={layoutSplit ? "min-width: 360px;" : "min-height: 280px;"}
-      >
-        {#if currentEmailDetail}
-        <AddressView
-          onBack={() => { currentEmailDetail = null; }}
-          currentEmailDetail={currentEmailDetail}
-          emails={emails}
-          savedLogins={savedLogins}
-          loading={loading}
-          showToolbarLabels={true}
-          onOpenMessageDetail={openMessageDetail}
-          onRefreshMessages={async () => {
-            if (currentEmailDetail) {
-              loading = true;
-              await checkMessages(currentEmailDetail.id);
-              loading = false;
-            }
-          }}
-          onExportEmail={() => {
-            if (currentEmailDetail) exportAccountEmails(currentEmailDetail);
-          }}
-          onAddressDomainChanged={async (addr) => {
-            if (currentEmailDetail) {
-              currentEmailDetail = { ...currentEmailDetail, address: addr };
-            }
-            selectedEmail = addr;
-            displayedEmail = addr;
-            await loadInboxes(true);
-            try {
-              await ext.storage.local.set({ activeInboxId: currentEmailDetail?.id });
-            } catch {
-              /* ignore */
-            }
-          }}
-          showToast={(msg, type, undo) =>
-            showToast(msg || '', (type as ToastType) || 'success', undo ?? null)}
-          onNavigateToMailbox={async () => {
-            if (currentEmailDetail?.address) await selectAccount(currentEmailDetail.address);
-            currentEmailDetail = null;
-            currentView = 'mailbox';
-          }}
-          onArchiveAccount={(account) => {
-            archiveAccount(account);
-            currentEmailDetail = null;
-          }}
-          onUnarchiveAccount={async (account) => {
-            await unarchiveAccount(account);
-            await loadInboxes(true);
-            const updated = allInboxes.find((a) => a.id === account.id);
-            if (updated) currentEmailDetail = updated;
-          }}
-          onRemoveAccount={(address) => {
-            void removeAccount(address);
-            currentEmailDetail = null;
-          }}
-          onToggleAutoExtend={async (account) => {
-            await toggleAutoExtend(account);
-            await loadInboxes(true);
-            const updated = allInboxes.find((a) => a.id === account.id);
-            if (updated) currentEmailDetail = updated;
-          }}
-          onMarkAllRead={async () => {
-            if (!currentEmailDetail) return;
-            try {
-              const { readEmails = {} } = (await ext.storage.local.get(['readEmails'])) as {
-                readEmails?: Record<string, boolean>;
-              };
-              for (const e of emails) {
-                readEmails[`${currentEmailDetail.address}_${e.id}`] = true;
-                readEmails[e.id] = true;
-              }
-              await ext.storage.local.set({ readEmails });
-              await checkMessages(currentEmailDetail.id);
-            } catch {
-              /* ignore */
-            }
-          }}
-          onMarkAllUnread={async () => {
-            if (!currentEmailDetail) return;
-            try {
-              const { readEmails = {} } = (await ext.storage.local.get(['readEmails'])) as {
-                readEmails?: Record<string, boolean>;
-              };
-              for (const e of emails) {
-                delete readEmails[`${currentEmailDetail.address}_${e.id}`];
-                delete readEmails[e.id];
-              }
-              await ext.storage.local.set({ readEmails });
-              await checkMessages(currentEmailDetail.id);
-            } catch {
-              /* ignore */
-            }
-          }}
-          onOpenTagDialog={() => {
-            if (currentEmailDetail) openAddressViewTagDialog(currentEmailDetail);
-          }}
-          onOpenSavedLogins={(email) => {
-            loginInfoEmailFilter = email;
-            autofillTabValue = 'credentials';
-            autofillTabSignal += 1;
-            currentView = 'autofill';
-          }}
-          onOpenIdentities={(email) => {
-            identitiesEmailFilter = email;
-            autofillTabValue = 'profiles';
-            autofillTabSignal += 1;
-            currentView = 'autofill';
-          }}
-        />
-        <!-- Tag dialog scoped to split detail pane (when tagging the open detail) -->
-        {#if addressViewTagDialogOpen && addressViewTagTarget?.id === currentEmailDetail?.id}
-          <TagDialog
-            open={addressViewTagDialogOpen}
-            currentTag={addressViewTagTargets.length > 1 ? null : (addressViewTagTarget?.tag ?? null)}
-            currentTagColor={addressViewTagTargets.length > 1 ? null : (addressViewTagTarget?.tagColor ?? null)}
-            existingTags={allExistingTags}
-            tagColors={allTagColors}
-            onClose={closeAddressViewTagDialog}
-            onSave={saveAddressViewTag}
-            portal={false}
-          />
-        {/if}
-        {:else}
-          <div class="flex-1 flex flex-col items-center justify-center px-6 text-center gap-3 bg-md-surface-container-low/40">
-            <Icon name="inbox" class="w-12 h-12 text-md-on-surface/20" />
-            <div class="text-sm font-semibold text-md-on-surface/70">{$t('mailManagement.noAddressSelected')}</div>
-            <p class="text-xs text-md-on-surface/45 max-w-xs leading-relaxed">{$t('mailManagement.splitEmptyHint')}</p>
-            <ul class="text-xs text-md-on-surface/50 space-y-1.5 text-start max-w-xs mt-1">
-              <li class="flex gap-2"><span class="text-md-primary font-bold">·</span>{$t('mailManagement.splitTipSelect')}</li>
-              <li class="flex gap-2"><span class="text-md-primary font-bold">·</span>{$t('mailManagement.splitTipCreate')}</li>
-              <li class="flex gap-2"><span class="text-md-primary font-bold">·</span>{$t('mailManagement.splitTipDomain')}</li>
-            </ul>
-          </div>
-        {/if}
-      </div>
-    {/if}
-    <!-- Re-expand strip (shown when layout warrants split but user collapsed it) -->
-    {#if (layoutSplit || layoutVerticalSplit) && splitPaneCollapsed}
-      <button
-        type="button"
-        class="split-reexpand-strip shrink-0 flex items-center justify-center gap-1
-          text-label-sm font-medium text-md-on-surface-variant hover:text-md-on-secondary-container
-          hover:bg-md-secondary-container transition-all border-md-outline-variant/30
-          {layoutSplit ? 'flex-col w-8 border-s' : 'flex-row h-8 border-t'}"
-        aria-label={$t('common.expandSplitPane')}
-        onclick={expandSplitPane}
-      >
-        <Icon name={layoutSplit ? 'chevronLeft' : 'chevronUp'} class="w-3.5 h-3.5" />
-        <span class="text-label-sm
-          {layoutSplit ? '[writing-mode:vertical-rl] rotate-180' : ''}">
-          {$t('layout.splitPane')}
-        </span>
-      </button>
-    {/if}
-    </div>
+    {loginInfoEmailFilter}
+    {identitiesEmailFilter}
 
-  {:else if currentView === 'addressView'}
-    <AddressView
-      onBack={() => { currentView = 'addresses'; currentEmailDetail = null; }}
-      currentEmailDetail={currentEmailDetail}
-      emails={emails}
-      savedLogins={savedLogins}
-      loading={loading}
-      onOpenMessageDetail={openMessageDetail}
-      onRefreshMessages={async () => {
-        if (currentEmailDetail) {
-          loading = true;
-          await checkMessages(currentEmailDetail.id);
-          loading = false;
-        }
-      }}
-      onExportEmail={() => {
-        if (currentEmailDetail) {
-          exportAccountEmails(currentEmailDetail);
-        }
-      }}
-      onAddressDomainChanged={async (addr) => {
-        if (currentEmailDetail) {
-          currentEmailDetail = { ...currentEmailDetail, address: addr };
-        }
-        selectedEmail = addr;
-        displayedEmail = addr;
-        await loadInboxes(true);
-        // Keep mailbox selection in sync for when user returns to inbox
-        try {
-          await ext.storage.local.set({
-            activeInboxId: currentEmailDetail?.id,
-          });
-        } catch {
-          /* ignore */
-        }
-      }}
-      showToast={(msg, type, undo) =>
-        showToast(msg || '', (type as ToastType) || 'success', undo ?? null)}
-      onNavigateToMailbox={async () => {
-        if (currentEmailDetail?.address) {
-          await selectAccount(currentEmailDetail.address);
-        }
-        currentView = 'mailbox';
-      }}
-      onArchiveAccount={(account) => { archiveAccount(account); currentView = 'mailbox'; currentEmailDetail = null; }}
-      onUnarchiveAccount={async (account) => {
-        await unarchiveAccount(account);
-        await loadInboxes(true);
-        const updated = allInboxes.find((a) => a.id === account.id);
-        if (updated) currentEmailDetail = updated;
-      }}
-      onRemoveAccount={(address) => { void removeAccount(address); }}
-      onToggleAutoExtend={async (account) => {
-        await toggleAutoExtend(account);
-        await loadInboxes(true);
-        // Sync currentEmailDetail so AutoRenewToggle reflects the new state immediately
-        const updated = allInboxes.find((a) => a.id === account.id);
-        if (updated) currentEmailDetail = updated;
-      }}
-      onMarkAllRead={async () => {
-        if (!currentEmailDetail) return;
-        try {
-          const { readEmails = {} } = (await ext.storage.local.get(['readEmails'])) as { readEmails?: Record<string, boolean> };
-          for (const e of emails) {
-            readEmails[`${currentEmailDetail.address}_${e.id}`] = true;
-            readEmails[e.id] = true;
-          }
-          await ext.storage.local.set({ readEmails });
-          await checkMessages(currentEmailDetail.id);
-        } catch { /* ignore */ }
-      }}
-      onMarkAllUnread={async () => {
-        if (!currentEmailDetail) return;
-        try {
-          const { readEmails = {} } = (await ext.storage.local.get(['readEmails'])) as { readEmails?: Record<string, boolean> };
-          for (const e of emails) {
-            delete readEmails[`${currentEmailDetail.address}_${e.id}`];
-            delete readEmails[e.id];
-          }
-          await ext.storage.local.set({ readEmails });
-          await checkMessages(currentEmailDetail.id);
-        } catch { /* ignore */ }
-      }}
-      onOpenTagDialog={() => {
-        if (currentEmailDetail) openAddressViewTagDialog(currentEmailDetail);
-      }}
-      onOpenSavedLogins={(email) => {
-        loginInfoEmailFilter = email;
-        autofillTabValue = 'credentials';
-        autofillTabSignal += 1;
-        currentView = 'autofill';
-      }}
-      onOpenIdentities={(email) => {
-        identitiesEmailFilter = email;
-        autofillTabValue = 'profiles';
-        autofillTabSignal += 1;
-        currentView = 'autofill';
-      }}
-    />
+    {accounts}
+    {allAddresses}
+    {unreadByAddress}
+    {selectedProvider}
+    {selectedEmail}
+    {emails}
+    {savedLogins}
+    {allStoredEmails}
+    {exportWizardAddress}
+    {exportWizardMessages}
+    {sidebarMailboxLabels}
+    {mailboxLabelCounts}
+    {mailboxFolderCounts}
+    {sidebarLiveCount}
+    {sidebarInactiveCount}
+    {sidebarTagCount}
+    {sidebarLabelCount}
+    {sidebarFilterCount}
+    {sidebarProfileCount}
+    {sidebarCredentialCount}
+    {mgmtAddresses}
+    {allSelected}
+    {loadingAddresses}
+    {addressViewTagDialogOpen}
+    {addressViewTagTarget}
+    {addressViewTagTargets}
+    {allExistingTags}
+    {allTagAddresses}
+    {allTagColors}
+    {highlightAddress}
+    {hasPrevMessage}
+    {hasNextMessage}
+    {analytics}
+    {analyticsLoading}
+    {savedSearchFilters}
+    {identities}
+    {selectedIdentityId}
+    {identityEditIdSignal}
+    {autofillBlocklist}
+    {scrollChromeHidden}
+    {searchQuery}
+    {filteredEmails}
+    {latestOtp}
+    {latestOtpSender}
+    {latestOtpSenderName}
+    {otpContext}
+    {formDetected}
+    {humanVerificationRequired}
+    {archivedSectionOpen}
+    {providerFailoverHint}
+    {archivedSearch}
 
-  {:else if currentView === 'settings'}
-  {#if splitSecondaryView && showSplitPane}
-    <!-- ── Split mode: settings hub (left) + secondary detail view (right) ── -->
-    <div class="flex flex-1 min-h-0 overflow-hidden {layoutSplit ? 'flex-row gap-[7.5px]' : layoutVerticalSplit ? 'flex-col gap-2 overflow-y-auto' : 'flex-col'} {splitModeFlash ? 'split-mode-flash' : ''}">
-      <!-- Left: settings hub (narrowed list pane) -->
-      <div
-        data-mainview
-        class="relative {layoutSplit
-          ? 'shrink-0 flex flex-col h-full min-h-0'
-          : layoutVerticalSplit
-            ? 'shrink-0 min-h-[300px] max-h-[50%] flex flex-col h-full min-h-0'
-            : 'flex-1 min-h-0 flex flex-col h-full'}"
-        style={layoutSplit
-          ? `width: ${splitListWidthPx}px; min-width: 320px; max-width: min(520px, 45%); flex-shrink: 0;`
-          : 'min-width: 0;'}
-      >
-        {#if SettingsViewComponent}
-          {@const Settings = SettingsViewComponent}
-          <Settings {context}
-            initialSubpage={settingsSubpage}
-            onSubpageBack={handleSettingsSubpageBack}
-            onBack={() => {
-              settingsSubpage = null;
-              if (previousViewBeforeSubpage && previousViewBeforeSubpage !== 'settings') {
-                currentView = previousViewBeforeSubpage;
-                previousViewBeforeSubpage = null;
-              } else {
-                currentView = 'mailbox';
-              }
-            }}
-            autoCopy={autoCopy}
-            autoRenew={autoRenew}
-            selectedProvider={selectedProvider}
-            savingSettings={savingSettings}
-            loading={settingsLoading}
-            onSaveSettings={saveSettings}
-            onSetAutoCopy={(v: boolean) => { autoCopy = v; }}
-            onSetAutoRenew={(v: boolean) => { autoRenew = v; }}
-            onHardReset={hardReset}
-            providerInstances={providerInstances}
-            selectedProviderInstance={selectedProviderInstance}
-            onSetProviderInstance={(v: string) => { selectedProviderInstance = v; }}
-            onExportData={exportData}
-            onImportData={importData}
-            onStartProductTour={startProductTour}
-            onProviderChange={handleProviderChange}
-            onAddCustomInstance={addCustomInstance}
-            onLoadProviderInstances={loadProviderInstances}
-            customColor={customColor}
-            onColorChange={handleColorChange}
-            inboxColorThemeEnabled={inboxColorThemeEnabled}
-            onToggleInboxColorTheme={async () => {
-              inboxColorThemeEnabled = !inboxColorThemeEnabled;
-              await browser.storage.local.set({ inboxColorThemeEnabled });
-            }}
-            contrastLevel={contrastLevel}
-            onContrastLevelChange={setContrastLevel}
-            showDeveloperSettings={showDeveloperSettings}
-            enableLogging={enableLogging}
-            onToggleDeveloperSettings={toggleDeveloperSettings}
-            onOpenPlayground={() => { currentView = 'playground'; }}
-            onToggleEnableLogging={toggleEnableLogging}
-            emailRetentionDays={emailRetentionDays}
-            onSetEmailRetentionDays={(v: number) => { emailRetentionDays = v; }}
-            faviconCaching={faviconCaching}
-            onSetFaviconCaching={(v: 'direct' | 'local') => { faviconCaching = v; }}
-            identities={identities}
-            selectedIdentityId={selectedIdentityId}
-            onSetSelectedIdentityId={setSelectedIdentity}
-            onNavigateToIdentities={() => currentView = 'identities'}
-            notificationsEnabled={notificationsEnabled}
-            soundEnabled={soundEnabled}
-            expiryWarningThreshold={expiryWarningThreshold}
-            onSetNotificationsEnabled={(v: boolean) => { notificationsEnabled = v; }}
-            onSetSoundEnabled={(v: boolean) => { soundEnabled = v; }}
-            onSetExpiryWarningThreshold={(v: number) => { expiryWarningThreshold = v; }}
-            keybindings={keybindings}
-            onSetKeybindings={(v: Keybindings) => { keybindings = v; }}
-            onNavigateToKeybindings={() => { splitSecondaryView = 'keybindings'; }}
-            onNavigateToTagManagement={() => {
-              organizeTabValue = 'tags';
-              organizeTabSignal += 1;
-              currentView = 'organize';
-            }}
-            onNavigateToFiltersManagement={() => {
-              organizeTabValue = 'filters';
-              organizeTabSignal += 1;
-              currentView = 'organize';
-            }}
-            onNavigateToMailProvider={() => { splitSecondaryView = 'mailProvider'; }}
-            onNavigateToStoragePerformance={() => { splitSecondaryView = 'storagePerformance'; }}
-            onNavigateToLabelManagement={() => {
-              organizeTabValue = 'labels';
-              organizeTabSignal += 1;
-              currentView = 'organize';
-            }}
-            onNavigateToAddresses={() => { currentView = 'addresses'; }}
-            onNavigateToConstantsSettings={() => { splitSecondaryView = 'constantsSettings'; }}
-            onNavigateToDiagnostics={() => { splitSecondaryView = 'diagnostics'; }}
-            autoRefreshInterval={autoRefreshInterval}
-            onSetAutoRefreshInterval={updateAutoRefreshInterval}
-            emailPreviewEnabled={emailPreviewEnabled}
-            onSetEmailPreviewEnabled={(v: boolean) => { emailPreviewEnabled = v; }}
-            defaultDomain={defaultDomain}
-            onSetDefaultDomain={(v: string) => { defaultDomain = v; }}
-            allInboxes={allInboxes}
-            autofillBlocklist={autofillBlocklist}
-            onRemoveFromBlocklist={removeFromAutofillBlocklist}
-            onAddToBlocklist={addToAutofillBlocklistSetting}
-          />
-        {:else}
-          <div class="flex items-center justify-center h-full">
-            <div class="text-sm text-md-on-surface/50">{$t('common.loading')}</div>
-          </div>
-        {/if}
-      </div>
-
-      <!-- Resize divider -->
-      {#if layoutSplit}
-      <div class="split-divider-col shrink-0 flex flex-col items-center relative z-10" style="width: 20px;">
-        <button
-          type="button"
-          class="split-collapse-btn absolute top-1/2 -translate-y-1/2 z-20 flex items-center justify-center
-            w-5 h-10 rounded-full bg-md-surface-container border border-md-outline-variant/40
-            text-md-on-surface-variant hover:bg-md-secondary-container hover:text-md-on-secondary-container
-            hover:border-md-secondary transition-all shadow-sm"
-          aria-label={splitPaneCollapsed ? 'Expand detail pane' : 'Collapse detail pane'}
-          onclick={toggleSplitPane}
-        >
-          <Icon name={splitPaneCollapsed ? 'chevronRight' : 'chevronLeft'} class="w-3 h-3" />
-        </button>
-        <button
-          type="button"
-          class="split-resize-handle w-full h-full cursor-col-resize border-0 p-0 bg-transparent
-            hover:bg-md-primary/20 active:bg-md-primary/30"
-          aria-label={$t('common.resizePanes')}
-          onpointerdown={(e) => {
-            const startX = e.clientX;
-            const startW = splitListWidthPx;
-            const parent = (e.currentTarget as HTMLElement).parentElement?.parentElement;
-            const move = (ev: PointerEvent) => {
-              const maxByDetail = Math.max(360, (parent?.clientWidth || 1280) - 360 - 16);
-              splitListWidthPx = Math.min(
-                Math.min(640, maxByDetail),
-                Math.max(320, startW + (ev.clientX - startX))
-              );
-            };
-            const up = () => {
-              window.removeEventListener('pointermove', move);
-              window.removeEventListener('pointerup', up);
-              void browser.storage.local.set({ splitListWidthPx });
-            };
-            window.addEventListener('pointermove', move);
-            window.addEventListener('pointerup', up);
-          }}
-        ></button>
-      </div>
-      {/if}
-
-      <!-- Right: secondary view in split pane -->
-      <div
-        data-splitview
-        class="relative flex-1 overflow-hidden flex flex-col rounded-xl bg-md-surface min-h-0"
-        style={layoutSplit ? "min-width: 360px;" : "min-height: 280px;"}
-      >
-        {#if splitSecondaryView === 'keybindings' && KeyboardShortcutsViewComponent}
-          {@const Comp = KeyboardShortcutsViewComponent}
-          <Comp
-            onBack={() => { splitSecondaryView = null; }}
-            {keybindings}
-            onSetKeybindings={(v: Keybindings) => { keybindings = v; }}
-            onSaveSettings={saveSettings}
-          />
-        {:else if splitSecondaryView === 'mailProvider' && MailProviderViewComponent}
-          {@const Comp = MailProviderViewComponent}
-          <Comp
-            onBack={() => { splitSecondaryView = null; }}
-            selectedProvider={selectedProvider}
-            autoRenew={autoRenew}
-            notificationsEnabled={notificationsEnabled}
-            soundEnabled={soundEnabled}
-            expiryWarningThreshold={expiryWarningThreshold}
-            autoRefreshInterval={autoRefreshInterval}
-            emailPreviewEnabled={emailPreviewEnabled}
-            providerInstances={providerInstances}
-            selectedProviderInstance={selectedProviderInstance}
-            defaultDomain={defaultDomain}
-            allInboxes={allInboxes}
-            onProviderChange={handleProviderChange}
-            onSetAutoRenew={(v: boolean) => { autoRenew = v; }}
-            onSetNotificationsEnabled={(v: boolean) => { notificationsEnabled = v; }}
-            onSetSoundEnabled={(v: boolean) => { soundEnabled = v; }}
-            onSetExpiryWarningThreshold={(v: number) => { expiryWarningThreshold = v; }}
-            onSetAutoRefreshInterval={updateAutoRefreshInterval}
-            onSetEmailPreviewEnabled={(v: boolean) => { emailPreviewEnabled = v; }}
-            onSetProviderInstance={(v: string) => { selectedProviderInstance = v; }}
-            onAddCustomInstance={addCustomInstance}
-            onLoadProviderInstances={loadProviderInstances}
-            onSetDefaultDomain={(v: string) => { defaultDomain = v; }}
-            onSaveSettings={saveSettings}
-          />
-        {:else if splitSecondaryView === 'storagePerformance' && StoragePerformanceViewComponent}
-          {@const Comp = StoragePerformanceViewComponent}
-          <Comp
-            onBack={() => { splitSecondaryView = null; }}
-            faviconCaching={faviconCaching}
-            emailRetentionDays={emailRetentionDays}
-            onSetFaviconCaching={(v: 'direct' | 'local') => { faviconCaching = v; }}
-            onSetEmailRetentionDays={(v: number) => { emailRetentionDays = v; }}
-            onSaveSettings={saveSettings}
-            onClearOldEmails={async () => { /* clearOldEmails handled inside StoragePerformanceView */ }}
-          />
-        {:else if splitSecondaryView === 'constantsSettings' && ConstantsSettingsViewComponent}
-          {@const Comp = ConstantsSettingsViewComponent}
-          <Comp onBack={() => { splitSecondaryView = null; }} />
-        {:else if splitSecondaryView === 'diagnostics' && DiagnosticsView}
-          <DiagnosticsView onBack={() => { splitSecondaryView = null; }} />
-        {:else}
-          <!-- Fallback empty state if component hasn't loaded yet -->
-          <div class="flex-1 flex flex-col items-center justify-center px-6 text-center gap-3 bg-md-surface-container-low/40">
-            <Icon name="settings" class="w-12 h-12 text-md-on-surface/20" />
-            <div class="text-sm font-semibold text-md-on-surface/70">{$t('settings.selectSetting')}</div>
-          </div>
-        {/if}
-      </div>
-
-      <!-- Re-expand strip -->
-      {#if (layoutSplit || layoutVerticalSplit) && splitPaneCollapsed}
-        <button
-          type="button"
-          class="split-reexpand-strip shrink-0 flex items-center justify-center gap-1
-            text-label-sm font-medium text-md-on-surface-variant hover:text-md-on-secondary-container
-            hover:bg-md-secondary-container transition-all border-md-outline-variant/30
-            {layoutSplit ? 'flex-col w-8 border-s' : 'flex-row h-8 border-t'}"
-          aria-label={$t('common.expandSplitPane')}
-          onclick={expandSplitPane}
-        >
-          <Icon name={layoutSplit ? 'chevronLeft' : 'chevronUp'} class="w-3.5 h-3.5" />
-          <span class="text-label-sm
-            {layoutSplit ? '[writing-mode:vertical-rl] rotate-180' : ''}">
-            {$t('layout.splitPane')}
-          </span>
-        </button>
-      {/if}
-    </div>
-
-  {:else}
-    <!-- ── Normal full-page settings (narrow layout OR no secondary view active) ── -->
-    {#if SettingsViewComponent}
-      {@const Settings = SettingsViewComponent}
-      <Settings {context}
-        initialSubpage={settingsSubpage}
-        onSubpageBack={handleSettingsSubpageBack}
-        onBack={() => {
-          settingsSubpage = null;
-          if (previousViewBeforeSubpage && previousViewBeforeSubpage !== 'settings') {
-            currentView = previousViewBeforeSubpage;
-            previousViewBeforeSubpage = null;
-          } else {
-            currentView = 'mailbox';
-          }
-        }}
-        autoCopy={autoCopy}
-        autoRenew={autoRenew}
-        selectedProvider={selectedProvider}
-        savingSettings={savingSettings}
-        loading={settingsLoading}
-        onSaveSettings={saveSettings}
-        onSetAutoCopy={(v: boolean) => { autoCopy = v; }}
-        onSetAutoRenew={(v: boolean) => { autoRenew = v; }}
-        onHardReset={hardReset}
-        providerInstances={providerInstances}
-        selectedProviderInstance={selectedProviderInstance}
-        onSetProviderInstance={(v: string) => { selectedProviderInstance = v; }}
-        onExportData={exportData}
-        onImportData={importData}
-        onStartProductTour={startProductTour}
-        onProviderChange={handleProviderChange}
-        onAddCustomInstance={addCustomInstance}
-        onLoadProviderInstances={loadProviderInstances}
-        customColor={customColor}
-        onColorChange={handleColorChange}
-        inboxColorThemeEnabled={inboxColorThemeEnabled}
-        onToggleInboxColorTheme={async () => {
-          inboxColorThemeEnabled = !inboxColorThemeEnabled;
-          await browser.storage.local.set({ inboxColorThemeEnabled });
-        }}
-        contrastLevel={contrastLevel}
-        onContrastLevelChange={setContrastLevel}
-        showDeveloperSettings={showDeveloperSettings}
-        enableLogging={enableLogging}
-        onToggleDeveloperSettings={toggleDeveloperSettings}
-        onOpenPlayground={() => { currentView = 'playground'; }}
-        onToggleEnableLogging={toggleEnableLogging}
-        emailRetentionDays={emailRetentionDays}
-        onSetEmailRetentionDays={(v: number) => { emailRetentionDays = v; }}
-        faviconCaching={faviconCaching}
-        onSetFaviconCaching={(v: 'direct' | 'local') => { faviconCaching = v; }}
-        identities={identities}
-        selectedIdentityId={selectedIdentityId}
-        onSetSelectedIdentityId={setSelectedIdentity}
-        onNavigateToIdentities={() => currentView = 'identities'}
-        notificationsEnabled={notificationsEnabled}
-        soundEnabled={soundEnabled}
-        expiryWarningThreshold={expiryWarningThreshold}
-        onSetNotificationsEnabled={(v: boolean) => { notificationsEnabled = v; }}
-        onSetSoundEnabled={(v: boolean) => { soundEnabled = v; }}
-        onSetExpiryWarningThreshold={(v: number) => { expiryWarningThreshold = v; }}
-        keybindings={keybindings}
-        onSetKeybindings={(v: Keybindings) => { keybindings = v; }}
-        onNavigateToKeybindings={() => {
-          if (layoutSplit || layoutVerticalSplit) { splitSecondaryView = 'keybindings'; }
-          else { currentView = 'keybindings'; }
-        }}
-        onNavigateToTagManagement={() => {
-          organizeTabValue = 'tags';
-          organizeTabSignal += 1;
-          currentView = 'organize';
-        }}
-        onNavigateToFiltersManagement={() => {
-          organizeTabValue = 'filters';
-          organizeTabSignal += 1;
-          currentView = 'organize';
-        }}
-        onNavigateToMailProvider={() => {
-          if (layoutSplit || layoutVerticalSplit) { splitSecondaryView = 'mailProvider'; }
-          else { openMailProviderSettings(); }
-        }}
-        onNavigateToStoragePerformance={() => {
-          if (layoutSplit || layoutVerticalSplit) { splitSecondaryView = 'storagePerformance'; }
-          else { currentView = 'storagePerformance'; }
-        }}
-        onNavigateToLabelManagement={() => {
-          organizeTabValue = 'labels';
-          organizeTabSignal += 1;
-          currentView = 'organize';
-        }}
-        onNavigateToAddresses={() => { currentView = 'addresses'; }}
-        onNavigateToConstantsSettings={() => {
-          if (layoutSplit || layoutVerticalSplit) { splitSecondaryView = 'constantsSettings'; }
-          else { currentView = 'constantsSettings'; }
-        }}
-        onNavigateToDiagnostics={() => {
-          if (layoutSplit || layoutVerticalSplit) { splitSecondaryView = 'diagnostics'; }
-          else { currentView = 'diagnostics'; }
-        }}
-        autoRefreshInterval={autoRefreshInterval}
-        onSetAutoRefreshInterval={updateAutoRefreshInterval}
-        emailPreviewEnabled={emailPreviewEnabled}
-        onSetEmailPreviewEnabled={(v: boolean) => { emailPreviewEnabled = v; }}
-        defaultDomain={defaultDomain}
-        onSetDefaultDomain={(v: string) => { defaultDomain = v; }}
-        allInboxes={allInboxes}
-        autofillBlocklist={autofillBlocklist}
-        onRemoveFromBlocklist={removeFromAutofillBlocklist}
-        onAddToBlocklist={addToAutofillBlocklistSetting}
-      />
-    {:else}
-      <div class="flex items-center justify-center h-full">
-        <div class="text-sm text-md-on-surface/50">{$t('common.loading')}</div>
-      </div>
-    {/if}
-  {/if}
-
-
-  {:else if currentView === 'analytics'}
-    {#if ActivityViewComponent}
-      {@const Comp = ActivityViewComponent}
-      <Comp {context}
-        onBack={() => currentView = 'mailbox'}
-        analytics={analytics}
-        loading={analyticsLoading}
-        onLoadAnalytics={loadAnalytics}
-        onResetAnalytics={handleResetAnalytics}
-      />
-    {:else}
-      <div class="flex items-center justify-center h-full"><div class="text-sm text-md-on-surface/50">{$t('common.loading')}</div></div>
-    {/if}
-
-  {:else if currentView === 'autofill' || currentView === 'loginInfo' || currentView === 'identities'}
-    <!-- Same 3-col model as mailbox/addresses: sidebar | mainview | splitview -->
-    <div class="flex flex-1 min-h-0 overflow-hidden {layoutSplit ? 'flex-row gap-[7.5px]' : layoutVerticalSplit ? 'flex-col gap-2 overflow-y-auto' : 'flex-col'} {splitModeFlash ? 'split-mode-flash' : ''}">
-      <div
-        data-mainview
-        class="{layoutSplit
-          ? 'shrink-0 flex flex-col h-full min-h-0'
-          : layoutVerticalSplit
-            ? 'shrink-0 min-h-[300px] max-h-[50%] flex flex-col h-full min-h-0'
-            : 'flex-1 min-h-0 flex flex-col h-full'}"
-        style={layoutSplit
-          ? `width: ${splitListWidthPx}px; min-width: 360px; max-width: min(640px, 55%); flex-shrink: 0;`
-          : 'min-width: 0;'}
-      >
-        {#if AutofillViewComponent}
-          {@const Comp = AutofillViewComponent}
-          <Comp
-            context={context}
-            splitHostRef={splitHostRef}
-            initialTab={currentView === 'loginInfo'
-              ? 'credentials'
-              : currentView === 'identities'
-                ? 'profiles'
-                : autofillTabValue}
-            tabSignal={autofillTabSignal}
-            tabSignalValue={autofillTabValue}
-            {savedLogins}
-            {identities}
-            mailboxAddresses={allInboxes.map((a) => a.address).filter(Boolean)}
-            activeMailboxAddress={selectedEmail || accounts[0]?.address || ''}
-            {loginInfoEmailFilter}
-            {identitiesEmailFilter}
-            focusSearchSignal={savedLoginsFocusSignal}
-            createSignal={identityCreateSignal}
-            editIdSignal={identityEditIdSignal}
-            layoutSplit={showSplitPane}
-            splitHostId="autofill-split-host"
-            onDeleteLogin={(id: string) => deleteLoginByIdAction(ext, loginSetters, id)}
-            onReorderLogin={(sourceId: string, targetId: string) =>
-              reorderLoginInfoByIdAction(ext, loginSetters, sourceId, targetId)}
-            showToast={(message: string) => showToast(message)}
-            showConfirm={(message: string, onConfirm: () => void) => showConfirm(message, onConfirm)}
-          />
-        {:else}
-          <div class="flex items-center justify-center h-full"><div class="text-sm text-md-on-surface/50">{$t('common.loading')}</div></div>
-        {/if}
-      </div>
-      {#if showSplitPane}
-        {#if layoutSplit}
-        <div class="split-divider-col shrink-0 flex flex-col items-center relative z-10" style="width: 20px;">
-          <button
-            type="button"
-            class="split-collapse-btn absolute top-1/2 -translate-y-1/2 z-20 flex items-center justify-center
-              w-5 h-10 rounded-full bg-md-surface-container border border-md-outline-variant/40
-              text-md-on-surface-variant hover:bg-md-secondary-container hover:text-md-on-secondary-container
-              hover:border-md-secondary transition-all shadow-sm"
-            aria-label={splitPaneCollapsed ? 'Expand detail pane' : 'Collapse detail pane'}
-            onclick={toggleSplitPane}
-          >
-            <Icon name={splitPaneCollapsed ? 'chevronRight' : 'chevronLeft'} class="w-3 h-3" />
-          </button>
-          <button
-            type="button"
-            class="split-resize-handle w-full h-full cursor-col-resize border-0 p-0 bg-transparent
-              hover:bg-md-primary/20 active:bg-md-primary/30"
-            aria-label={$t('common.resizePanes')}
-            onpointerdown={(e) => {
-              const startX = e.clientX;
-              const startW = splitListWidthPx;
-              const parent = (e.currentTarget as HTMLElement).parentElement?.parentElement;
-              const move = (ev: PointerEvent) => {
-                const maxByDetail = Math.max(360, (parent?.clientWidth || 1280) - 360 - 16);
-                splitListWidthPx = Math.min(
-                  Math.min(640, maxByDetail),
-                  Math.max(360, startW + (ev.clientX - startX))
-                );
-              };
-              const up = () => {
-                window.removeEventListener('pointermove', move);
-                window.removeEventListener('pointerup', up);
-                void browser.storage.local.set({ splitListWidthPx });
-              };
-              window.addEventListener('pointermove', move);
-              window.addEventListener('pointerup', up);
-            }}
-          ></button>
-        </div>
-        {/if}
-        <div
-          id="autofill-split-host"
-          bind:this={splitHostRef}
-          data-splitview
-          class="relative flex-1 overflow-hidden flex flex-col rounded-xl bg-md-surface min-h-0"
-          style={layoutSplit ? "min-width: 360px;" : "min-height: 280px;"}
-        >
-          <!-- Identity create/edit mounts here via IdentitiesView when layoutSplit -->
-          <div
-            class="autofill-split-empty flex-1 flex flex-col items-center justify-center px-6 text-center gap-2 pointer-events-none"
-            data-autofill-split-placeholder
-          >
-            <Icon name="editSquare" class="w-10 h-10 text-md-on-surface/20" />
-            <p class="text-sm font-semibold text-md-on-surface/70">{$t('identities.splitEmptyTitle')}</p>
-            <p class="text-xs text-md-on-surface/45 max-w-xs">{$t('identities.splitEmptyHint')}</p>
-          </div>
-        </div>
-      {/if}
-      <!-- Re-expand strip for autofill split pane -->
-      {#if (layoutSplit || layoutVerticalSplit) && splitPaneCollapsed}
-        <button
-          type="button"
-          class="split-reexpand-strip shrink-0 flex items-center justify-center gap-1
-            text-label-sm font-medium text-md-on-surface-variant hover:text-md-on-secondary-container
-            hover:bg-md-secondary-container transition-all border-md-outline-variant/30
-            {layoutSplit ? 'flex-col w-8 border-s' : 'flex-row h-8 border-t'}"
-          aria-label={$t('common.expandSplitPane')}
-          onclick={expandSplitPane}
-        >
-          <Icon name={layoutSplit ? 'chevronLeft' : 'chevronUp'} class="w-3.5 h-3.5" />
-          <span class="text-label-sm
-            {layoutSplit ? '[writing-mode:vertical-rl] rotate-180' : ''}">
-            {$t('layout.splitPane')}
-          </span>
-        </button>
-      {/if}
-    </div>
-
-  {:else if currentView === 'keybindings'}
-    {#if KeyboardShortcutsViewComponent}
-      {@const Comp = KeyboardShortcutsViewComponent}
-      <Comp
-        onBack={() => currentView = 'settings'}
-        {keybindings}
-        onSetKeybindings={(v: Keybindings) => { keybindings = v; }}
-        onSaveSettings={saveSettings}
-      />
-    {:else}
-      <div class="flex items-center justify-center h-full"><div class="text-sm text-md-on-surface/50">{$t('common.loading')}</div></div>
-    {/if}
-
-  {:else if currentView === 'organize' || currentView === 'tagManagement' || currentView === 'labelManagement' || currentView === 'filtersManagement'}
-    {#if OrganizeViewComponent}
-      {@const Comp = OrganizeViewComponent}
-      <Comp
-        initialTab={currentView === 'labelManagement'
-          ? 'labels'
-          : currentView === 'filtersManagement'
-            ? 'filters'
-            : organizeTabValue}
-        allInboxes={allInboxes}
-        savedSearchFilters={savedSearchFilters}
-        onReloadAccounts={async () => { await loadInboxes(true); }}
-        onFiltersChange={async () => { await loadSavedSearchFilters(); }}
-        showConfirm={(message, onConfirm) => showConfirm(message, onConfirm)}
-        tagCreateSignal={tagCreateSignal}
-        labelCreateSignal={labelCreateSignal}
-        tabSignal={organizeTabSignal}
-        tabSignalValue={organizeTabValue}
-        onTabChange={(tab) => {
-          organizeTabValue = tab;
-        }}
-      />
-    {:else}
-      <div class="flex items-center justify-center h-full"><div class="text-sm text-md-on-surface/50">{$t('common.loading')}</div></div>
-    {/if}
-
-  {:else if currentView === 'mailProvider'}
-    {#if MailProviderViewComponent}
-      {@const Comp = MailProviderViewComponent}
-      <Comp
-        onBack={() => currentView = 'settings'}
-        selectedProvider={selectedProvider}
-        autoRenew={autoRenew}
-        notificationsEnabled={notificationsEnabled}
-        soundEnabled={soundEnabled}
-        expiryWarningThreshold={expiryWarningThreshold}
-        autoRefreshInterval={autoRefreshInterval}
-        emailPreviewEnabled={emailPreviewEnabled}
-        providerInstances={providerInstances}
-        selectedProviderInstance={selectedProviderInstance}
-        defaultDomain={defaultDomain}
-        allInboxes={allInboxes}
-        onProviderChange={handleProviderChange}
-        onSetAutoRenew={(v: boolean) => { autoRenew = v; }}
-        onSetNotificationsEnabled={(v: boolean) => { notificationsEnabled = v; }}
-        onSetSoundEnabled={(v: boolean) => { soundEnabled = v; }}
-        onSetExpiryWarningThreshold={(v: number) => { expiryWarningThreshold = v; }}
-        onSetAutoRefreshInterval={updateAutoRefreshInterval}
-        onSetEmailPreviewEnabled={(v: boolean) => { emailPreviewEnabled = v; }}
-        onSetProviderInstance={(v: string) => { selectedProviderInstance = v; }}
-        onAddCustomInstance={addCustomInstance}
-        onLoadProviderInstances={loadProviderInstances}
-        onSetDefaultDomain={(v: string) => { defaultDomain = v; }}
-        onSaveSettings={saveSettings}
-      />
-    {:else}
-      <div class="flex items-center justify-center h-full"><div class="text-sm text-md-on-surface/50">{$t('common.loading')}</div></div>
-    {/if}
-
-  {:else if currentView === 'storagePerformance'}
-    {#if StoragePerformanceViewComponent}
-      {@const Comp = StoragePerformanceViewComponent}
-      <Comp
-        onBack={() => currentView = 'settings'}
-        faviconCaching={faviconCaching}
-        emailRetentionDays={emailRetentionDays}
-        onSetFaviconCaching={(v: 'direct' | 'local') => { faviconCaching = v; }}
-        onSetEmailRetentionDays={(v: number) => { emailRetentionDays = v; }}
-        onSaveSettings={saveSettings}
-        onClearOldEmails={async () => { /* clearOldEmails handled inside StoragePerformanceView */ }}
-      />
-    {:else}
-      <div class="flex items-center justify-center h-full"><div class="text-sm text-md-on-surface/50">{$t('common.loading')}</div></div>
-    {/if}
-
-
-
-  {:else if currentView === 'constantsSettings'}
-    {#if ConstantsSettingsViewComponent}
-      {@const Comp = ConstantsSettingsViewComponent}
-      <Comp onBack={() => currentView = 'settings'} />
-    {:else}
-      <div class="flex items-center justify-center h-full"><div class="text-sm text-md-on-surface/50">{$t('common.loading')}</div></div>
-    {/if}
-
-  {:else if currentView === 'diagnostics'}
-    <DiagnosticsView onBack={() => (currentView = 'settings')} />
-
-  {:else if currentView === 'mailView'}
-    <MailView
-      context={context}
-      onBack={() => { currentView = 'mailbox'; selectedThread = []; }}
-      selectedThread={selectedThread}
-      hasPrev={hasPrevMessage}
-      hasNext={hasNextMessage}
-      onPrev={navigateToPrevMessage}
-      onNext={navigateToNextMessage}
-      mailboxAddress={selectedEmail}
-      onMarkUnread={() => {
-        for (const msg of selectedThread) {
-          void persistEmailUnread(msg);
-          const idx = emails.findIndex((e) => e.id === msg.id);
-          if (idx !== -1) {
-            emails = emails.map((e, i) => (i === idx ? { ...e, unread: true } : e));
-          }
-        }
-        if (selectedEmail) {
-          unreadByAddress = { ...unreadByAddress, [selectedEmail]: (unreadByAddress[selectedEmail] ?? 0) + selectedThread.length };
-        }
-        // Return to the mailbox that received this message
-        currentView = 'mailbox';
-        selectedThread = [];
-      }}
-      onArchive={() => {
-        if (selectedThread.length === 0) return;
-        void archiveSelectedEmails(selectedThread).then(() => {
-          currentView = 'mailbox';
-          selectedThread = [];
-        });
-      }}
-      showToast={showToast}
-      onSearchText={(query: string) => {
-        applySearchQuery(query);
-        currentView = 'mailbox';
-      }}
-      onDelete={() => {
-        if (selectedThread.length === 0) return;
-        void deleteSelectedEmails(selectedThread).then(() => {
-          currentView = 'mailbox';
-          selectedThread = [];
-        });
-      }}
-    />
-
-  {:else if currentView === 'automation'}
-    <AutomationView onBack={() => (currentView = 'mailbox')} />
-
-  {:else if currentView === 'playground'}
-    <PlaygroundView onBack={() => (currentView = 'settings')} />
-
-  {:else if currentView === 'about'}
-    {#if AboutViewComponent}
-      {@const About = AboutViewComponent}
-      <About {context} {version} onStartProductTour={startProductTour} />
-    {:else}
-      <div class="flex items-center justify-center h-full">
-        <div class="text-sm text-md-on-surface/50">{$t('common.loading')}</div>
-      </div>
-    {/if}
-
-  {:else if accounts.length === 0 && !loadingInboxes && allInboxes.length === 0}
-    <Onboarding
-      onCreateInbox={async (provider) => {
-        const addr = await createInbox(provider);
-        await loadSettings();
-        if (!addr) {
-          throw new Error('Could not create address with this provider. Try another.');
-        }
-      }}
-      onStartProductTour={() => {
-        setTimeout(() => {
-          void startProductTour();
-        }, 450);
-      }}
-      onImportBackup={() => {
-        showImportBackupDialog = true;
-      }}
-    />
-
-  {:else}
-    {#if !retentionCleanupDismissed && oldEmailCount > 0}
-      <div class="shrink-0 mx-1 mb-1 px-3 py-2 bg-md-primary/10 border border-md-primary/20 rounded-xl flex items-center gap-2 text-xs">
-        <Icon name="clock" class="w-4 h-4 text-md-primary flex-shrink-0" />
-        <span class="flex-1 text-md-on-surface">
-          {$t('inbox.retentionCleanupPrompt', { values: { count: oldEmailCount } })}
-        </span>
-        <button
-          class="px-2 py-1 rounded-lg bg-md-primary text-md-on-primary text-label-sm font-semibold hover:bg-md-primary/90 transition-colors"
-          onclick={(e) => { e.stopPropagation(); void cleanupOldEmailsNow(); }}
-        >
-          {$t('common.delete')}
-        </button>
-        <button
-          class="w-5 h-5 flex items-center justify-center rounded-lg hover:bg-md-secondary-container transition-colors"
-          onclick={(e) => { e.stopPropagation(); void dismissRetentionCleanup(); }}
-          aria-label={$t('common.close')}
-        >
-          <Icon name="x" class="w-3 h-3 text-md-on-surface/60" />
-        </button>
-      </div>
-    {/if}
-    {#if showQuotaBanner}
-      <div class="shrink-0 mx-1 mb-1 px-3 py-2 bg-md-error/10 border border-md-error/20 rounded-xl flex items-center gap-2 text-xs">
-        <Icon name="alert-triangle" class="w-4 h-4 text-md-error flex-shrink-0" />
-        <span class="flex-1 text-md-on-surface">
-          {$t('settings.storageNearLimit', { values: { used: '4.8 MB', limit: '5.0 MB' } })}
-        </span>
-        <button
-          class="px-2 py-1 rounded-lg bg-md-error text-md-on-error text-label-sm font-semibold hover:bg-md-error/90 transition-colors"
-          onclick={(e) => { e.stopPropagation(); void handleRequestQuotaUnlimitedStorage(); }}
-        >
-          {$t('common.confirm')}
-        </button>
-        <button
-          class="w-5 h-5 flex items-center justify-center rounded-lg hover:bg-md-secondary-container transition-colors"
-          onclick={(e) => { e.stopPropagation(); void dismissQuotaBanner(); }}
-          aria-label={$t('common.close')}
-        >
-          <Icon name="x" class="w-3 h-3 text-md-on-surface/60" />
-        </button>
-      </div>
-    {/if}
-    <div class="flex flex-1 min-h-0 overflow-hidden {layoutSplit ? 'flex-row gap-[7.5px]' : layoutVerticalSplit ? 'flex-col gap-2 overflow-y-auto' : 'flex-col'} {splitModeFlash ? 'split-mode-flash' : ''}">
-    <div
-      data-mainview
-      class="relative {layoutSplit
-        ? 'shrink-0 flex flex-col h-full min-h-0'
-        : layoutVerticalSplit
-          ? 'shrink-0 min-h-[300px] max-h-[50%] flex flex-col h-full min-h-0'
-          : 'flex-1 min-h-0 flex flex-col h-full'}"
-      style={layoutSplit
-        ? `width: ${splitListWidthPx}px; min-width: 360px; max-width: min(640px, 55%); flex-shrink: 0;`
-        : 'min-width: 0;'}
-    >
-    <MailboxView {context}
-      selectedEmail={selectedEmail}
-      bind:displayedEmail
-      bind:emailListTab={mailboxListTab}
-      bind:activeLabelFilter={activeMailboxLabel}
-      bind:selectionApi={mailboxSelectionApi}
-      hideListTabsUnlessSearch={layoutWide}
-      dropdownOpen={accountSelectorDropdownOpen}
-      defaultDomain={defaultDomain}
-      accounts={accounts}
-      allAccounts={allInboxes}
-      loading={loading}
-      searchQuery={searchQuery}
-      sortBy={sortBy}
-      otpOnly={otpOnly}
-      hasAttachment={hasAttachment}
-      senderDomain={senderDomain}
-      senderEmail={senderEmail}
-      recipient={recipient}
-      subject={subject}
-      notSenderDomain={notSenderDomain}
-      notSenderEmail={notSenderEmail}
-      notRecipient={notRecipient}
-      notSubject={notSubject}
-      selectedSenders={selectedSenders}
-      dateFrom={dateFrom}
-      dateTo={dateTo}
-      notificationsEnabled={notificationsEnabled}
-      activeThreadMessageId={selectedThread[0]?.id || ''}
-      filteredEmails={filteredEmails}
-      emails={emails}
-      allStoredEmails={allStoredEmails}
-      latestOtp={latestOtp}
-      latestOtpSender={latestOtpSender}
-      latestOtpSenderName={latestOtpSenderName}
-      otpContext={otpContext}
-      formDetected={formDetected}
-      providerFailoverHint={providerFailoverHint}
-      savedSearchFilters={savedSearchFilters}
-      savedLogins={savedLogins}
-      openSection={archivedSectionOpen}
-      onOpenMagicLink={(url) => {
-        void browser.tabs.create({ url });
-      }}
-      onRefillSavedLogin={(login) => {
-        void (async () => {
-          try {
-            const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
-            if (tab?.id) {
-              await browser.tabs.sendMessage(tab.id, {
-                type: 'refillSavedLogin',
-                credential: {
-                  email: login.email,
-                  password: login.password,
-                  username: login.username,
-                  name: login.name,
-                  phone: login.phone,
-                },
-              });
-              showToast($t('toasts.autofillStarted'), 'success');
-            }
-          } catch (e) {
-            logError('refillSavedLogin failed', e);
-            showToast($t('toasts.autofillFailed'), 'error');
-          }
-        })();
-      }}
-      onSaveFilterQuick={() => {
-        const name = `Filter ${new Date().toLocaleString()}`;
-        void saveFilter({
-          name,
-          searchQuery,
-          hasOTP: otpOnly,
-          hasAttachment,
-          senderDomain,
-          dateFrom,
-          dateTo,
-          selectedSenders,
-          sortBy,
-          recipient: selectedEmail,
-          subject,
-          notSenderDomain,
-          notSenderEmail,
-          notRecipient,
-          notSubject,
-        });
-        showToast($t('inbox.filterSavedToast'), 'success');
-      }}
-      onDropdownOpenChange={(open) => accountSelectorDropdownOpen = open}
-      onSelectAccount={selectAccount}
-      onCopyEmail={async () => {
-        try {
-          const success = await copyToClipboardAndSchedulePurge(displayedEmail || selectedEmail, 60000);
-          if (success) showToast($t('toasts.emailCopiedToClipboard'));
-        } catch (e) {
-          logError('Failed to copy email', e);
-        }
-      }}
-      onOpenQrDialog={openQrDialog}
-      onCreateInbox={openCreateInboxDialog}
-      onCreateInboxWithProvider={handleCreateInboxWithProvider}
-      selectedProviderInstance={selectedProviderInstance}
-      emailPreviewEnabled={emailPreviewEnabled}
-      showToast={(message, type, undo) =>
-        showToast(
-          message,
-          (type as ToastType) || 'success',
-          undo ?? null,
-          undo ? $t('common.undo') : null
-        )}
-      showConfirm={(message, onConfirm) => showConfirm(message, onConfirm)}
-      onRefreshInbox={refreshInbox}
-      onToggleNotifications={toggleNotifications}
-      onArchiveAccount={archiveAccount}
-      onUnarchiveAccount={unarchiveAccount}
-      onRemoveAccount={removeAccount}
-      onRestoreAccount={restoreAccount}
-      onReloadAccounts={loadInboxes}
-      onToggleAutoExtend={toggleAutoExtend}
-      onExtendAccount={extendAccount}
-      onAutofillForm={() => void autofillForm()}
-      onOpenMessageDetail={openMessageDetail}
-      onSearchChange={(v) => {
-        applySearchQuery(v);
-      }}
-      onSortChange={(v) => sortBy = v}
-      onOtpOnlyChange={(v) => otpOnly = v}
-      onHasAttachmentChange={(v) => hasAttachment = v}
-      onSenderDomainChange={(v) => senderDomain = v}
-      onSelectedSendersChange={(v) => selectedSenders = v}
-      onDateFromChange={(v) => dateFrom = v}
-      onDateToChange={(v) => dateTo = v}
-      onClearFilters={clearFilters}
-      onArchiveEmails={archiveSelectedEmails}
-      onDeleteEmails={deleteSelectedEmails}
-      onRestoreEmails={restoreSelectedEmails}
-      onSaveFilter={(name, sq, otp, att, sd, df, dt, senders, sort, rec, subj) =>
-        saveFilter({
-          name,
-          searchQuery: sq,
-          hasOTP: otp,
-          hasAttachment: att,
-          senderDomain: sd,
-          dateFrom: df,
-          dateTo: dt,
-          selectedSenders: senders,
-          sortBy: sort,
-          recipient: rec || '',
-          subject: subj || '',
-          notSenderDomain,
-          notSenderEmail,
-          notRecipient,
-          notSubject,
-        })}
-      onLoadFilter={loadFilter}
-      onRenameFilter={renameFilter}
-      onDeleteFilter={deleteFilter}
-      onNavigateToSettings={() => { currentView = 'settings'; }}
-      onNavigateToManage={() => {
-        accountSelectorDropdownOpen = false;
-        // Safety: remove any portaled account-selector overlay left on document.body
-        try {
-          document.querySelectorAll('.account-selector-overlay').forEach((n) => n.remove());
-        } catch {
-          /* ignore */
-        }
-        currentView = 'addresses';
-      }}
-      autoRenew={autoRenew}
-      onToggleAutoRenew={async () => { autoRenew = !autoRenew; await saveAutoRenew(); }}
-      onCopyOtp={copyOtp}
-      onCopyOtpFromMessage={copyOtpFromMessage}
-    />
-    </div>
-    {#if showSplitPane}
-      {#if layoutSplit}
-      <div class="split-divider-col shrink-0 flex flex-col items-center relative z-10" style="width: 20px;">
-        <button
-          type="button"
-          class="split-collapse-btn absolute top-1/2 -translate-y-1/2 z-20 flex items-center justify-center
-            w-5 h-10 rounded-full bg-md-surface-container border border-md-outline-variant/40
-            text-md-on-surface-variant hover:bg-md-secondary-container hover:text-md-on-secondary-container
-            hover:border-md-secondary transition-all shadow-sm"
-          aria-label={splitPaneCollapsed ? 'Expand detail pane' : 'Collapse detail pane'}
-          onclick={toggleSplitPane}
-        >
-          <Icon name={splitPaneCollapsed ? 'chevronRight' : 'chevronLeft'} class="w-3 h-3" />
-        </button>
-        <button
-          type="button"
-          class="split-resize-handle w-full h-full cursor-col-resize border-0 p-0 bg-transparent
-            hover:bg-md-primary/20 active:bg-md-primary/30"
-          aria-label={$t('common.resizePanes')}
-          onpointerdown={(e) => {
-            const startX = e.clientX;
-            const startW = splitListWidthPx;
-            const parent = (e.currentTarget as HTMLElement).parentElement?.parentElement;
-            const move = (ev: PointerEvent) => {
-              const maxByDetail = Math.max(
-                360,
-                (parent?.clientWidth || 1280) - 360 - 16
-              );
-              splitListWidthPx = Math.min(
-                Math.min(640, maxByDetail),
-                Math.max(360, startW + (ev.clientX - startX))
-              );
-            };
-            const up = () => {
-              window.removeEventListener('pointermove', move);
-              window.removeEventListener('pointerup', up);
-              void browser.storage.local.set({ splitListWidthPx });
-            };
-            window.addEventListener('pointermove', move);
-            window.addEventListener('pointerup', up);
-          }}
-        ></button>
-      </div>
-      {/if}
-      <div
-        data-splitview
-        class="flex-1 overflow-hidden flex flex-col rounded-xl bg-md-surface"
-        style={layoutSplit ? "min-width: 360px;" : "min-height: 280px;"}
-      >
-        {#if mailProviderSplitOpen && MailProviderViewComponent}
-          {@const Comp = MailProviderViewComponent}
-          <Comp
-            onBack={() => {
-              mailProviderSplitOpen = false;
-            }}
-            selectedProvider={selectedProvider}
-            autoRenew={autoRenew}
-            notificationsEnabled={notificationsEnabled}
-            soundEnabled={soundEnabled}
-            expiryWarningThreshold={expiryWarningThreshold}
-            autoRefreshInterval={autoRefreshInterval}
-            emailPreviewEnabled={emailPreviewEnabled}
-            providerInstances={providerInstances}
-            selectedProviderInstance={selectedProviderInstance}
-            defaultDomain={defaultDomain}
-            allInboxes={allInboxes}
-            onProviderChange={handleProviderChange}
-            onSetAutoRenew={(v: boolean) => {
-              autoRenew = v;
-            }}
-            onSetNotificationsEnabled={(v: boolean) => {
-              notificationsEnabled = v;
-            }}
-            onSetSoundEnabled={(v: boolean) => {
-              soundEnabled = v;
-            }}
-            onSetExpiryWarningThreshold={(v: number) => {
-              expiryWarningThreshold = v;
-            }}
-            onSetAutoRefreshInterval={updateAutoRefreshInterval}
-            onSetEmailPreviewEnabled={(v: boolean) => {
-              emailPreviewEnabled = v;
-            }}
-            onSetProviderInstance={(v: string) => {
-              selectedProviderInstance = v;
-            }}
-            onAddCustomInstance={addCustomInstance}
-            onLoadProviderInstances={loadProviderInstances}
-            onSetDefaultDomain={(v: string) => {
-              defaultDomain = v;
-            }}
-            onSaveSettings={saveSettings}
-          />
-        {:else if selectedThread.length > 0}
-        <MailView
-          context={context}
-          onBack={() => {
-            selectedThread = [];
-          }}
-          selectedThread={selectedThread}
-          hasPrev={hasPrevMessage}
-          hasNext={hasNextMessage}
-          onPrev={navigateToPrevMessage}
-          onNext={navigateToNextMessage}
-          mailboxAddress={selectedEmail}
-          showToolbarLabels={true}
-          onMarkUnread={() => {
-            for (const msg of selectedThread) {
-              void persistEmailUnread(msg);
-              const idx = emails.findIndex((e) => e.id === msg.id);
-              if (idx !== -1) {
-                emails = emails.map((e, i) => (i === idx ? { ...e, unread: true } : e));
-              }
-            }
-            if (selectedEmail) {
-              unreadByAddress = {
-                ...unreadByAddress,
-                [selectedEmail]:
-                  (unreadByAddress[selectedEmail] ?? 0) + selectedThread.length,
-              };
-            }
-            selectedThread = [];
-          }}
-          onArchive={() => {
-            if (selectedThread.length === 0) return;
-            void archiveSelectedEmails(selectedThread).then(() => {
-              selectedThread = [];
-            });
-          }}
-          showToast={showToast}
-          onSearchText={(query: string) => {
-            applySearchQuery(query);
-            currentView = 'mailbox';
-          }}
-          onDelete={() => {
-            if (selectedThread.length === 0) return;
-            void deleteSelectedEmails(selectedThread).then(() => {
-              selectedThread = [];
-            });
-          }}
-        />
-        {:else}
-          <div class="flex-1 flex flex-col items-center justify-center px-6 text-center gap-3 bg-md-surface-container-low/40">
-            <Icon name="mail" class="w-12 h-12 text-md-on-surface/20" />
-            <div class="text-sm font-semibold text-md-on-surface/70">{$t('inbox.noMessageSelected')}</div>
-            <p class="text-xs text-md-on-surface/45 max-w-xs leading-relaxed">{$t('inbox.splitEmptyHint')}</p>
-            <ul class="text-xs text-md-on-surface/50 space-y-1.5 text-start max-w-xs mt-1">
-              <li class="flex gap-2"><span class="text-md-primary font-bold">·</span>{$t('inbox.splitTipSelect')}</li>
-              <li class="flex gap-2"><span class="text-md-primary font-bold">·</span>{$t('inbox.splitTipNavigate')}</li>
-              <li class="flex gap-2"><span class="text-md-primary font-bold">·</span>{$t('inbox.splitTipSearch')}</li>
-            </ul>
-          </div>
-        {/if}
-      </div>
-    {/if}
-    <!-- Re-expand strip for mailbox split pane -->
-    {#if (layoutSplit || layoutVerticalSplit) && splitPaneCollapsed}
-      <button
-        type="button"
-        class="split-reexpand-strip shrink-0 flex items-center justify-center gap-1
-          text-label-sm font-medium text-md-on-surface-variant hover:text-md-on-secondary-container
-          hover:bg-md-secondary-container transition-all border-md-outline-variant/30
-          {layoutSplit ? 'flex-col w-8 border-s' : 'flex-row h-8 border-t'}"
-        aria-label={$t('common.expandSplitPane')}
-        onclick={expandSplitPane}
-      >
-        <Icon name={layoutSplit ? 'chevronLeft' : 'chevronUp'} class="w-3.5 h-3.5" />
-        <span class="text-label-sm
-          {layoutSplit ? '[writing-mode:vertical-rl] rotate-180' : ''}">
-          {$t('layout.splitPane')}
-        </span>
-      </button>
-    {/if}
-    </div>
-  {/if}
-
-  </div>
-  {/key}
-
-        <!-- Toasts are position:fixed; offline strip replaces header (above) -->
-        <ToastContainer />
-
-      <!-- Footer - hidden in wide sidebar layout -->
-      {#if !layoutWide && (accounts.length > 0 || allInboxes.length > 0 || loadingInboxes)}
-        <div bind:this={bottomFloatingLayerEl} class="bottom-floating-layer-wrapper absolute bottom-0 inset-x-0 z-30 pointer-events-none">
-        {#if demoModeActive}
-          <div class="absolute bottom-[calc(var(--footer-safe,44px)+0.5rem)] end-2 z-30 pointer-events-auto">
-            <button
-              type="button"
-              class="px-3 py-1.5 rounded-full text-label-sm font-bold shadow-lg bg-md-error text-md-on-error hover:brightness-110 transition-all active:scale-95 flex items-center gap-1.5"
-              onclick={async () => {
-                const { exitDemoMode } = await import('@/features/demo/demo-mode.js');
-                await exitDemoMode(browser);
-                demoModeActive = false;
-                await loadInboxes();
-                showToast($t('preferences.demoModeDisabled'), 'info');
-              }}
-            >
-              <Icon name="x" class="w-3.5 h-3.5" />
-              {$t('preferences.exitDemoMode')}
-            </button>
-          </div>
-        {/if}
-        <Footer
-          currentView={currentView}
-          organizeTab={organizeTabValue}
-          onNavigate={(view) => {
-            accountSelectorDropdownOpen = false;
-            mailProviderSplitOpen = false;
-            settingsSubpage = null;
-            currentView = view;
-          }}
-          onLongPressNavbar={handleLongPressNavbar}
-          {accounts}
-          {unreadByAddress}
-          loading={loading || loadingEmails}
-          providerInstances={providerInstances}
-          onCreateInboxWithProvider={handleCreateInboxWithProvider}
-          onOpenProviderSettings={openMailProviderSettings}
-          onFabClick={(kind) => {
-            if (kind === 'refresh') {
-              const id =
-                allInboxes.find((a) => a.address === selectedEmail)?.id ||
-                accounts.find((a) => a.address === selectedEmail)?.id;
-              if (id) void refreshInbox(id);
-              else void refreshInbox();
-            } else if (kind === 'createAddress') {
-              openCreateInboxDialog();
-            } else if (kind === 'createIdentity') {
-              identityCreateSignal += 1;
-              autofillTabValue = 'profiles';
-              autofillTabSignal += 1;
-              if (currentView !== 'autofill') currentView = 'autofill';
-            } else if (kind === 'createTag') {
-              tagCreateSignal += 1;
-              organizeTabValue = 'tags';
-              organizeTabSignal += 1;
-              if (currentView !== 'organize') currentView = 'organize';
-            } else if (kind === 'createLabel') {
-              labelCreateSignal += 1;
-              organizeTabValue = 'labels';
-              organizeTabSignal += 1;
-              if (currentView !== 'organize') currentView = 'organize';
-            } else if (kind === 'createFilter') {
-              organizeTabValue = 'filters';
-              organizeTabSignal += 1;
-              if (currentView !== 'organize') currentView = 'organize';
-              // Filters are created from mailbox search; open filters tab for management
-            } else if (kind === 'ghostLogin') {
-              autofillTabValue = 'credentials';
-              autofillTabSignal += 1;
-              if (currentView !== 'autofill') currentView = 'autofill';
-              savedLoginsFocusSignal += 1;
-            } else if (kind === 'ghostExpand') {
-              // FAB "expand" on message detail → open the full app window with
-              // the current view (same as the header expand button).
-              void expandCurrentView();
-            } else if (kind === 'ghost') {
-              try {
-                document
-                  .querySelector('.view-crossfade, .flex-1.min-h-0.overflow-y-auto, main')
-                  ?.scrollTo?.({ top: 0, behavior: 'smooth' });
-                window.scrollTo({ top: 0, behavior: 'smooth' });
-              } catch {
-                /* ignore */
-              }
-            }
-          }}
-        />
-        </div>
-      {/if}
-      </div><!-- content area -->
-      </div><!-- main column (header/content/footer) -->
-    </div><!-- shell -->
-  </div><!-- outer -->
-
-  {#if QrDialogComponent}
-    <QrDialogComponent
-      open={qrDialogOpen}
-      selectedEmail={displayedEmail || selectedEmail}
-      bind:qrDialogElement
-      bind:qrCanvas
-      onClose={closeQrDialog}
-      onDownload={downloadQrCode}
-      onCopyImage={copyQrImage}
-    />
-  {/if}
-
-  <CreateInboxDialog
-    open={createInboxDialogOpen}
-    onClose={() => { createInboxDialogOpen = false; pendingCreateProviderConfig = undefined; }}
-    onCreate={handleCreateInbox}
-    providerConfig={pendingCreateProviderConfig}
-  />
-
-  <ConfirmDialog
     {confirmDialog}
-    bind:confirmDialogRef
-    onClose={closeConfirm}
-  />
-  <!-- Tag dialog for non-split EmailDetail (full mainview) -->
-  {#if addressViewTagDialogOpen && !(layoutSplit || layoutVerticalSplit)}
-    <TagDialog
-      open={addressViewTagDialogOpen}
-      currentTag={addressViewTagTargets.length > 1 ? null : (addressViewTagTarget?.tag ?? null)}
-      currentTagColor={addressViewTagTargets.length > 1 ? null : (addressViewTagTarget?.tagColor ?? null)}
-      existingTags={allExistingTags}
-      tagColors={allTagColors}
-      onClose={closeAddressViewTagDialog}
-      onSave={saveAddressViewTag}
-      portal={true}
-    />
-  {/if}
+    {paletteCommands}
 
-  <CommandPalette bind:open={commandPaletteOpen} commands={paletteCommands} />
-
-  <!-- Keyboard Shortcuts Cheat Sheet Overlay -->
-  <KeyboardShortcutsCheatSheet
-    open={cheatSheetOpen}
-    keybindings={keybindings}
-    onClose={() => (cheatSheetOpen = false)}
+    {retentionCleanupDismissed}
+    {oldEmailCount}
+    {showQuotaBanner}
+    {version}
+    {activeViewForExpand}
+    {themeMode}
+    {contrastLevel}
+    {isOffline}
+    {offlineDismissed}
+    {isOnboardingShell}
+    {contentBottomSafeAreaPx}
+    {totalUnreadCount}
+    {showHeaderBack}
+    {isMoreOnlyPage}
+    {headerPageTitle}
+    {headerPageIcon}
+    {uiDensity}
+    {hideFloatingFooterForDetail}
+    {addressBootstrapReady}
+    {loading}
+    {loadingEmails}
+    bind:layoutRootEl={layoutRootEl}
+    bind:bottomFloatingLayerEl={bottomFloatingLayerEl}
+    bind:qrCanvas={overlayState.qrCanvas}
+    {qrDialogEmail}
+    bind:tooltipRef={overlayState.tooltipRef}
+    bind:splitHostRef={splitHostRef}
+    onDeleteLogin={(id: string) => deleteLoginByIdAction(ext, loginSetters, id)}
+    onReorderLogin={(sourceId: string, targetId: string) =>
+      reorderLoginInfoByIdAction(ext, loginSetters, sourceId, targetId)}
+    {setThemeMode}
+    {setContrastLevel}
+    {handleHeaderBack}
+    {handleSettingsSubpageBack}
+    {handleScrollDirection}
+    {handleLongPressNavbar}
+    {expandCurrentView}
+    {toggleSplitPane}
+    {expandSplitPane}
+    {openCreateAddressDialog}
+    {handleCreateAddressWithProvider}
+    {handleCreateAddress}
+    {createAddress}
+    {selectAddress}
+    {refreshMailbox}
+    {toggleNotifications}
+    {openAddressView}
+    {refreshCurrentAddressMessages}
+    {handleAddressDomainChanged}
+    {navigateFromAddressToMailbox}
+    {handleAddressUnarchive}
+    {handleAddressAutoExtend}
+    {handleAddressExtend}
+    {toggleSelectAll}
+    {toggleSelect}
+    {archiveSelected}
+    {unarchiveSelected}
+    {deleteSelected}
+    {exportSelected}
+    {deleteAddressesDirect}
+    {archiveAddress}
+    {unarchiveAddress}
+    {archiveAddressesBulk}
+    {unarchiveAddressesBulk}
+    {renewAddressesBulk}
+    {removeAddress}
+    {restoreAddress}
+    {toggleAutoExtend}
+    {extendAddress}
+    {reorderAddressesById}
+    {openMessageDetail}
+    {markSelectedThreadUnreadAndClose}
+    {archiveSelectedThread}
+    {deleteSelectedThread}
+    {createRuleFromMessage}
+    {searchFromMessage}
+    {navigateToPrevMessage}
+    {navigateToNextMessage}
+    {autofillForm}
+    {copyOtpFromMessage}
+    {applySearchQuery}
+    {clearFilters}
+    {archiveSelectedEmails}
+    {deleteSelectedEmails}
+    {restoreSelectedEmails}
+    {saveFilter}
+    {loadFilter}
+    {renameFilter}
+    {deleteFilter}
+    {loadSavedSearchFilters}
+    {saveSettings}
+    {toggleDeveloperSettings}
+    {toggleEnableLogging}
+    {handleProviderChange}
+    {saveAutoCopy}
+    {saveAutoRenew}
+    {saveAutoRenewWindowMinutes}
+    {handleColorChange}
+    {loadProviderInstances}
+    {addCustomInstance}
+    {hardReset}
+    {updateAutoRefreshInterval}
+    {openMailProviderSettings}
+    {exportData}
+    {importData}
+    {loadAnalytics}
+    {handleResetAnalytics}
+    {loadSettings}
+    {loadLoginInfo}
+    {loadAddresses}
+    {stableLoadAddresses}
+    {checkMessages}
+    {openQrDialog}
+    {closeQrDialog}
+    {downloadQrCode}
+    {copyQrImage}
+    {handleExecuteExport}
+    {exportAddressEmails}
+    {showToast}
+    {showConfirm}
+    {closeConfirm}
+    {startProductTour}
+    {finishProductTour}
+    {skipProductTour}
+    {setSelectedIdentity}
+    {handleRequestQuotaUnlimitedStorage}
+    {dismissQuotaBanner}
+    {dismissRetentionCleanup}
+    {cleanupOldEmailsNow}
+    {openAddressViewTagDialog}
+    {openAddressViewTagDialogForSelected}
+    {closeAddressViewTagDialog}
+    {saveAddressViewTags}
+    {addressDetailToast}
+    {removeFromAutofillBlocklist}
+    {addToAutofillBlocklistSetting}
+    {toggleAutofillBlocklistSetting}
   />
-
-  <!-- Interactive Export & Backup Wizard (email formats) -->
-  <ExportWizardDialog
-    open={exportWizardOpen}
-    account={exportWizardAccount}
-    messages={exportWizardMessages}
-    onClose={() => (exportWizardOpen = false)}
-    onExecuteExport={handleExecuteExport}
-  />
-
-  <!-- Interactive product tour (spotlight) -->
-  <ProductTour
-    open={productTourOpen}
-    steps={PRODUCT_TOUR_STEPS}
-    currentView={currentView}
-    onNavigate={async (view) => {
-      currentView = view;
-    }}
-    onComplete={() => {
-      void finishProductTour();
-    }}
-    onSkip={() => {
-      void skipProductTour();
-    }}
-  />
-
-  <!-- Full extension backup export/import -->
-  <ExportBackupDialog
-    open={showExportBackupDialog}
-    onClose={() => (showExportBackupDialog = false)}
-    onSuccess={(msg) => showToast(msg || $t('toasts.dataExportedSuccessfully'))}
-    onError={(msg) => showToast(msg || $t('toasts.exportFailed'), 'error')}
-  />
-  <ImportBackupDialog
-    open={showImportBackupDialog}
-    onClose={() => (showImportBackupDialog = false)}
-    loadInboxes={async () => {
-      await loadInboxes();
-      try {
-        await loadSettings();
-      } catch {
-        /* ignore */
-      }
-      try {
-        await loadLoginInfo();
-      } catch {
-        /* ignore */
-      }
-    }}
-    onSuccess={(summary?: string, result?: import('@/features/settings/backup-actions.js').ImportSummary) => {
-      showToast(summary || $t('toasts.dataImportedSuccessfully'));
-      void loadInboxes();
-      void loadSettings().catch(() => {});
-      void loadLoginInfo().catch(() => {});
-      if (result && result.renewableExpiredImported > 0) {
-        setTimeout(() => {
-          showToast(
-            $t('backup.renewableExpiredImportedToast', {
-              values: { n: result.renewableExpiredImported },
-            }),
-            'info'
-          );
-        }, 500);
-      }
-    }}
-    onError={(msg?: string) => showToast(msg || $t('toasts.importFailed'), 'error')}
-  />
-  {#if activeTooltip}
-    <div
-      bind:this={tooltipRef}
-      class="fixed z-[100000] px-2.5 py-1.5 rounded-lg text-xs font-medium bg-md-inverse-surface text-md-inverse-on-surface shadow-lg pointer-events-none transition-opacity duration-150 opacity-0 w-max max-w-[min(360px,92vw)] whitespace-normal break-words text-center leading-snug"
+  {#if manualArchivedRenewalPrompt}
+    <ModalDialog
+      open={true}
+      title={$t('address.manualArchiveRenewalTitle')}
+      onClose={() => resolveManualArchivedRenewal(null)}
+      maxWidth="xs"
     >
-      {activeTooltip.text}
-    </div>
-  {/if}
-
-  {#if printIntent}
-    <div
-      class="fixed top-3 inset-x-0 {PORTAL_Z_CLASS.printBar} flex justify-center px-3 pointer-events-none"
-      role="region"
-      aria-label={$t('inbox.printAppBarTitle')}
-    >
-      <div class="pointer-events-auto flex items-center gap-3 w-full max-w-md bg-md-surface-container-high border border-md-outline-variant/40 shadow-xl rounded-2xl px-4 py-3 backdrop-blur-md">
-        <Icon name="print" class="w-5 h-5 text-md-primary shrink-0" />
-        <div class="min-w-0 flex-1">
-          <div class="text-sm font-semibold text-md-on-surface truncate">{$t('inbox.printAppBarTitle')}</div>
-          <div class="text-xs text-md-on-surface/50 leading-snug">{$t('inbox.printAppBarHint')}</div>
-        </div>
-        <button
-          type="button"
-          class="shrink-0 px-3 h-9 rounded-full bg-md-primary text-md-on-primary text-xs font-semibold hover:brightness-110 active:scale-95 transition-all"
-          aria-label={$t('inbox.emailActions.print')}
-          onclick={(e) => {
-            e.stopPropagation();
-            if (printIntent) {
-              printHtmlDocument(printIntent.html, printIntent.title);
-              // The manual click is the guaranteed gesture — hide the bar now
-              // so the "didn't open automatically" hint isn't left dangling.
-              printIntent = null;
-            }
-          }}
-        >
-          {$t('inbox.emailActions.print')}
-        </button>
-        <button
-          type="button"
-          class="shrink-0 w-8 h-8 flex items-center justify-center rounded-full hover:bg-md-surface-variant transition-colors"
-          aria-label={$t('common.close')}
-          onclick={() => (printIntent = null)}
-        >
-          <Icon name="x" class="w-4 h-4 text-md-on-surface/60" />
-        </button>
+      <div class="space-y-2">
+        <p class="text-xs text-md-on-surface/60 font-mono" style="direction:ltr;unicode-bidi:isolate;">
+          {manualArchivedRenewalPrompt.account.address}
+        </p>
+        <p class="text-sm text-md-on-surface-variant">
+          {$t('address.manualArchiveRenewalBody')}
+        </p>
       </div>
-    </div>
+      {#snippet footer()}
+        <div class="flex flex-col gap-1.5 w-full">
+          <Btn
+            variant="primary"
+            class="w-full"
+            onClick={() => resolveManualArchivedRenewal('unarchive')}
+          >
+            {$t('address.unarchiveAfterRenewal')}
+          </Btn>
+          <Btn
+            variant="secondary"
+            class="w-full"
+            onClick={() => resolveManualArchivedRenewal('keep-archived')}
+          >
+            {$t('address.keepArchivedAfterRenewal')}
+          </Btn>
+          <Btn
+            variant="ghost"
+            class="w-full"
+            onClick={() => resolveManualArchivedRenewal(null)}
+          >
+            {$t('common.cancel')}
+          </Btn>
+        </div>
+      {/snippet}
+    </ModalDialog>
   {/if}
 </ErrorBoundary>
-
-<style>
-  /* Split pane divider column (portrait/horizontal layout) */
-  .split-divider-col {
-    position: relative;
-  }
-  .split-divider-col::before {
-    content: '';
-    position: absolute;
-    inset: 0;
-    left: 50%;
-    width: 1px;
-    background: var(--md-outline-variant, rgba(0,0,0,.12));
-    opacity: 0.4;
-  }
-
-  /* Collapse toggle button — appears on hover for discoverability */
-  .split-collapse-btn {
-    opacity: 0;
-    transition: opacity 150ms ease, transform 150ms ease;
-  }
-  .split-divider-col:hover .split-collapse-btn,
-  .split-collapse-btn:focus-visible {
-    opacity: 1;
-  }
-
-  /* Re-expand strip (shown when split pane collapsed) */
-  .split-reexpand-strip {
-    opacity: 0.6;
-    transition: opacity 150ms ease, background-color 150ms ease;
-  }
-  .split-reexpand-strip:hover {
-    opacity: 1;
-  }
-</style>

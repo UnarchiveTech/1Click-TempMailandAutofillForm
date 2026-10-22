@@ -48,7 +48,8 @@ function findScrollableAncestors(target: HTMLElement): HTMLElement[] {
 function isVisible(target: HTMLElement): boolean {
   if (!target.isConnected) return false;
   const style = getComputedStyle(target);
-  if (style.display === 'none' || style.visibility === 'hidden') return false;
+  if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0')
+    return false;
   const rect = target.getBoundingClientRect();
   return rect.width > 0 && rect.height > 0;
 }
@@ -57,10 +58,20 @@ export function trackElementPosition(
   button: HTMLElement,
   target: HTMLElement,
   positioner: (rect: DOMRect) => { top: number; left: number; visible: boolean },
-  updatePositionListeners: Array<() => void>
+  updatePositionListeners: Array<() => void>,
+  layoutRoot?: HTMLElement
 ): PositionTracker {
   let isIntersecting = true;
   let frameId: number | null = null;
+  // Snapshot the element's intended display (the pill sets
+  // `display: inline-flex !important` via cssText). Restoring the RAW inline
+  // style is critical: `style.display = ''` would DELETE the inline display
+  // (and its !important priority), collapsing flex containers to `block` and
+  // turning flex children into baseline-aligned inline boxes - which visibly
+  // shifts segments (e.g. the Autofill All button 2px low) until a re-layout
+  // happens to restore flex.
+  const originalDisplay = button.style.display || '';
+  const displayPriority = button.style.getPropertyPriority('display');
 
   const update = () => {
     if (frameId !== null) return;
@@ -71,11 +82,22 @@ export function trackElementPosition(
         return;
       }
       const rect = target.getBoundingClientRect();
+      // Measure the intended size even after an intersection/space hide.
+      button.style.setProperty('display', originalDisplay || 'block', displayPriority);
       const { top, left, visible } = positioner(rect);
       button.style.position = 'fixed';
       button.style.top = `${top}px`;
       button.style.left = `${left}px`;
-      button.style.display = visible ? '' : 'none';
+      if (visible) {
+        // Restore the intended display (with its priority) - never clobber it.
+        if (originalDisplay) {
+          button.style.setProperty('display', originalDisplay, displayPriority);
+        } else {
+          button.style.removeProperty('display');
+        }
+      } else {
+        button.style.setProperty('display', 'none', displayPriority);
+      }
     });
   };
 
@@ -94,8 +116,20 @@ export function trackElementPosition(
 
   let resizeObserver: ResizeObserver | null = null;
   if (typeof ResizeObserver !== 'undefined') {
-    resizeObserver = new ResizeObserver(() => update());
+    resizeObserver = new ResizeObserver((entries) => {
+      if (
+        entries.some(
+          (entry) =>
+            entry.target !== button || (entry.contentRect.width > 0 && entry.contentRect.height > 0)
+        )
+      )
+        update();
+    });
     resizeObserver.observe(target);
+    if (layoutRoot) {
+      resizeObserver.observe(layoutRoot);
+      resizeObserver.observe(button);
+    }
     for (const ancestor of ancestors) {
       resizeObserver.observe(ancestor);
     }
@@ -115,12 +149,23 @@ export function trackElementPosition(
     intersectionObserver.observe(target);
   }
 
+  const layoutObserver =
+    layoutRoot && typeof MutationObserver !== 'undefined' ? new MutationObserver(update) : null;
+  if (layoutRoot)
+    layoutObserver?.observe(layoutRoot, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ['class', 'style', 'hidden'],
+    });
+
   const cleanup = () => {
     if (frameId !== null) {
       cancelAnimationFrame(frameId);
       frameId = null;
     }
     window.removeEventListener('resize', resizeListener);
+    layoutObserver?.disconnect();
     window.removeEventListener('scroll', scrollListener);
     for (const ancestor of ancestors) {
       ancestor.removeEventListener('scroll', scrollListener);
@@ -157,16 +202,79 @@ export function positionAtEndOfField(rect: DOMRect): {
   };
 }
 
-/** Place control just after a heading / first field (Autofill All). */
-export function positionAfterElement(rect: DOMRect): {
-  top: number;
-  left: number;
-  visible: boolean;
-} {
-  return {
-    top: Math.max(0, rect.bottom + 6),
-    left: Math.max(0, rect.left),
-    visible: rect.width > 0 || rect.height > 0,
+type PlacementRect = Pick<DOMRect, 'top' | 'right' | 'bottom' | 'left'>;
+
+/** Prefer the anchor gap, then free space around the form. Never cover a site control. */
+export function chooseToolbarPosition(
+  anchor: PlacementRect,
+  form: PlacementRect,
+  size: { width: number; height: number },
+  viewport: { width: number; height: number },
+  obstacles: PlacementRect[]
+): { top: number; left: number; visible: boolean } {
+  const gap = 6;
+  const inset = 4;
+  const left = Math.max(inset, Math.min(anchor.left, viewport.width - size.width - inset));
+  const candidates = [
+    { top: anchor.bottom + gap, left },
+    { top: form.bottom + gap, left },
+    { top: form.top - size.height - gap, left },
+    { top: anchor.top - size.height - gap, left },
+    { top: anchor.top, left: form.right + gap },
+    { top: anchor.top, left: form.left - size.width - gap },
+    ...obstacles.flatMap((rect) => [
+      { top: rect.bottom + gap, left },
+      { top: rect.top - size.height - gap, left },
+    ]),
+  ];
+  for (const candidate of candidates) {
+    const right = candidate.left + size.width;
+    const bottom = candidate.top + size.height;
+    if (
+      candidate.top < inset ||
+      candidate.left < inset ||
+      right > viewport.width - inset ||
+      bottom > viewport.height - inset
+    )
+      continue;
+    if (
+      obstacles.some(
+        (rect) =>
+          candidate.left < rect.right + inset &&
+          right > rect.left - inset &&
+          candidate.top < rect.bottom + inset &&
+          bottom > rect.top - inset
+      )
+    )
+      continue;
+    return { ...candidate, visible: true };
+  }
+  // Keep website controls usable even when the viewport has no free slot.
+  return { top: 0, left, visible: false };
+}
+
+export function createToolbarPositioner(
+  button: HTMLElement,
+  form: HTMLElement,
+  scope: HTMLElement
+) {
+  return (anchor: DOMRect) => {
+    const obstacles = Array.from(
+      scope.querySelectorAll<HTMLElement>(
+        'input,select,textarea,button,a,label,h1,h2,h3,h4,h5,h6,p,[role="button"],[role="heading"]'
+      )
+    )
+      .filter(isVisible)
+      .map((element) => element.getBoundingClientRect());
+    return chooseToolbarPosition(
+      anchor,
+      form.getBoundingClientRect(),
+      { width: button.offsetWidth, height: button.offsetHeight },
+      { width: document.documentElement.clientWidth, height: window.innerHeight },
+      // The chosen heading can be outside the form's layout scope. Keep it
+      // clear even when the first candidate has to fall back above the form.
+      [anchor, ...obstacles]
+    );
   };
 }
 

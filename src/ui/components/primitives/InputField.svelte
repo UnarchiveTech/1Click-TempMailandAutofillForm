@@ -1,11 +1,10 @@
 <!--
-  InputField.svelte — Reusable text/password/email input primitive
+  InputField.svelte - Reusable text/password/email input primitive
   ================================================================
   Provides a uniform Material Design 3 input appearance:
-    - Border: md-outline-variant, highlights md-primary on focus
-    - Background: md-surface-variant/40 (matches all current dialogs)
-    - Font size: text-sm by default (standardized); use size="xs" for compact forms
-    - Border radius: rounded-xl (consistent with button tokens)
+    - Compact: outline-variant border, surface-variant wash, rounded corners
+    - Outlined: 56px field, floating label, body-large text and extra-small shape
+    - Both: primary focus cue, associated error text and native input semantics
   
   Supports:
     - Optional password toggle (set type="password" + showToggle)
@@ -14,16 +13,20 @@
     - Fully accessible (label association via id/for)
 -->
 <script lang="ts">
-import Icon from '@/ui/components/icons/Icon.svelte';
+import { t } from 'svelte-i18n';
+import IconButton from '@/ui/components/primitives/IconButton.svelte';
 
 interface Props {
   id?: string;
+  /** Opt-in MD3 outlined field with a floating, associated label. */
+  variant?: 'compact' | 'outlined';
+  label?: string;
   type?: 'text' | 'password' | 'email' | 'search' | 'url' | 'number' | 'tel' | 'date';
   /** String for text fields; number supported when type="number" */
   value?: string | number;
   placeholder?: string;
   disabled?: boolean;
-  /** Compact (xs) — for narrow forms/chips; default is sm */
+  /** Compact (xs) - for narrow forms/chips; default is sm */
   size?: 'xs' | 'sm';
   /** Show password-toggle eye button (only when type="password") */
   showToggle?: boolean;
@@ -33,14 +36,19 @@ interface Props {
   min?: number | string;
   max?: number | string;
   step?: number | string;
+  maxlength?: number;
   class?: string;
   /** fired when value changes */
   oninput?: (e: Event & { currentTarget: HTMLInputElement }) => void;
   onkeydown?: (e: KeyboardEvent) => void;
+  onpaste?: (e: ClipboardEvent) => void;
+  onblur?: (e: FocusEvent & { currentTarget: HTMLInputElement }) => void;
 }
 
 let {
   id,
+  variant = 'compact',
+  label,
   type = 'text',
   value = $bindable('' as string | number),
   placeholder = '',
@@ -52,12 +60,17 @@ let {
   min,
   max,
   step,
+  maxlength,
   class: extraClass = '',
   oninput,
   onkeydown,
+  onpaste,
+  onblur,
 }: Props = $props();
 
 let revealed = $state(false);
+const fieldId = $props.id();
+const inputId = $derived(id || fieldId);
 let effectiveType = $derived(type === 'password' && revealed ? 'text' : type);
 
 const sizeClasses: Record<NonNullable<Props['size']>, string> = {
@@ -76,36 +89,112 @@ const borderClass = $derived(
 );
 </script>
 
-<div class="relative flex items-center {extraClass}">
+<div class="flex flex-col gap-1 {extraClass}">
+  {#if label && variant !== 'outlined'}
+    <label for={inputId} class="ui-label text-md-on-surface-variant">{label}</label>
+  {/if}
+  <div class="relative flex items-center" class:outlined-field={variant === 'outlined'}>
   <input
-    {id}
+    id={inputId}
     type={effectiveType}
     bind:value
-    {placeholder}
+    placeholder={variant === 'outlined' && label ? ' ' : placeholder}
+    aria-invalid={error ? true : undefined}
+    aria-describedby={error ? `${inputId}-error` : undefined}
     {disabled}
     {min}
     {max}
     {step}
+    {maxlength}
     autocomplete={autocomplete as never}
-    class="{baseInput}{borderClass} {sizeClasses[size]} {showToggle ? 'pe-8' : ''}"
+    class="{baseInput}{borderClass} {sizeClasses[size]} {showToggle && type === 'password' ? 'password-field' : ''}"
     {oninput}
     {onkeydown}
+    {onpaste}
+    {onblur}
   />
+  {#if label && variant === 'outlined'}
+    <label for={inputId}>{label}</label>
+  {/if}
   {#if showToggle && type === 'password'}
-    <button
-      type="button"
-      class="absolute end-2.5 text-md-on-surface/40 hover:text-md-on-surface transition-colors"
-      tabindex="-1"
+    <IconButton
+      icon={revealed ? 'visibilityOff' : 'visibility'}
+      size="sm"
+      class="absolute end-1"
       onclick={(e) => {
         e.stopPropagation();
         revealed = !revealed;
       }}
-      aria-label={revealed ? 'Hide password' : 'Show password'}
-    >
-      <Icon name={revealed ? 'eyeOff' : 'eye'} class="w-3.5 h-3.5" />
-    </button>
+      disabled={disabled}
+      ariaLabel={revealed ? $t('common.hidePassword') : $t('common.showPassword')}
+      title={revealed ? $t('common.hidePassword') : $t('common.showPassword')}
+      aria-pressed={revealed}
+    />
+  {/if}
+  </div>
+  {#if error}
+    <p id={`${inputId}-error`} class="text-xs text-md-error" aria-live="polite">{error}</p>
   {/if}
 </div>
-{#if error}
-  <p class="mt-1 text-xs text-md-error">{error}</p>
-{/if}
+
+<style>
+  .password-field {
+    min-height: 36px;
+    padding-inline-end: 40px;
+  }
+  .outlined-field .password-field {
+    padding-inline-end: 48px;
+  }
+  input:disabled {
+    cursor: not-allowed;
+  }
+  input:focus {
+    box-shadow: inset 0 0 0 1px var(--md-primary);
+  }
+  input[aria-invalid='true']:focus {
+    box-shadow: inset 0 0 0 1px var(--md-error);
+  }
+  .outlined-field input {
+    height: 56px;
+    padding-inline: 16px;
+    border-radius: var(--md-shape-extra-small, 4px);
+    background: transparent;
+    border-color: var(--md-outline);
+    font-size: var(--md-type-body-large-size);
+    line-height: var(--md-type-body-large-line);
+    letter-spacing: var(--md-type-body-large-tracking);
+  }
+  .outlined-field label {
+    position: absolute;
+    inset-inline-start: 12px;
+    padding-inline: 4px;
+    color: var(--md-on-surface-variant);
+    background: var(--input-label-surface, var(--md-surface-container-high));
+    font-size: var(--md-type-body-large-size);
+    pointer-events: none;
+    transition: top 150ms, font-size 150ms, color 150ms;
+    top: 16px;
+  }
+  .outlined-field input:focus + label,
+  .outlined-field input:not(:placeholder-shown) + label {
+    top: -8px;
+    font-size: var(--md-type-body-small-size);
+  }
+  .outlined-field input:focus {
+    border-color: var(--md-primary);
+    box-shadow: inset 0 0 0 1px var(--md-primary);
+  }
+  .outlined-field input:focus + label { color: var(--md-primary); }
+  .outlined-field input[aria-invalid='true'] {
+    border-color: var(--md-error);
+  }
+  .outlined-field input[aria-invalid='true']:focus {
+    box-shadow: inset 0 0 0 1px var(--md-error);
+  }
+  .outlined-field input[aria-invalid='true'] + label { color: var(--md-error); }
+  .outlined-field input:disabled { opacity: 0.38; }
+  .outlined-field input:disabled + label { opacity: 0.38; }
+  @media (prefers-reduced-motion: reduce) {
+    .outlined-field label { transition: none; }
+  }
+</style>

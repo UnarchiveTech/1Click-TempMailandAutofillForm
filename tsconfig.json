@@ -2,7 +2,7 @@
   "compilerOptions": {
     "target": "ES2020",
     "module": "ESNext",
-    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "lib": ["ES2020", "ES2021.Intl", "DOM", "DOM.Iterable"],
     "moduleResolution": "bundler",
     "paths": {
       "@/*": ["./src/*"],
@@ -21,6 +21,16 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "strict": true,
+    // NOTE: noUnusedLocals stays OFF. tsc cannot see Svelte 5 snippet-as-children
+    // prop forwarding, so idiomatic `{#snippet footer()}` passed to <ModalDialog>
+    // flags as "declared but never read" (see ExportWizardDialog.svelte) and fails
+    // typecheck. Same reason Biome's noUnusedVariables/noUnusedImports are off for
+    // *.svelte (Biome does not analyze Svelte templates; enabling either rule
+    // produced thousands of false positives when measured). Plain .ts files ARE
+    // enforced: `bun run typecheck` runs `tsc --noEmit -p ./tsconfig.ts-only.json`
+    // (noUnusedLocals/noUnusedParameters) after svelte-check, so dead imports and
+    // locals in non-Svelte TypeScript fail the gate. Only .svelte files remain
+    // exempt (caught by periodic manual audit, not automated enforcement).
     "noImplicitAny": true,
     "strictNullChecks": true,
     "strictFunctionTypes": true,
@@ -29,8 +39,8 @@
     "noImplicitThis": true,
     "alwaysStrict": true,
     "forceConsistentCasingInFileNames": true,
-    "types": ["chrome", "bun-types"]
+    "types": ["bun-types"]
   },
-  "include": ["src/**/*", "tests/**/*"],
+  "include": ["src/**/*", "tests/**/*", "*.config.ts", "scripts/**/*"],
   "exclude": ["node_modules", ".output"]
 }

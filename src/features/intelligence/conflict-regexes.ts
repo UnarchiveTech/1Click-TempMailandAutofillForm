@@ -12,3 +12,10 @@ export const USERNAME_CONFLICT_RE =
 
 export const OTP_FAIL_RE =
   /invalid\s+(code|otp|verification)|incorrect\s+(code|otp)|code\s+(is\s+)?(wrong|invalid|expired)|otp\s+(failed|invalid|expired)|verification\s+(failed|expired)|try\s+again|didn['']t\s+match|does\s+not\s+match|code\s+expired|wrong\s+code/i;
+
+/** Specific field failures must precede the generic "already taken" fallback. */
+export function classifyConflictText(text: string): 'email' | 'username' | 'otp' | null {
+  if (USERNAME_CONFLICT_RE.test(text)) return 'username';
+  if (OTP_FAIL_RE.test(text)) return 'otp';
+  return CONFLICT_RE.test(text) ? 'email' : null;
+}

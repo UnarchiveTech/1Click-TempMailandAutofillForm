@@ -1,21 +1,72 @@
 .output/
 .wxt/
 dist/
-
 node_modules/
 
 .env
 .env.local
 
 package-lock.json
+pnpm-lock.yaml
 
+.pnpm-store/
 .DS_Store
 *.log
 i18n-fit-report.json
 
+.commandcode/
+.poolside/
+.agents/
+.claude/
+.freebuff/
+scratch/
+
 docs/BUNDLE_OPTIMIZATION.md
 docs/OTP_EXTRACTION.md
-docs/TEST_COVERAGE_PLAN.md
+
+docs/audit
 
 scripts/gen-icons.py
+playwright-report/
+test-results/
+# Playwright's downloaded browser bundles (Chromium/WebKit). Not ignored, biome
+# with vcs.useIgnoreFile scans the whole browser distribution and fails on its
+# own bundled helper scripts - and the shared file lister (scripts/source-files.ts)
+# hands every gate a browser bundle to walk. Ignored ⇒ invisible, as intended.
+.playwright-browsers/
+# Scratch audit output. A handful of curated docs under audit/ (AUDIT.md,
+# AUDIT_REPORT_BACKUP_IMPORT.md, BUNDLE_OPTIMIZATION.md, WEBMCP.md, …) are
+# tracked on purpose even though this rule matches them: the shared file lister
+# resolves through `git check-ignore --no-index`, so a tracked-but-ignored file
+# is intentionally invisible to every gate - the same reason biome.json's
+# useIgnoreFile skips it. Put new scratch reports here, never a curated doc.
+audit/
+playwright-report.zip
+docs/TEST_COVERAGE_PLAN.md
+scripts/patch-locale-batch2.ts
+scripts/patch-locale-batch3.ts
+toggle.png
+compare-talis.cjs
+demo/logo-padding-compare.html
+artifacts/
+docs-site/dist/
 
+CHANGELOG.md
+.mcp.json
+docs/AUTO_RENEW_DIAGNOSIS.md
+plans
+audit-report-full.html
+
+# Local screenshots from scripts/nav-shot.ts (throwaway dev output)
+.nav-shot/
+
+# Windows PowerShell module cache (machine noise, never project content)
+Microsoft/
+
+# Throwaway one-off probes at the repo root (e.g. .tmp-icon-audit.ts). Biome
+# honours this file, so an untracked probe would otherwise fail `bun run check`
+# for reasons that have nothing to do with the code under review. Anchored to
+# the root on purpose: a scratch file inside src/ is still a source file, and a
+# nested `.tmp-*` there should keep failing the gate until it is removed.
+/.tmp-*
+_old_flat.json

@@ -2,34 +2,56 @@
  * Form filling logic: fills signup form fields with generated / stored data
  */
 
-import { watchUsernameConflict } from '@/features/intelligence/conflict-watch.js';
+import type { FormFieldKind } from '@/features/intelligence/types.js';
 import {
   buildSelectorHint,
   classifyFieldFastViaBg,
-  decryptViaBg,
+  decryptStoredCustomPasswordViaBg,
   encryptViaBg,
   generateIdentityViaBg,
   generateLocaleExtrasViaBg,
   generateLocalePhoneViaBg,
   getFieldMapViaBg,
   getStorageViaBg,
+  isSiteEmailAllowedViaBg,
   loadSmartAutofillSettingsViaBg,
   recordFieldMapHitViaBg,
   resolveDomainFieldOverridesViaBg,
   sendMessageViaBg,
   setStorageViaBg,
-} from '@/utils/content-bg-bridge.js';
-import { NoActiveInboxError } from '@/utils/content-errors.js';
-import { t } from '@/utils/content-i18n.js';
-import { generateDefaultAvatarDataUrl } from '@/utils/default-avatar.js';
-import { safeId, safeName, safePlaceholder } from '@/utils/dom-safe.js';
+} from '@/utils/content/content-bg-bridge.js';
+import { NoActiveAddressError } from '@/utils/content/content-errors.js';
+import { t, tSync } from '@/utils/i18n/content-i18n.js';
 import { logError } from '@/utils/logger.js';
-import { CONTENT_Z } from '@/utils/portal-layers.js';
-import { randomItem } from '@/utils/secure-random.js';
-import { DEFAULT_THEME_SEED, generateThemeColorsSync } from '@/utils/theme-generator.js';
-import type { CredentialsHistoryItem, Identity } from '@/utils/types.js';
+import { allowsSiteEmail } from '@/utils/provider/site-email-domains.js';
+import {
+  safeAccessibleName,
+  safeId,
+  safeName,
+  safePlaceholder,
+} from '@/utils/security/dom-safe.js';
+import { normalizeSavedLoginCredential } from '@/utils/security/login-credential-normalization.js';
+import { randomItem } from '@/utils/security/secure-random.js';
+import { generateDefaultAvatarDataUrl } from '@/utils/theme/default-avatar.js';
+import type { AddressStatus, CredentialsHistoryItem, Identity } from '@/utils/types.js';
+import { CONTENT_Z } from '@/utils/ui/portal-layers.js';
+import { getOrCreateShadowRoot } from '../dom/shadow-dom.js';
 import { showConflictChip, showTooltip } from '../dom/tooltip.js';
+import {
+  arrayOrEmpty,
+  isAutofillEmailAvailable,
+  isLiveMailboxAddress,
+} from '../shared/address-liveness.js';
+import {
+  readLoginInfo,
+  readNameSettings,
+  readPasswordSettings,
+  readSelectedProvider,
+} from '../shared/storage-reads.js';
+import { detectHumanVerification } from './challenge-detector.js';
+import { isFillableField } from './fillable.js';
 import { generateSmartPassword } from './generators.js';
+import { startUsernameRecovery } from './username-recovery.js';
 
 /** Detect the page locale from DOM (inline to avoid pulling locale-profile.ts into content bundle). */
 function detectPageLocale(): string {
@@ -56,16 +78,17 @@ export async function getPasswordToFill(
   field?: HTMLInputElement | null,
   form?: HTMLElement | Document | null
 ): Promise<string> {
-  const { passwordSettings = {} } = (await getStorageViaBg(['passwordSettings'])) as {
-    passwordSettings?: { useCustom?: boolean; customPassword?: string };
-  };
-  if (passwordSettings.useCustom && passwordSettings.customPassword) {
-    try {
-      return await decryptViaBg(passwordSettings.customPassword);
-    } catch {
-      // Legacy plaintext custom password
-      return passwordSettings.customPassword;
-    }
+  // Guarded reader (shared/storage-reads.ts): a corrupt or `null` passwordSettings
+  // record reads as "no custom password" instead of throwing on property access,
+  // and it exposes only whether one EXISTS - never the ciphertext.
+  const passwordSettings = await readPasswordSettings();
+  if (passwordSettings.useCustom && passwordSettings.hasCustomPassword) {
+    // Storage-scoped: the background resolves the stored value itself - legacy
+    // plaintext is returned unchanged, ciphertext-shaped values are decrypted
+    // there. It throws when the vault is locked or decryption genuinely fails,
+    // so callers surface the vault-locked chip instead of ever falling back to
+    // the raw stored blob (which would be ciphertext) in a page.
+    return await decryptStoredCustomPasswordViaBg('passwordSettings');
   }
   return generateSmartPassword(field, form || field?.form || document);
 }
@@ -73,65 +96,105 @@ export async function getPasswordToFill(
 /** Whether autofill can run: setup done + at least one live address. */
 export type AutofillBlockReason = 'setup' | 'no_active' | 'expired' | null;
 
+export type AutofillResultReason =
+  | 'blocked'
+  | 'no_form'
+  | 'no_compatible_fields'
+  | 'verification_required'
+  | 'address_expired'
+  | 'fill_failed'
+  | 'fill_error';
+
+export interface AutofillFillResult {
+  success: boolean;
+  filledFields: string[];
+  skippedFields: string[];
+  /** Actual mailbox selected for this fill, which may differ from activeAddressId. */
+  email?: string;
+  addressId?: string;
+  /** Exact newly saved credential; absent when replaying an existing login. */
+  credentialId?: string;
+  reason?: AutofillResultReason;
+}
+
+/** Render the most specific localized result next to the in-page Autofill anchor. */
+export async function showAutofillResultFeedback(
+  anchor: HTMLElement,
+  result: AutofillFillResult
+): Promise<void> {
+  const messages: string[] = [];
+  if (!result.success) {
+    if (result.reason === 'blocked') {
+      messages.push(await t('contentAutofill.siteBlocked'));
+    } else if (result.reason === 'verification_required') {
+      messages.push(await t('contentAutofill.humanVerificationRequired'));
+    } else if (result.reason === 'address_expired') {
+      messages.push(await t('contentAutofill.addressExpired'));
+    } else if (result.reason === 'no_form' || result.reason === 'no_compatible_fields') {
+      messages.push(await t('contentAutofill.noCompatibleFields'));
+    } else {
+      messages.push(await t('contentAutofill.autofillFailed'));
+    }
+  }
+  if (result.filledFields.includes('email')) {
+    messages.push(await t('contentAutofill.emailFilled'));
+  }
+  if (result.filledFields.includes('password')) {
+    messages.push(await t('contentAutofill.passwordFilled'));
+  }
+  if (result.skippedFields.includes('password_readonly')) {
+    messages.push(await t('contentAutofill.passwordSkippedReadonly'));
+  }
+  if (result.filledFields.includes('name')) {
+    messages.push(await t('contentAutofill.nameFilled'));
+  }
+  if (messages.length === 0) {
+    messages.push(await t('contentAutofill.fillSuccess'));
+  }
+  await showTooltip(anchor, messages.join(' · '), !result.success);
+}
+
 export async function getAutofillBlockReason(): Promise<AutofillBlockReason> {
   const {
-    inboxes = [],
-    activeInboxId,
+    addresses = [],
+    activeAddressId,
     onboardingComplete,
-  } = (await getStorageViaBg(['inboxes', 'activeInboxId', 'onboardingComplete'])) as {
-    inboxes?: Array<{
+  } = (await getStorageViaBg(['addresses', 'activeAddressId', 'onboardingComplete'])) as {
+    addresses?: Array<{
       id: string;
       address: string;
       status?: string;
-      accountStatus?: string;
+      accountStatus?: AddressStatus;
       expiresAt?: number;
     }>;
-    activeInboxId?: string;
+    activeAddressId?: string;
     onboardingComplete?: boolean;
   };
 
   const now = Date.now();
-  const isLive = (i: { status?: string; accountStatus?: string; expiresAt?: number }) => {
-    if (i.accountStatus === 'archived' || i.accountStatus === 'deleted') return false;
-    if (i.status === 'archived' || i.status === 'deleted' || i.status === 'expired') return false;
-    const exp = Number(i.expiresAt);
-    if (Number.isFinite(exp) && exp > 0 && exp <= now) return false;
-    return true;
-  };
+  // Shared garbage-tolerant liveness rule (address-liveness.ts).
+  const isLive = (i: { accountStatus?: AddressStatus; expiresAt?: number }) =>
+    isLiveMailboxAddress(i, now);
 
-  if (!Array.isArray(inboxes) || inboxes.length === 0) {
-    // Brand-new install / hard reset — need setup
+  if (!Array.isArray(addresses) || addresses.length === 0) {
+    // Brand-new install / hard reset - need setup
     return onboardingComplete === false ? 'setup' : 'no_active';
   }
 
-  const live = inboxes.filter(isLive);
+  const live = addresses.filter(isLive);
   if (live.length === 0) return 'no_active';
 
-  const active = activeInboxId ? inboxes.find((i) => i.id === activeInboxId) : null;
+  const active = activeAddressId ? addresses.find((i) => i.id === activeAddressId) : null;
   if (active && !isLive(active)) return 'expired';
   // Prefer having some live inbox even if active pointer is stale
   return null;
 }
 
 function fieldMeta(el: HTMLInputElement): string {
-  const labelText = (() => {
-    try {
-      if (el.labels && el.labels.length > 0) {
-        return Array.from(el.labels)
-          .map((l) => l.textContent || '')
-          .join(' ');
-      }
-      const id = safeId(el);
-      if (id) {
-        const lab = el.ownerDocument?.querySelector(`label[for="${CSS.escape(id)}"]`);
-        if (lab?.textContent) return lab.textContent;
-      }
-    } catch {
-      /* ignore */
-    }
-    return '';
-  })();
-  return `${safeName(el)} ${safeId(el)} ${safePlaceholder(el)} ${el.getAttribute('aria-label') || ''} ${el.getAttribute('autocomplete') || ''} ${labelText}`.toLowerCase();
+  // safeAccessibleName resolves aria-label, aria-labelledby and associated
+  // <label> text - the same signals the old inline labelText/aria-label
+  // concatenation covered, plus the aria-labelledby case React SPAs rely on.
+  return `${safeName(el)} ${safeId(el)} ${safePlaceholder(el)} ${safeAccessibleName(el)} ${el.getAttribute('autocomplete') || ''}`.toLowerCase();
 }
 
 function isPasswordish(meta: string, el: HTMLInputElement): boolean {
@@ -147,7 +210,7 @@ function isPasswordish(meta: string, el: HTMLInputElement): boolean {
 
 /**
  * Find a real username field (not email, not password).
- * autocomplete=username is often login EMAIL — only treat as username when
+ * autocomplete=username is often login EMAIL - only treat as username when
  * name/id/placeholder explicitly say username/handle.
  */
 export async function findUsernameField(root: ParentNode): Promise<HTMLInputElement | null> {
@@ -167,7 +230,7 @@ export async function findUsernameField(root: ParentNode): Promise<HTMLInputElem
     const meta = fieldMeta(el);
     if (isPasswordish(meta, el)) continue;
     if (looksLikeEmailField(el)) continue;
-    // Explicit username signals (multi-language) — classified via background
+    // Explicit username signals (multi-language) - classified via background
     const cls = await classifyFieldFastViaBg(meta);
     if (cls.isUsername) {
       return el;
@@ -204,7 +267,7 @@ function looksLikeEmailField(el: HTMLInputElement): boolean {
   if (/confirm|reenter|re-enter|repeat|verify/.test(meta) && /mail|email|correo/.test(meta)) {
     return true;
   }
-  // type=tel alone is phone — not email
+  // type=tel alone is phone - not email
   if (el.type === 'tel') return false;
   return false;
 }
@@ -228,7 +291,9 @@ function resolveMappedField(
           el instanceof HTMLSelectElement ||
           el instanceof HTMLTextAreaElement
         ) {
-          return el;
+          // Never target page-planted hidden / disabled / read-only /
+          // off-screen fields (credential-harvest and clobber guard).
+          if (isFillableField(el)) return el;
         }
       }
     } catch (e) {
@@ -256,6 +321,74 @@ export function queryEmailInputs(root: ParentNode = document): HTMLInputElement[
     result.push(el);
   }
   return result;
+}
+
+export type AutofillPreviewKind = Extract<
+  FormFieldKind,
+  'email' | 'fullName' | 'username' | 'phone' | 'password'
+>;
+
+/** The same editable name controls are used by generation, replay and review. */
+export function queryNameFields(
+  root: ParentNode
+): Record<'firstName' | 'lastName' | 'fullName', HTMLInputElement | null> {
+  const selectors: Record<'firstName' | 'lastName' | 'fullName', string> = {
+    firstName:
+      'input[name="firstName" i], input[id="firstName" i], input[name*="firstname" i], input[id*="firstname" i], input[name*="first_name" i], input[id*="first_name" i], input[name*="fname" i], input[id*="fname" i], input[autocomplete="given-name"], input[placeholder*="first name" i]',
+    lastName:
+      'input[name="lastName" i], input[id="lastName" i], input[name*="lastname" i], input[id*="lastname" i], input[name*="last_name" i], input[id*="last_name" i], input[name*="lname" i], input[id*="lname" i], input[autocomplete="family-name"], input[placeholder*="last name" i]',
+    fullName:
+      'input[autocomplete="name"], input[name*="fullname" i], input[id*="fullname" i], input[name*="name"]:not([name*="user"]):not([name*="first"]):not([name*="last"]):not([name*="file"]), input[id*="name"]:not([id*="user"]):not([id*="first"]):not([id*="last"]), input[placeholder*="full name" i], input[placeholder*="name" i]:not([placeholder*="user"]):not([placeholder*="first"]):not([placeholder*="last"])',
+  };
+  const firstMatch = (selector: string) =>
+    Array.from(root.querySelectorAll<HTMLInputElement>(selector)).find(
+      (input) =>
+        isFillableField(input) &&
+        !looksLikeEmailField(input) &&
+        !isPasswordish(fieldMeta(input), input) &&
+        !/username|user.?name|phone|mobile/.test(fieldMeta(input))
+    ) || null;
+  return {
+    firstName: firstMatch(selectors.firstName),
+    lastName: firstMatch(selectors.lastName),
+    fullName: firstMatch(selectors.fullName),
+  };
+}
+
+export function queryPhoneInputs(root: ParentNode): HTMLInputElement[] {
+  return Array.from(
+    root.querySelectorAll<HTMLInputElement>(
+      'input[type="tel"], input[name*="phone" i], input[id*="phone" i], input[name*="mobile" i], input[id*="mobile" i], input[autocomplete="tel"], input[placeholder*="phone" i], input[placeholder*="mobile" i]'
+    )
+  ).filter(
+    (input) =>
+      isFillableField(input) &&
+      !looksLikeEmailField(input) &&
+      !isPasswordish(fieldMeta(input), input)
+  );
+}
+
+/** Only fields the current step can fill belong in its preview. */
+export async function resolveAutofillPreviewTargets(
+  root: ParentNode
+): Promise<Partial<Record<AutofillPreviewKind, HTMLInputElement[]>>> {
+  const targets: Partial<Record<AutofillPreviewKind, HTMLInputElement[]>> = {};
+  const emails = queryEmailInputs(root).filter(isFillableField);
+  if (emails.length) targets.email = emails;
+  const username = await findUsernameField(root);
+  if (username && isFillableField(username)) targets.username = [username];
+  const names = queryNameFields(root);
+  if (names.firstName && names.lastName) targets.fullName = [names.firstName, names.lastName];
+  else if (names.fullName) targets.fullName = [names.fullName];
+  const phone = queryPhoneInputs(root)[0];
+  if (phone) targets.phone = [phone];
+  const passwords = Array.from(
+    root.querySelectorAll<HTMLInputElement>(
+      'input[type="password"], input[autocomplete="new-password"]'
+    )
+  ).filter(isFillableField);
+  if (passwords.length) targets.password = passwords;
+  return targets;
 }
 
 export async function typeValueHuman(
@@ -490,129 +623,95 @@ export function isFieldOptional(
   return /\b(optional|opcional|optionnel|опционально|任意|选填|اختياري)\b/i.test(meta);
 }
 
-/** Observe name inputs after email fill to replace auto-generated username prefixes (e.g. Canva) with real identity name. */
-export const activeNameCorrectionTimers = new Set<ReturnType<typeof setInterval>>();
-
-export function observeAutoGeneratedNameCorrection(
-  form: HTMLElement | ParentNode | null,
-  emailAddress: string,
-  identityNames: { firstName?: string; lastName?: string; fullName?: string }
-): void {
-  if (!emailAddress || !identityNames) return;
-  const root = form ?? document;
-  const usernamePrefix = emailAddress.split('@')[0].trim().toLowerCase();
-  if (!usernamePrefix) return;
-
-  const replacement = (
-    identityNames.fullName ||
-    `${identityNames.firstName || ''} ${identityNames.lastName || ''}`.trim()
-  ).trim();
-
-  if (!replacement) return;
-
-  const getNameFields = (): HTMLInputElement[] => {
-    return Array.from(
-      root.querySelectorAll<HTMLInputElement>(
-        'input:not([type="email"]):not([type="password"]):not([type="hidden"]):not([type="submit"]):not([type="checkbox"]):not([type="radio"])'
-      )
-    ).filter((el) => {
-      const meta =
-        `${safeName(el)} ${safeId(el)} ${safePlaceholder(el)} ${el.getAttribute('aria-label') || ''}`.toLowerCase();
-      return /name|nombre|nom|benutzer|nombre|ชื่อ|اسم|姓名/.test(meta) || el.value.length > 0;
-    });
-  };
-
-  let observer: MutationObserver | undefined;
-  let interval: ReturnType<typeof setInterval> | undefined;
-
-  const checkAndCorrect = () => {
-    if (!root.isConnected && root !== document) {
-      observer?.disconnect();
-      if (interval) {
-        clearInterval(interval);
-        activeNameCorrectionTimers.delete(interval);
-      }
-      return;
-    }
-    const fields = getNameFields();
-    for (const field of fields) {
-      const val = (field.value || '').trim().toLowerCase();
-      // Overwrite if field contains derived username prefix (Canva style abc123) or is empty name field
-      if (
-        (val &&
-          (val === usernamePrefix || val.startsWith(usernamePrefix)) &&
-          val !== replacement.toLowerCase()) ||
-        (!val &&
-          /name|fullName|firstName|lastName/i.test(
-            `${safeName(field)} ${safeId(field)} ${safePlaceholder(field)}`
-          ))
-      ) {
-        fillInputValue(field, replacement);
-      }
-    }
-  };
-
-  checkAndCorrect();
-  try {
-    observer = new MutationObserver(checkAndCorrect);
-    observer.observe(root, {
-      subtree: true,
-      attributes: true,
-      childList: true,
-      attributeFilter: ['value'],
-    });
-    // Interval check for async JS frameworks (Canva, React) updating name field 500ms-2000ms later
-    interval = setInterval(checkAndCorrect, 250);
-    activeNameCorrectionTimers.add(interval);
-    setTimeout(() => {
-      observer?.disconnect();
-      if (interval) {
-        clearInterval(interval);
-        activeNameCorrectionTimers.delete(interval);
-      }
-    }, 2500);
-  } catch {
-    /* ignore */
-  }
-}
-
 /** Fill every email / confirm-email field in the form (or just the given field). */
 export function fillAllEmailFields(
   form: HTMLElement | null,
   address: string,
   fallbackField?: HTMLInputElement | HTMLSelectElement | null
-): void {
+): { filled: number; skippedReadonly: number } {
   const root: ParentNode = form ?? document;
   const fields = queryEmailInputs(root);
   // Also include fields outside the form but on the page when form is provided
   // (some sites put confirm-email in a sibling block).
   const pageFields = form ? queryEmailInputs(document) : [];
   const all = new Set<HTMLInputElement>([...fields, ...pageFields]);
-  // Always force the focused field first so confirm-* twins get the same value
-  if (fallbackField && fallbackField instanceof HTMLInputElement) {
-    fillInputValue(fallbackField, address);
+  let filled = 0;
+  let skippedReadonly = 0;
+
+  const fillIfWritable = (el: HTMLInputElement): void => {
+    if (!isFillableField(el)) {
+      if (el.readOnly) skippedReadonly += 1;
+      return;
+    }
+    fillInputValue(el, address);
+    filled += 1;
+  };
+
+  for (const el of all) fillIfWritable(el);
+  if (all.size === 0 && fallbackField instanceof HTMLInputElement) {
+    fillIfWritable(fallbackField);
   }
-  if (all.size > 0) {
-    for (const el of all) fillInputValue(el, address);
-    return;
-  }
-  if (fallbackField && fallbackField instanceof HTMLInputElement) {
-    fillInputValue(fallbackField, address);
-  }
+  return { filled, skippedReadonly };
 }
 
-/** True if this email already appears in saved login history for any domain. */
-export async function isEmailUsedInSavedLogins(email: string): Promise<boolean> {
+/**
+ * Whether a saved credential represents a signup that actually consumed the
+ * address. Autofill creates a `pending_submit` record before the user submits;
+ * that must not make the mailbox look permanently used. Legacy records without
+ * a status remain considered used for backward compatibility.
+ */
+export function credentialConsumedAddress(entry: CredentialsHistoryItem): boolean {
+  return entry.signupStatus !== 'pending_submit' && entry.signupStatus !== 'failed';
+}
+
+export interface AutofillAddressCandidate {
+  address: string;
+  id?: string;
+  status?: string;
+  accountStatus?: AddressStatus;
+  expiresAt?: number;
+}
+
+/** Return the first live mailbox that has not been consumed by a saved signup. */
+export function findUnusedLiveAddress(
+  addresses: AutofillAddressCandidate[],
+  loginInfo: CredentialsHistoryItem[]
+): AutofillAddressCandidate | null {
+  const now = Date.now();
+  // Both lists are storage-fed through the content bridge: guard the LIST
+  // shapes and each entry with the shared liveness rule - a corrupt entry or
+  // corrupt expiry degrades to skipped, never throws, never reads as usable.
+  const logins = arrayOrEmpty<CredentialsHistoryItem>(loginInfo);
+  return (
+    arrayOrEmpty<AutofillAddressCandidate>(addresses).find(
+      (candidate) =>
+        isLiveMailboxAddress(candidate, now) &&
+        !isEmailUsedInLoginEntries(candidate.address, logins)
+    ) || null
+  );
+}
+
+/** Compare only email/address fields; a username that happens to equal an email is not proof that the mailbox was used. */
+export function isEmailUsedInLoginEntries(
+  email: string,
+  loginInfo: CredentialsHistoryItem[]
+): boolean {
   const needle = (email || '').trim().toLowerCase();
   if (!needle) return false;
+  // Storage-fed: a corrupt non-array degrades to "no known usage" rather than
+  // throwing; per-entry garbage simply matches nothing.
+  return arrayOrEmpty<CredentialsHistoryItem>(loginInfo).some((entry) => {
+    if (typeof entry !== 'object' || entry === null) return false;
+    if (!credentialConsumedAddress(entry)) return false;
+    const candidates = [entry.email, (entry as { address?: string }).address];
+    return candidates.some((candidate) => (candidate || '').trim().toLowerCase() === needle);
+  });
+}
+
+/** True if this email was consumed by a saved signup credential for any domain. */
+export async function isEmailUsedInSavedLogins(email: string): Promise<boolean> {
   try {
-    const { loginInfo = [] } = (await getStorageViaBg(['loginInfo'])) as {
-      loginInfo?: CredentialsHistoryItem[];
-    };
-    return loginInfo.some((l) => {
-      const candidates = [l.email, l.username, (l as { address?: string }).address];
-      return candidates.some((c) => (c || '').trim().toLowerCase() === needle);
-    });
+    return isEmailUsedInLoginEntries(email, await readLoginInfo());
   } catch (e) {
     logError('isEmailUsedInSavedLogins error', e);
     return false;
@@ -775,7 +874,7 @@ export function findAutofillAllAnchor(form: HTMLFormElement | HTMLElement): HTML
     sib = sib.previousElementSibling;
   }
 
-  // 2) Parent chain — page hero above form
+  // 2) Parent chain - page hero above form
   let parent: HTMLElement | null = form.parentElement;
   for (let d = 0; d < 5 && parent; d++) {
     for (const c of Array.from(parent.querySelectorAll(headingSel))) {
@@ -784,7 +883,7 @@ export function findAutofillAllAnchor(form: HTMLFormElement | HTMLElement): HTML
     parent = parent.parentElement;
   }
 
-  // 3) Inside form — first non-button heading only
+  // 3) Inside form - first non-button heading only
   for (const c of Array.from(form.querySelectorAll(headingSel))) {
     if (isUsableHeading(c)) return c;
   }
@@ -805,9 +904,9 @@ export function findAutofillAllAnchor(form: HTMLFormElement | HTMLElement): HTML
 }
 
 export async function getNamesToFill(): Promise<FilledNames> {
-  const { nameSettings = {} } = (await getStorageViaBg(['nameSettings'])) as {
-    nameSettings?: { useCustom?: boolean; firstName?: string; lastName?: string };
-  };
+  // Guarded reader: a corrupt / `null` record reads as "no custom name" (and the
+  // names are trimmed, so a whitespace-only one is absent, not filled).
+  const nameSettings = await readNameSettings();
   if (nameSettings.useCustom && nameSettings.firstName && nameSettings.lastName) {
     return {
       firstName: nameSettings.firstName,
@@ -815,9 +914,10 @@ export async function getNamesToFill(): Promise<FilledNames> {
       fullName: `${nameSettings.firstName} ${nameSettings.lastName}`,
     };
   }
-  const randomFullName = await generateIdentityViaBg('randomName');
-  const [randomFirstName, randomLastName] = randomFullName.split(' ');
-  return { firstName: randomFirstName, lastName: randomLastName, fullName: randomFullName };
+  const randomFullName = (await generateIdentityViaBg('randomName')).trim();
+  const [firstName = '', ...rest] = randomFullName ? randomFullName.split(/\s+/) : [];
+  // Preserve every remaining part, matching saved-login name handling.
+  return { firstName, lastName: rest.join(' '), fullName: randomFullName };
 }
 
 function validSelectOptions(selectElement: HTMLSelectElement): HTMLOptionElement[] {
@@ -948,7 +1048,7 @@ export function formatDobForField(iso: string, field: HTMLInputElement): string 
 function isUsableTextField(el: Element | null): el is HTMLInputElement | HTMLTextAreaElement {
   if (!el) return false;
   if (!(el instanceof HTMLInputElement) && !(el instanceof HTMLTextAreaElement)) return false;
-  if (el.disabled) return false;
+  if (el.disabled || el.readOnly) return false;
   if (el instanceof HTMLInputElement) {
     const t = (el.type || 'text').toLowerCase();
     if (
@@ -1013,7 +1113,7 @@ export function findStreetAddressInput(
     }
   }
 
-  // 2) Attribute contains (no `i` flag — more reliable in all engines)
+  // 2) Attribute contains (no `i` flag - more reliable in all engines)
   const attrSels = [
     'input[name*="address1"]',
     'input[id*="address1"]',
@@ -1074,19 +1174,9 @@ export function findStreetAddressInput(
 export function fillInputValueForce(
   input: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | null,
   value: string | null
-): void {
-  if (!input || value == null) return;
-  try {
-    if ('readOnly' in input && input.readOnly) {
-      try {
-        input.readOnly = false;
-      } catch {
-        /* ignore */
-      }
-    }
-  } catch {
-    /* ignore */
-  }
+): boolean {
+  if (!input || value == null) return false;
+  if (!isFillableField(input)) return false;
   fillInputValue(input, value);
   // Second write after a tick helps some masked/autocomplete widgets
   try {
@@ -1103,6 +1193,7 @@ export function fillInputValueForce(
   } catch {
     /* ignore */
   }
+  return true;
 }
 
 function queryFirstSelect(root: ParentNode, selectors: string[]): HTMLSelectElement | null {
@@ -1247,10 +1338,9 @@ export async function fillExtendedProfileFields(
     }
   }
 
-  // ── Street address (address1 — RunSignup; never email “address”) ────
+  // ── Street address (address1 - RunSignup; never email “address”) ────
   const addressInput = findStreetAddressInput(form);
-  if (addressInput) {
-    fillInputValueForce(addressInput, address);
+  if (addressInput && fillInputValueForce(addressInput, address)) {
     filled.push('address');
   }
 
@@ -1266,8 +1356,7 @@ export async function fillExtendedProfileFields(
     (typeof document !== 'undefined'
       ? (document.getElementById('city') as HTMLInputElement | null)
       : null);
-  if (isUsableTextField(cityInput)) {
-    fillInputValueForce(cityInput, city);
+  if (isUsableTextField(cityInput) && fillInputValueForce(cityInput, city)) {
     filled.push('city');
   }
 
@@ -1288,8 +1377,7 @@ export async function fillExtendedProfileFields(
     (typeof document !== 'undefined'
       ? (document.getElementById('zipcode') as HTMLInputElement | null)
       : null);
-  if (isUsableTextField(zipInput)) {
-    fillInputValueForce(zipInput, pin);
+  if (isUsableTextField(zipInput) && fillInputValueForce(zipInput, pin)) {
     filled.push('pin');
   }
 
@@ -1380,10 +1468,10 @@ export async function fillExtendedProfileFields(
   // ── Age / terms checkboxes (RunSignup ageConfirmation) ──────────────
   form
     .querySelectorAll<HTMLInputElement>(
-      'input[type="checkbox"][name*="age" i], input[type="checkbox"][id*="age" i], input[type="checkbox"][name*="confirm" i], input[type="checkbox"][name*="terms" i], input[type="checkbox"][id*="terms" i], input[type="checkbox"][name*="agree" i], input[type="checkbox"][id*="agree" i], input[type="checkbox"][name*="privacy" i], input[type="checkbox"][name*="policy" i], input[type="checkbox"][name*="tos" i], input[type="checkbox"][required]'
+      'input[type="checkbox"][name*="age" i], input[type="checkbox"][id*="age" i], input[type="checkbox"][name*="confirm" i]'
     )
     .forEach((cb) => {
-      if (!cb.checked) {
+      if (!cb.checked && !cb.disabled) {
         try {
           cb.click();
         } catch {
@@ -1559,41 +1647,45 @@ async function fillFormWithReplayCredential(
     phone?: string | null;
     website?: string | null;
   }
-): Promise<boolean> {
+): Promise<AutofillFillResult> {
+  const filledFields = new Set<string>();
+  const skippedFields = new Set<string>();
   const usernameInput = await findUsernameField(form);
-  const phoneInput = form.querySelector<HTMLInputElement>(
-    'input[type="tel"], input[name*="phone"], input[id*="phone"], input[name*="mobile"], input[id*="mobile"], input[placeholder*="phone"], input[placeholder*="mobile"]'
-  );
+  const phoneInput = queryPhoneInputs(form)[0] || null;
   const websiteInput = form.querySelector<HTMLInputElement>(
     'input[type="url"], input[name*="website"], input[id*="website"], input[placeholder*="website"], input[name*="url"], input[id*="url"], input[placeholder*="url"]'
   );
-  const firstNameInput = form.querySelector<HTMLInputElement>(
-    'input[name*="firstname" i], input[id*="firstname" i], input[name*="fname" i], input[id*="fname" i], input[placeholder*="first name" i]'
-  );
-  const lastNameInput = form.querySelector<HTMLInputElement>(
-    'input[name*="lastname" i], input[id*="lastname" i], input[name*="lname" i], input[id*="lname" i], input[placeholder*="last name" i]'
-  );
-  const fullNameInput = form.querySelector<HTMLInputElement>(
-    'input[name*="fullname" i], input[id*="fullname" i], input[name*="name"]:not([name*="user"]):not([name*="first"]):not([name*="last"]), input[id*="name"]:not([id*="user"]):not([id*="first"]):not([name*="last"]), input[placeholder*="full name" i], input[placeholder*="name" i]:not([placeholder*="user"]):not([placeholder*="first"]):not([placeholder*="last"])'
-  );
+  const {
+    firstName: firstNameInput,
+    lastName: lastNameInput,
+    fullName: fullNameInput,
+  } = queryNameFields(form);
 
   // Derive first/last/full name from the saved name for split-name fields
   const savedName = cred.name || '';
   const [savedFirst, ...rest] = savedName.split(' ');
   const savedLast = rest.join(' ');
 
-  fillAllEmailFields(form, cred.email);
-  fillInputValue(usernameInput, cred.username ?? null);
+  const emailSummary = fillAllEmailFields(form, cred.email);
+  if (emailSummary.filled > 0) filledFields.add('email');
+  if (emailSummary.skippedReadonly > 0) skippedFields.add('email_readonly');
+  if (usernameInput && isFillableField(usernameInput)) {
+    fillInputValue(usernameInput, cred.username ?? null);
+    if (cred.username) filledFields.add('username');
+  }
 
   let nameFilled = false;
   if (firstNameInput && lastNameInput) {
-    fillInputValue(firstNameInput, savedFirst || null);
-    fillInputValue(lastNameInput, savedLast || null);
-    nameFilled = true;
-  } else if (fullNameInput) {
+    if (isFillableField(firstNameInput) && isFillableField(lastNameInput)) {
+      fillInputValue(firstNameInput, savedFirst || null);
+      fillInputValue(lastNameInput, savedLast || null);
+      nameFilled = true;
+    }
+  } else if (fullNameInput && isFillableField(fullNameInput)) {
     fillInputValue(fullNameInput, savedName || null);
     nameFilled = true;
   }
+  if (nameFilled) filledFields.add('name');
 
   // Prefer saved country/gender on selects when present on the credential
   fillSelectsWithIdentity(form, {
@@ -1601,18 +1693,24 @@ async function fillFormWithReplayCredential(
     gender: (cred as { gender?: string | null }).gender,
   });
 
-  fillInputValue(phoneInput, cred.phone ?? null);
-  fillInputValue(websiteInput, cred.website ?? null);
+  if (phoneInput && isFillableField(phoneInput)) {
+    fillInputValue(phoneInput, cred.phone ?? null);
+    if (cred.phone) filledFields.add('phone');
+  }
+  if (websiteInput && isFillableField(websiteInput)) {
+    fillInputValue(websiteInput, cred.website ?? null);
+    if (cred.website) filledFields.add('website');
+  }
 
   form.querySelectorAll<HTMLInputElement>('input[type="password"]').forEach((input) => {
     if (input === usernameInput) return;
+    if (!isFillableField(input)) {
+      if (input.readOnly) skippedFields.add('password_readonly');
+      return;
+    }
     fillInputValue(input, cred.password);
+    filledFields.add('password');
   });
-
-  const termsCheckbox = form.querySelector<HTMLInputElement>(
-    'input[type="checkbox"][name*="terms"], input[type="checkbox"][id*="terms"], input[type="checkbox"][name*="agree"], input[type="checkbox"][id*="agree"]'
-  );
-  if (termsCheckbox && !termsCheckbox.checked) termsCheckbox.click();
 
   // Build session credentials for clipboard copy (consistent with generate path)
   const credentials: Record<string, string> = {};
@@ -1628,7 +1726,13 @@ async function fillFormWithReplayCredential(
   // NOTE: intentionally do NOT append to loginInfo - this is a replay of an
   // existing identity, not a new fill. The original entry remains the record.
 
-  return true;
+  return {
+    success: filledFields.size > 0,
+    filledFields: [...filledFields],
+    skippedFields: [...skippedFields],
+    email: cred.email,
+    ...(filledFields.size > 0 ? {} : { reason: 'no_compatible_fields' as const }),
+  };
 }
 
 export async function fillSignupForm(
@@ -1639,6 +1743,8 @@ export async function fillSignupForm(
     lastNames?: string;
     username?: string | null;
     useRandomPassword?: boolean;
+    /** Password value is withheld from page contexts; decrypt through the background. */
+    hasCustomPassword?: boolean;
     customPassword?: string;
     phone?: string;
     pin?: string;
@@ -1650,7 +1756,9 @@ export async function fillSignupForm(
     state?: string | null;
     address?: string | null;
     profilePicture?: string | null;
-    /** Per-domain field overrides — when identity is filled on a matching domain. */
+    /** Built-in default identity follows the current active mailbox. */
+    isDefault?: boolean;
+    /** Per-domain field overrides - when identity is filled on a matching domain. */
     domainFieldOverrides?: Record<
       string,
       Partial<
@@ -1672,18 +1780,42 @@ export async function fillSignupForm(
     gender?: string | null;
     dateOfBirth?: string | null;
     pin?: string | null;
+  },
+  options?: {
+    /** Explicitly chosen mailbox - e.g. "fill with this email" from the UI. */
+    email?: string;
+    /** Selectors explicitly corrected by the user in the pre-fill preview. */
+    fieldSelectors?: Partial<Record<string, string>>;
   }
-): Promise<boolean> {
+): Promise<AutofillFillResult> {
   let progressTooltip: HTMLDivElement | null = null;
   let progressBar: HTMLDivElement | null = null;
   let progressTimer: ReturnType<typeof setInterval> | null = null;
   let isHumanLike = false;
   let fillEstimateMs = 1200;
+  const filledFields = new Set<string>();
+  const skippedFields = new Set<string>();
 
-  /** Build human-readable countdown label */
+  // Stop before generating or writing any credentials when the page presents
+  // an explicit human-verification challenge. The user can complete it and
+  // click Autofill again; no challenge controls or tokens are touched.
+  const localChallenge = detectHumanVerification(form);
+  const challenge = localChallenge.detected ? localChallenge : detectHumanVerification();
+  if (challenge.detected) {
+    return {
+      success: false,
+      filledFields: [],
+      skippedFields: [],
+      reason: 'verification_required',
+    };
+  }
+
+  /** Build localized countdown label - units come from the time locale keys. */
   function fmtRemaining(remainMs: number): string {
     const s = Math.max(0, remainMs / 1000);
-    return s >= 1 ? `${s.toFixed(1)}s` : `${Math.max(0, Math.round(remainMs / 100)) * 100}ms`;
+    return s >= 1
+      ? tSync('time.durationS', { s: s.toFixed(1) })
+      : tSync('time.milliseconds', { n: Math.max(0, Math.round(remainMs / 100)) * 100 });
   }
 
   try {
@@ -1694,7 +1826,7 @@ export async function fillSignupForm(
 
     if (isHumanLike) {
       // Estimate fill duration from the form's fillable inputs and their expected value lengths.
-      // Each char costs ~40ms average delay (midpoint of 20–60ms range in typeValueHuman).
+      // Each char costs ~40ms average delay (midpoint of 20-60ms range in typeValueHuman).
       const inputEls = Array.from(
         (form as HTMLElement).querySelectorAll?.(
           'input:not([type=hidden]):not([type=submit]):not([type=button]), textarea'
@@ -1717,10 +1849,11 @@ export async function fillSignupForm(
         'bottom:20px',
         'right:20px',
         `z-index:${String(CONTENT_Z.popup)}`,
-        'background:rgba(30,30,35,0.92)',
+        // MD3 inverse-surface: dark elevated chip that reads on any page bg
+        'background:var(--md-inverse-surface)',
         'backdrop-filter:blur(8px)',
         '-webkit-backdrop-filter:blur(8px)',
-        'color:#fff',
+        'color:var(--md-inverse-on-surface)',
         'padding:8px 14px 8px 12px',
         'border-radius:20px',
         'font-size:12px',
@@ -1734,8 +1867,8 @@ export async function fillSignupForm(
         'flex-direction:column',
         'gap:5px',
         'min-width:140px',
-        'box-shadow:0 4px 16px rgba(0,0,0,0.35)',
-        'border:1px solid rgba(255,255,255,0.08)',
+        'box-shadow:0 4px 16px color-mix(in srgb, var(--md-shadow) 35%, transparent)',
+        'border:1px solid color-mix(in srgb, var(--md-inverse-on-surface) 12%, transparent)',
       ].join(';');
 
       // Top row: icon + label
@@ -1745,26 +1878,26 @@ export async function fillSignupForm(
       spinner.textContent = '⚡';
       spinner.style.cssText = 'font-size:11px;';
       const label = document.createElement('span');
-      label.textContent = `Autofilling… ${fmtRemaining(fillEstimateMs)}`;
+      label.textContent = `${tSync('contentAutofill.autofilling')} ${fmtRemaining(fillEstimateMs)}`;
       label.style.cssText = 'flex:1;';
       topRow.appendChild(spinner);
       topRow.appendChild(label);
 
-      // Progress bar track — gradient uses the theme's primary/tertiary colors
-      // (derived from the seed, no hardcoded hex values).
-      const themeColors = generateThemeColorsSync(DEFAULT_THEME_SEED, false, 0);
-      const progressPrimary = themeColors['--md-primary'] || themeColors['--md-secondary'] || '';
-      const progressTertiary = themeColors['--md-tertiary'] || progressPrimary;
+      // Progress bar - track and gradient use the active theme's MD3 tokens
+      // (rendered inside the shadow host, so --md-* resolve to the user's
+      // palette - no seed regeneration, no hardcoded hex).
       const track = document.createElement('div');
       track.style.cssText =
-        'width:100%;height:3px;background:rgba(255,255,255,0.15);border-radius:2px;overflow:hidden;';
+        'width:100%;height:3px;background:color-mix(in srgb, var(--md-inverse-on-surface) 15%, transparent);border-radius:2px;overflow:hidden;';
       progressBar = document.createElement('div');
-      progressBar.style.cssText = `height:100%;background:linear-gradient(90deg,${progressPrimary},${progressTertiary});border-radius:2px;width:0%;transition:width 0.2s linear;`;
+      progressBar.style.cssText =
+        'height:100%;background:linear-gradient(90deg,var(--md-primary),var(--md-tertiary));border-radius:2px;width:0%;transition:width 0.2s linear;';
       track.appendChild(progressBar);
 
       progressTooltip.appendChild(topRow);
       progressTooltip.appendChild(track);
-      document.body.appendChild(progressTooltip);
+      // Shadow host (not document.body) so the MD3 tokens resolve.
+      getOrCreateShadowRoot()?.appendChild(progressTooltip);
 
       // Animate in
       requestAnimationFrame(() => {
@@ -1783,7 +1916,11 @@ export async function fillSignupForm(
         const pct = Math.min(100, (elapsed / fillEstimateMs) * 100);
         // Update label
         const lbl = progressTooltip.querySelector('span:last-child') as HTMLSpanElement | null;
-        if (lbl) lbl.textContent = remain > 0 ? `Autofilling… ${fmtRemaining(remain)}` : 'Done ✓';
+        if (lbl)
+          lbl.textContent =
+            remain > 0
+              ? `${tSync('contentAutofill.autofilling')} ${fmtRemaining(remain)}`
+              : `${tSync('common.done')} ✓`;
         // Update bar
         if (progressBar) progressBar.style.width = `${pct}%`;
         if (remain <= 0 && progressTimer) {
@@ -1797,20 +1934,35 @@ export async function fillSignupForm(
   }
 
   try {
-    const { activeInboxId, inboxes = [] } = (await getStorageViaBg([
-      'activeInboxId',
-      'inboxes',
-    ])) as { activeInboxId?: string; inboxes?: Array<{ id: string; address: string }> };
-    const inbox = inboxes.find((i: { id: string; address: string }) => i.id === activeInboxId);
-    if (!inbox) throw new NoActiveInboxError({ activeInboxId });
-
-    // ── Replay path: use the saved identity instead of generating ──────
-    // When replayCredential is provided, skip all generation and fill the
-    // form with the exact saved values. Do NOT append a new loginInfo entry
-    // (it's a re-use of an existing identity, not a new fill).
+    // Saved-login replay retains the email used for the existing account.
     if (replayCredential) {
       return fillFormWithReplayCredential(form, updateAndCopyCredentials, replayCredential);
     }
+    const {
+      activeAddressId,
+      addresses = [],
+      siteRejectedEmailDomains = [],
+    } = (await getStorageViaBg(['activeAddressId', 'addresses'], true)) as {
+      activeAddressId?: string;
+      siteRejectedEmailDomains?: string[];
+      addresses?: Array<{
+        id: string;
+        address: string;
+        status?: string;
+        accountStatus?: AddressStatus;
+        expiresAt?: number;
+      }>;
+    };
+    const record = addresses.find((i: { id: string; address: string }) => i.id === activeAddressId);
+    if (
+      siteRejectedEmailDomains.length &&
+      (!record || (options?.email && !allowsSiteEmail(options.email, siteRejectedEmailDomains)))
+    ) {
+      const anchor = findAutofillAllAnchor(form) || form;
+      showConflictChip(anchor, await t('errors.siteEmailUnavailable'));
+      return { success: false, filledFields: [], skippedFields: [], reason: 'fill_failed' };
+    }
+    if (!record) throw new NoActiveAddressError({ activeAddressId });
 
     // ── Smart domain field overrides ─────────────────────────────────
     // Merge per-domain field overrides (built-in defaults + user-defined)
@@ -1826,7 +1978,7 @@ export async function fillSignupForm(
           effectiveIdentity = { ...identity, ...overrides };
         }
       } catch {
-        /* optional — overrides are a non-critical enhancement */
+        /* optional - overrides are a non-critical enhancement */
       }
     }
 
@@ -1856,67 +2008,111 @@ export async function fillSignupForm(
 
     const { fullName, firstName, lastName } = names;
 
-    // Username — NEVER password/email; avoid autocomplete=username login-email traps
-    const usernameInput = await findUsernameField(form);
-    // Phone: prefer type=tel; skip dual email/phone (those go to email)
-    const phoneCandidates = Array.from(
-      form.querySelectorAll<HTMLInputElement>(
-        'input[type="tel"], input[name*="phone" i], input[id*="phone" i], input[name*="mobile" i], input[id*="mobile" i], input[autocomplete="tel"], input[placeholder*="phone" i], input[placeholder*="mobile" i]'
-      )
-    ).filter((el) => {
-      if (el.type === 'email') return false;
-      const meta = fieldMeta(el);
-      // Dual fields preferred as email — skip for phone fill
-      if (
-        /(email|e-mail|correo).{0,12}(or|\/).{0,12}(phone|mobile)/i.test(meta) ||
-        /(phone|mobile).{0,12}(or|\/).{0,12}(email|e-mail)/i.test(meta)
-      ) {
-        return false;
+    // Username - NEVER password/email; avoid autocomplete=username login-email traps
+    const correctedField = (kind: string): HTMLElement | null => {
+      const selector = options?.fieldSelectors?.[kind];
+      if (!selector) return null;
+      try {
+        const candidate = form.querySelector(selector);
+        const isControl =
+          candidate instanceof HTMLInputElement ||
+          candidate instanceof HTMLSelectElement ||
+          candidate instanceof HTMLTextAreaElement;
+        return isControl && isFillableField(candidate) ? candidate : null;
+      } catch {
+        return null;
       }
-      if (looksLikeEmailField(el) && el.type !== 'tel') return false;
-      return !el.disabled && el.type !== 'hidden';
-    });
-    const phoneInput = phoneCandidates[0] || null;
+    };
+    const pageHost = window.location.hostname;
+    let siteFieldMap: {
+      entries: Array<{ kind: string; selector: string; hits: number; lastUsedAt: number }>;
+    } | null = null;
+    try {
+      siteFieldMap = (await getFieldMapViaBg(pageHost)) as typeof siteFieldMap;
+    } catch {
+      /* optional */
+    }
+    const learnedField = (kind: string): HTMLElement | null =>
+      resolveMappedField(form, siteFieldMap, kind);
+
+    let usernameInput = await findUsernameField(form);
+    const correctedUsername = correctedField('username') || learnedField('username');
+    if (
+      correctedUsername &&
+      correctedUsername instanceof HTMLInputElement &&
+      correctedUsername.type !== 'password' &&
+      !looksLikeEmailField(correctedUsername)
+    ) {
+      usernameInput = correctedUsername;
+    }
+    let phoneInput = queryPhoneInputs(form)[0] || null;
+    const correctedPhone = correctedField('phone') || learnedField('phone');
+    if (correctedPhone instanceof HTMLInputElement && correctedPhone.type !== 'password') {
+      phoneInput = correctedPhone;
+    }
     const websiteInput = form.querySelector<HTMLInputElement>(
       'input[type="url"], input[name*="website"], input[id*="website"], input[placeholder*="website"], input[name*="url"], input[id*="url"], input[placeholder*="url"]'
     );
-    const firstNameInput = form.querySelector<HTMLInputElement>(
-      'input[name="firstName" i], input[id="firstName" i], input[name*="firstname" i], input[id*="firstname" i], input[name*="first_name" i], input[id*="first_name" i], input[name*="fname" i], input[id*="fname" i], input[autocomplete="given-name"], input[placeholder*="first name" i]'
-    );
-    const lastNameInput = form.querySelector<HTMLInputElement>(
-      'input[name="lastName" i], input[id="lastName" i], input[name*="lastname" i], input[id*="lastname" i], input[name*="last_name" i], input[id*="last_name" i], input[name*="lname" i], input[id*="lname" i], input[autocomplete="family-name"], input[placeholder*="last name" i]'
-    );
-    const fullNameInput = form.querySelector<HTMLInputElement>(
-      'input[name*="fullname" i], input[id*="fullname" i], input[name*="name"]:not([name*="user"]):not([name*="first"]):not([name*="last"]):not([name*="file"]), input[id*="name"]:not([id*="user"]):not([id*="first"]):not([id*="last"]), input[placeholder*="full name" i], input[placeholder*="name" i]:not([placeholder*="user"]):not([placeholder*="first"]):not([placeholder*="last"])'
-    );
+    let {
+      firstName: firstNameInput,
+      lastName: lastNameInput,
+      fullName: fullNameInput,
+    } = queryNameFields(form);
+    const correctedFirstName = correctedField('firstName') || learnedField('firstName');
+    if (correctedFirstName instanceof HTMLInputElement && correctedFirstName.type !== 'password')
+      firstNameInput = correctedFirstName;
+    const correctedLastName = correctedField('lastName') || learnedField('lastName');
+    if (correctedLastName instanceof HTMLInputElement && correctedLastName.type !== 'password')
+      lastNameInput = correctedLastName;
+    const correctedFullName = correctedField('fullName') || learnedField('fullName');
+    if (correctedFullName instanceof HTMLInputElement && correctedFullName.type !== 'password') {
+      fullNameInput = correctedFullName;
+      firstNameInput = null;
+      lastNameInput = null;
+    }
 
     // Prefer identity.preferredEmail when it still exists in the mailbox list
     // Uses effectiveIdentity (which includes domain overrides)
     const identityWithEmail = effectiveIdentity as
       | {
+          id?: string;
           preferredEmail?: string | null;
           state?: string | null;
           address?: string | null;
           profilePicture?: string | null;
+          isDefault?: boolean;
         }
       | undefined;
+    const requestedEmail = options?.email?.trim();
     const preferred = identityWithEmail?.preferredEmail?.trim();
-    let emailAddress = inbox.address;
-    if (preferred === '__random_active__') {
-      // Built-in / explicit: pick any random live mailbox
+    let emailAddress = record.address;
+    const isBuiltInDefault =
+      identityWithEmail?.isDefault === true && identityWithEmail.id?.startsWith('default_');
+    if (requestedEmail) {
+      // An explicitly requested email ("fill with this email") wins over the
+      // identity profile's preferredEmail. Resolve it back to the matching
+      // mailbox record when one exists so credentials save against the real
+      // address; otherwise use the raw string.
+      const match = addresses.find(
+        (i: { id: string; address: string }) =>
+          i.address.toLowerCase() === requestedEmail.toLowerCase()
+      );
+      emailAddress = match?.address || requestedEmail;
+    } else if (preferred === '__random_active__' && !isBuiltInDefault) {
+      // Explicit user-created identity choice: pick any random live mailbox.
+      // The built-in default identity intentionally follows the current active
+      // mailbox, even for legacy records that still contain this sentinel.
       const now = Date.now();
       const live = (
-        inboxes as Array<{
+        addresses as Array<{
           address: string;
           status?: string;
-          accountStatus?: string;
+          accountStatus?: AddressStatus;
           expiresAt?: number;
         }>
       ).filter((i) => {
         if (!i.address) return false;
         if (i.accountStatus === 'archived' || i.accountStatus === 'deleted') return false;
-        if (i.status === 'archived' || i.status === 'deleted' || i.status === 'expired')
-          return false;
         if (i.expiresAt && i.expiresAt > 0 && i.expiresAt <= now) return false;
         return true;
       });
@@ -1925,55 +2121,92 @@ export async function fillSignupForm(
         if (pick?.address) emailAddress = pick.address;
       }
     } else if (preferred) {
-      const match = inboxes.find(
+      const match = addresses.find(
         (i: { id: string; address: string }) => i.address.toLowerCase() === preferred.toLowerCase()
       );
       if (match) emailAddress = match.address;
     }
 
-    // If the chosen email is already in saved logins, warn + create a fresh inbox
-    if (await isEmailUsedInSavedLogins(emailAddress)) {
-      try {
-        const tipHost =
-          form.querySelector<HTMLElement>(
-            'input[type="email"], input[name*="email" i], input[id*="email" i]'
-          ) || (form as unknown as HTMLElement);
-        showConflictChip(tipHost, await t('contentAutofill.emailAlreadyUsedChip'));
+    // If the selected email was already consumed by a real signup, prefer an
+    // existing unused live mailbox before creating another address. In
+    // particular, the built-in default identity covers all current mailboxes;
+    // it should not burn a new mailbox merely because the active one was used.
+    // An explicitly requested email is a deliberate user choice - never rotate
+    // or auto-replace it just because an earlier signup already used it.
+    if (!requestedEmail && (await isEmailUsedInSavedLogins(emailAddress))) {
+      let reusedExisting = false;
+      const canRotateToExisting = isBuiltInDefault || !preferred;
+      if (canRotateToExisting) {
+        try {
+          const unused = findUnusedLiveAddress(addresses, await readLoginInfo());
+          if (unused?.address) {
+            emailAddress = unused.address;
+            reusedExisting = true;
+          }
+        } catch (error) {
+          logError('Failed to find an unused existing mailbox', error);
+        }
+      }
 
-        const { selectedProvider } = (await getStorageViaBg('selectedProvider')) as {
-          selectedProvider?: string;
-        };
-        const created = (await sendMessageViaBg<{
-          success?: boolean;
-          address?: string;
-          inbox?: { address?: string };
-        }>({
-          type: 'createInbox',
-          // No hardcoded provider: background resolves configured default when unset.
-          provider: selectedProvider,
-        })) as {
-          success?: boolean;
-          address?: string;
-          inbox?: { address?: string };
-        };
-        const fresh = created?.inbox?.address || created?.address;
-        if (created?.success && fresh) emailAddress = fresh;
-      } catch (e) {
-        logError('Failed to generate replacement email for already-used address', e);
+      if (!reusedExisting) {
+        try {
+          const tipHost =
+            form.querySelector<HTMLElement>(
+              'input[type="email"], input[name*="email" i], input[id*="email" i]'
+            ) || (form as unknown as HTMLElement);
+          showConflictChip(tipHost, await t('contentAutofill.emailAlreadyUsedChip'));
+
+          // '' when unset or garbage - the background then resolves its own default.
+          const selectedProvider = await readSelectedProvider();
+          const created = (await sendMessageViaBg<{
+            success?: boolean;
+            address?: string;
+            inbox?: { address?: string };
+          }>({
+            // createAddress is blocked for content scripts (allowlist); use the
+            // gesture-gated variant so the flow can open the UI when needed.
+            type: 'createAddressWithGesture',
+            // No hardcoded provider: background resolves configured default when unset.
+            provider: selectedProvider,
+          })) as {
+            success?: boolean;
+            address?: string;
+            inbox?: { address?: string };
+          };
+          const fresh = created?.inbox?.address || created?.address;
+          if (created?.success && fresh) emailAddress = fresh;
+        } catch (e) {
+          logError('Failed to generate replacement email for already-used address', e);
+        }
       }
     }
 
     let password: string;
-    if (!effectiveIdentity?.useRandomPassword && effectiveIdentity?.customPassword) {
+    if (
+      !effectiveIdentity?.useRandomPassword &&
+      (effectiveIdentity?.customPassword ||
+        (effectiveIdentity as { hasCustomPassword?: boolean } | undefined)?.hasCustomPassword)
+    ) {
       try {
-        password = await decryptViaBg(effectiveIdentity.customPassword);
+        // Storage-scoped: the background resolves the identity's stored
+        // customPassword by id - no ciphertext leaves this page context.
+        // The merged (override-applied) view loses the id field statically.
+        password = await decryptStoredCustomPasswordViaBg(
+          'identity',
+          (effectiveIdentity as Identity | null | undefined)?.id
+        );
       } catch {
         /* ignore */
         const tipHost =
           form.querySelector<HTMLElement>('input[type="password"], input[type="email"]') ||
           (form as unknown as HTMLElement);
         showConflictChip(tipHost, await t('contentAutofill.vaultLocked'));
-        return false;
+        return {
+          success: false,
+          filledFields: [...filledFields],
+          skippedFields: [...skippedFields],
+          reason: 'fill_failed',
+        };
       }
     } else {
       const pwField = form.querySelector<HTMLInputElement>(
@@ -1985,7 +2218,12 @@ export async function fillSignupForm(
         /* ignore */
         const tipHost = pwField || (form as unknown as HTMLElement);
         showConflictChip(tipHost, await t('contentAutofill.vaultLocked'));
-        return false;
+        return {
+          success: false,
+          filledFields: [...filledFields],
+          skippedFields: [...skippedFields],
+          reason: 'fill_failed',
+        };
       }
     }
 
@@ -2022,15 +2260,41 @@ export async function fillSignupForm(
           : await generateIdentityViaBg('websiteUrl');
     }
 
-    const pageHost = window.location.hostname;
+    // Resolve site restrictions before touching even a learned email field.
+    if (!(await isSiteEmailAllowedViaBg(emailAddress))) {
+      showConflictChip(findAutofillAllAnchor(form) || form, await t('errors.siteEmailUnavailable'));
+      return {
+        success: false,
+        filledFields: [...filledFields],
+        skippedFields: [...skippedFields],
+        reason: 'fill_failed',
+      };
+    }
+    // Selection/review/generation can outlive an inbox. Read authoritative
+    // storage again; preferred inboxes need the same guard as the active one.
+    const latestMailboxState = await getStorageViaBg(['addresses'], true);
+    const wasOwned = addresses.some(
+      (entry) => entry.address.toLowerCase() === emailAddress.toLowerCase()
+    );
+    if (
+      !isAutofillEmailAvailable(
+        latestMailboxState.addresses,
+        emailAddress,
+        !requestedEmail || wasOwned
+      )
+    ) {
+      return {
+        success: false,
+        filledFields: [...filledFields],
+        skippedFields: [...skippedFields],
+        reason: 'address_expired',
+      };
+    }
 
     // Prefer learned per-site selectors when available
     try {
-      const map = (await getFieldMapViaBg(pageHost)) as {
-        entries: Array<{ kind: string; selector: string; hits: number; lastUsedAt: number }>;
-      } | null;
-      const mappedEmail = resolveMappedField(form, map, 'email');
-      if (mappedEmail instanceof HTMLInputElement) {
+      const mappedEmail = correctedField('email') || learnedField('email');
+      if (mappedEmail instanceof HTMLInputElement || mappedEmail instanceof HTMLTextAreaElement) {
         await smartFillInputValue(mappedEmail, emailAddress, isHumanLike);
         void recordFieldMapHitViaBg(pageHost, 'email', buildSelectorHint(mappedEmail));
       }
@@ -2040,52 +2304,61 @@ export async function fillSignupForm(
 
     // Fill email + confirm-email (and any page-level email twins) with the same address
     // Prefer email for dual email/phone inputs
-    fillAllEmailFields(form, emailAddress); // Note: fillAllEmailFields might need updating, but we'll leave it or assume it's fine
-    await smartFillInputValue(usernameInput, randomUsername, isHumanLike);
-
-    // Watch username-taken / not-allowed conflicts → regenerate human username
-    if (usernameInput && randomUsername) {
-      try {
-        const userEl = usernameInput;
-        const watchRoot: ParentNode =
-          form instanceof HTMLElement ? form : userEl.closest('form') || document.body || document;
-        watchUsernameConflict(watchRoot, () => {
-          void (async () => {
-            const next = await generateIdentityViaBg('username');
-            fillInputValueForce(userEl, next);
-            await updateAndCopyCredentials({ username: next });
-            try {
-              await showTooltip(userEl, await t('contentAutofill.usernameTaken'), false);
-            } catch {
-              /* ignore */
-            }
-          })();
-        });
-      } catch {
-        /* optional */
-      }
+    const emailSummary = fillAllEmailFields(form, emailAddress);
+    if (emailSummary.filled > 0) filledFields.add('email');
+    const correctedEmail = correctedField('email');
+    if (
+      correctedEmail &&
+      (correctedEmail instanceof HTMLInputElement ||
+        correctedEmail instanceof HTMLTextAreaElement) &&
+      !(correctedEmail instanceof HTMLInputElement && correctedEmail.type === 'password')
+    ) {
+      await smartFillInputValue(correctedEmail, emailAddress, isHumanLike);
+      filledFields.add('email');
     }
+    if (emailSummary.skippedReadonly > 0) skippedFields.add('email_readonly');
+    await smartFillInputValue(usernameInput, randomUsername, isHumanLike);
 
     let nameFilled = false;
     if (firstNameInput && lastNameInput) {
-      await smartFillInputValue(firstNameInput, firstName, isHumanLike);
-      await smartFillInputValue(lastNameInput, lastName, isHumanLike);
-      nameFilled = true;
-    } else if (fullNameInput) {
+      if (isFillableField(firstNameInput) && isFillableField(lastNameInput)) {
+        await smartFillInputValue(firstNameInput, firstName, isHumanLike);
+        await smartFillInputValue(lastNameInput, lastName, isHumanLike);
+        nameFilled = true;
+      }
+    } else if (fullNameInput && isFillableField(fullNameInput)) {
       await smartFillInputValue(fullNameInput, fullName, isHumanLike);
       nameFilled = true;
     }
 
-    await smartFillInputValue(phoneInput, randomPhone, isHumanLike);
-    await smartFillInputValue(websiteInput, randomWebsite, isHumanLike);
+    if (phoneInput && isFillableField(phoneInput)) {
+      await smartFillInputValue(phoneInput, randomPhone, isHumanLike);
+    }
+    if (websiteInput && isFillableField(websiteInput)) {
+      await smartFillInputValue(websiteInput, randomWebsite, isHumanLike);
+    }
 
-    // Password only — never write password into username/email/name fields
+    // Password only - never write password into username/email/name fields
+    const correctedPassword = correctedField('password') || learnedField('password');
+    if (
+      correctedPassword instanceof HTMLInputElement &&
+      correctedPassword.type === 'password' &&
+      isFillableField(correctedPassword)
+    ) {
+      fillInputValue(correctedPassword, password);
+      filledFields.add('password');
+    }
     form
       .querySelectorAll<HTMLInputElement>(
         'input[type="password"], input[autocomplete="new-password"], input[autocomplete="current-password"]'
       )
       .forEach((input: HTMLInputElement) => {
+        if (input === correctedPassword) return;
         if (input === usernameInput) return;
+        if (!isFillableField(input)) {
+          if (input.readOnly) skippedFields.add('password_readonly');
+          return;
+        }
         if (input.type !== 'password') {
           // Only non-password inputs if name/id explicitly password (avoid username false match)
           const meta = fieldMeta(input);
@@ -2093,6 +2366,7 @@ export async function fillSignupForm(
           if (/\busername\b|\buser\s*name\b|\buserid\b|\bhandle\b|\bemail\b/.test(meta)) return;
         }
         if (looksLikeEmailField(input)) return;
+        filledFields.add('password');
         fillInputValue(input, password);
       });
     // Confirm-password siblings (same type=password already covered); also name* password text fields
@@ -2101,11 +2375,17 @@ export async function fillSignupForm(
         'input:not([type="password"]):not([type="email"]):not([type="hidden"])'
       )
       .forEach((input: HTMLInputElement) => {
+        if (input === correctedPassword) return;
         if (input === usernameInput) return;
+        if (!isFillableField(input)) {
+          if (input.readOnly) skippedFields.add('password_readonly');
+          return;
+        }
         const meta = fieldMeta(input);
         if (!/password|passwd|\bpwd\b|passcode|confirm.?pass/.test(meta)) return;
         if (/\busername\b|\buser\s*name\b|\buserid\b|\bhandle\b/.test(meta)) return;
         if (looksLikeEmailField(input)) return;
+        filledFields.add('password');
         fillInputValue(input, password);
       });
 
@@ -2150,11 +2430,34 @@ export async function fillSignupForm(
       /* ignore */
     }
 
-    const credentials: Record<string, string> = {};
+    for (const field of extendedFilled) filledFields.add(field);
+    if (usernameInput && isFillableField(usernameInput)) filledFields.add('username');
+    if (nameFilled) filledFields.add('name');
+    if (phoneInput && isFillableField(phoneInput) && randomPhone) filledFields.add('phone');
+    if (websiteInput && isFillableField(websiteInput) && randomWebsite) filledFields.add('website');
+    if (policyUrls.length) filledFields.add('policyUrls');
+    const filledUnique = [...filledFields];
+    // Policy URLs are metadata collected for the saved credential, not fields
+    // written into the page. They must not turn an otherwise empty form into a
+    // reported Autofill success.
+    const actualFilledFields = filledUnique.filter((field) => field !== 'policyUrls');
+    if (actualFilledFields.length === 0) {
+      return {
+        success: false,
+        filledFields: [],
+        skippedFields: [...skippedFields],
+        email: emailAddress,
+        reason: 'no_compatible_fields',
+      };
+    }
+
+    const credentialId = `login_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+    const credentials: Record<string, string> = { signupCredentialId: credentialId };
     if (randomWebsite) credentials.website = randomWebsite;
     else credentials.website = pageHost;
     credentials.email = emailAddress;
-    if (randomUsername) credentials.username = randomUsername;
+    const filledUsername = usernameInput?.value || randomUsername;
+    if (filledUsername) credentials.username = filledUsername;
     credentials.password = password;
     if (nameFilled) credentials.name = fullName;
     if (randomPhone) credentials.phone = randomPhone;
@@ -2166,11 +2469,7 @@ export async function fillSignupForm(
 
     await updateAndCopyCredentials(credentials);
 
-    const { loginInfo = [], selectedIdentityId } = (await getStorageViaBg([
-      'loginInfo',
-      'selectedIdentityId',
-    ])) as {
-      loginInfo?: CredentialsHistoryItem[];
+    const { selectedIdentityId } = (await getStorageViaBg(['selectedIdentityId'])) as {
       selectedIdentityId?: string;
     };
     // Encrypt password at rest. Never abort the whole save if encryption fails -
@@ -2182,27 +2481,20 @@ export async function fillSignupForm(
       logError('Failed to encrypt password before saving credential; password not persisted:', err);
     }
 
-    // Record which fields we actually put into the form (for credentials UI)
-    const filledFields: string[] = ['email', 'password', ...extendedFilled];
-    if (randomUsername) filledFields.push('username');
-    if (nameFilled) filledFields.push('name');
-    if (randomPhone) filledFields.push('phone');
-    if (randomWebsite) filledFields.push('website');
-    if (policyUrls.length) filledFields.push('policyUrls');
-    // Dedupe
-    const filledUnique = [...new Set(filledFields)];
-
+    const selectedAddressId =
+      addresses.find((candidate) => candidate.address.toLowerCase() === emailAddress.toLowerCase())
+        ?.id || activeAddressId;
     const newCredential: CredentialsHistoryItem = {
-      id: `login_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
+      id: credentialId,
       email: emailAddress,
-      username: randomUsername,
+      username: filledUsername,
       name: nameFilled ? fullName : null,
       phone: randomPhone,
       website: randomWebsite || pageHost,
       password: storedPassword,
       domain: pageHost,
       timestamp: Date.now(),
-      inboxId: activeInboxId,
+      addressId: selectedAddressId,
       identityId: selectedIdentityId ?? (identity as { id?: string } | undefined)?.id,
       country: identity?.country ?? null,
       gender: identity?.gender ?? null,
@@ -2210,7 +2502,7 @@ export async function fillSignupForm(
       pin: identity?.pin ?? null,
       policyUrls: policyUrls.length ? policyUrls : undefined,
       filledFields: filledUnique,
-      // Autofill alone is NOT success — wait for submit + outcome detection
+      // Autofill alone is NOT success - wait for submit + outcome detection
       signupStatus: 'pending_submit',
       verified: false,
     };
@@ -2226,19 +2518,52 @@ export async function fillSignupForm(
       }
     } catch (bgErr) {
       logError('Background login save failed, falling back to local storage', bgErr);
-      loginInfo.unshift(newCredential);
-      if (loginInfo.length > 50) loginInfo.length = 50;
-      await setStorageViaBg({ loginInfo });
+      // The fallback bypasses the background saveLoginCredential handler, so
+      // re-apply the same allowlist normalization here: https-only policyUrls,
+      // per-field length caps, and domain sanitization must not be skipped
+      // just because the RPC failed.
+      const fallbackCredential = normalizeSavedLoginCredential(
+        newCredential as Record<string, unknown>
+      );
+      if (fallbackCredential) {
+        // Send only the new same-site record. The background owns deduplication
+        // and merges it into the secret-bearing history without trusting a
+        // content-side read/modify/write of the full loginInfo array.
+        await setStorageViaBg({ loginInfo: [fallbackCredential] });
+      }
     }
 
-    return true;
+    if (usernameInput && filledUsername && newCredential.id) {
+      startUsernameRecovery({
+        root: form,
+        input: usernameInput,
+        credentialId: newCredential.id,
+        domain: pageHost,
+        savedUsername: filledUsername,
+        fill: fillInputValueForce,
+      });
+    }
+
+    return {
+      success: true,
+      filledFields: filledUnique,
+      credentialId: newCredential.id,
+      skippedFields: [...skippedFields],
+      email: emailAddress,
+      addressId: selectedAddressId,
+    };
   } catch (error: unknown) {
     logError(
       'Error filling form:',
       undefined,
       error instanceof Error ? error : new Error(String(error))
     );
-    return false;
+    return {
+      success: false,
+      filledFields: [...filledFields],
+      skippedFields: [...skippedFields],
+      reason: 'fill_error',
+    };
   } finally {
     // Stop live ticker
     if (progressTimer) {
@@ -2249,7 +2574,7 @@ export async function fillSignupForm(
     if (progressTooltip) {
       // Show "Done ✓" briefly before fading
       const lbl = progressTooltip.querySelector('span:last-child') as HTMLSpanElement | null;
-      if (lbl) lbl.textContent = 'Done ✓';
+      if (lbl) lbl.textContent = `${tSync('common.done')} ✓`;
       if (progressBar) progressBar.style.width = '100%';
       setTimeout(() => {
         if (progressTooltip) {

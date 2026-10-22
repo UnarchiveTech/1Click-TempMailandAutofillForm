@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { isSafeUserAgentString, USER_AGENT_PRESETS } from '@/utils/user-agent.js';
+import { isSafeUserAgentString, USER_AGENT_PRESETS } from '@/utils/content/user-agent.js';
 
 describe('isSafeUserAgentString', () => {
   test('accepts preset user agents', () => {

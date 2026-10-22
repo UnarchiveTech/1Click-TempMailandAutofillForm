@@ -1,5 +1,5 @@
 /**
- * Provider reliability graph — track create/fetch success and latency.
+ * Provider reliability graph - track create/fetch success and latency.
  */
 
 import { withLock } from '@/utils/mutex.js';
@@ -83,7 +83,22 @@ export async function recordProviderFetch(
   });
 }
 
-/** 0–100 health score (higher is better). */
+/**
+ * Health data older than this no longer describes the provider's CURRENT
+ * behavior. The latency ring only ages out after 12 newer probes and the
+ * success rates never decay, so an unprobed provider would otherwise serve
+ * its July verdict forever; consumers reading the score as current health
+ * treat a stale record as neutral instead.
+ */
+export const PROVIDER_HEALTH_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+/** True when the record was last touched too long ago to describe the present. */
+export function isProviderHealthStale(h: ProviderHealth, now = Date.now()): boolean {
+  const updatedAt = typeof h.updatedAt === 'number' ? h.updatedAt : 0;
+  return !updatedAt || now - updatedAt > PROVIDER_HEALTH_MAX_AGE_MS;
+}
+
+/** 0-100 health score (higher is better). */
 export function providerHealthScore(h: ProviderHealth): number {
   const createRate = h.createAttempts > 0 ? h.createSuccesses / h.createAttempts : 0.5;
   const fetchRate = h.fetchAttempts > 0 ? h.fetchSuccesses / h.fetchAttempts : 0.5;
@@ -106,7 +121,16 @@ export function providerHealthScore(h: ProviderHealth): number {
     else if (age < 30 * 60 * 1000) recency = 0.85;
   }
 
-  return Math.round(Math.max(0, Math.min(100, blended * 100 * latFactor * recency)));
+  const raw = Math.max(0, Math.min(100, blended * 100 * latFactor * recency));
+  // Stale record: cap at the neutral midpoint - the same score an empty
+  // history produces - so a stale verdict reads as "no current signal"
+  // rather than as health. Failover ranking (>= 40) and create-time picks
+  // (>= 30) stay eligible for a previously-good provider but can no longer
+  // lean on stale excellence.
+  if (isProviderHealthStale(h)) {
+    return Math.min(Math.round(raw), 50);
+  }
+  return Math.round(raw);
 }
 
 export interface RankedProvider {

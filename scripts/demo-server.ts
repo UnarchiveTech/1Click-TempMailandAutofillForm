@@ -1,9 +1,9 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { createServer } from 'node:http';
-import { extname, join } from 'node:path';
+import { extname, relative, resolve, sep } from 'node:path';
 
 const PORT = Number.parseInt(process.env.DEMO_PORT || '5173', 10);
-const DEMO_DIR = join(process.cwd(), 'demo');
+const DEMO_DIR = realpathSync(resolve(process.cwd(), 'demo'));
 
 const MIME_TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -27,19 +27,41 @@ const server = createServer((req, res) => {
     return;
   }
 
-  const rawPath = req.url?.split('?')[0] || '/';
-  let relativePath = rawPath.replace(/^\/demo\//, '/').replace(/^\//, '');
+  let requestPath: string;
+  try {
+    // Decode before resolving so encoded traversal and separators are subject
+    // to the same containment check as literal path segments.
+    requestPath = decodeURIComponent((req.url?.split('?')[0] || '/').split('#')[0]);
+  } catch {
+    res.writeHead(400, { 'Content-Type': 'text/plain' });
+    res.end('400 Bad Request');
+    return;
+  }
+
+  let relativePath = requestPath.replace(/^\/demo\//, '/').replace(/^\//, '');
 
   if (!relativePath || relativePath === 'index.html') {
     relativePath = 'signup-social.html';
   }
 
-  const filePath = join(DEMO_DIR, relativePath);
+  const filePath = resolve(DEMO_DIR, relativePath);
+  const pathFromDemoRoot = relative(DEMO_DIR, filePath);
+  if (isOutsideDemoDirectory(pathFromDemoRoot)) {
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    res.end('404 Not Found');
+    return;
+  }
 
   if (existsSync(filePath)) {
     try {
-      const content = readFileSync(filePath);
-      const ext = extname(filePath);
+      const resolvedFilePath = realpathSync(filePath);
+      if (isOutsideDemoDirectory(relative(DEMO_DIR, resolvedFilePath))) {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('404 Not Found');
+        return;
+      }
+      const content = readFileSync(resolvedFilePath);
+      const ext = extname(resolvedFilePath);
       const mimeType = MIME_TYPES[ext] || 'application/octet-stream';
       res.writeHead(200, { 'Content-Type': mimeType });
       res.end(content);
@@ -54,6 +76,12 @@ const server = createServer((req, res) => {
   res.writeHead(404, { 'Content-Type': 'text/plain' });
   res.end('404 Not Found');
 });
+
+function isOutsideDemoDirectory(pathFromDemoRoot: string): boolean {
+  return (
+    pathFromDemoRoot === '' || pathFromDemoRoot === '..' || pathFromDemoRoot.startsWith(`..${sep}`)
+  );
+}
 
 server.listen(PORT, () => {
   console.log(`[DemoServer] Serving demo showcase pages on http://localhost:${PORT}/demo/`);

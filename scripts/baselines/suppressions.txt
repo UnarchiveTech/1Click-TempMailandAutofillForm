@@ -1,0 +1,6 @@
+# Inline lint-suppression baseline - a ratchet: counts may only decrease.
+# Format: <path> <kind> <count>
+# Kinds: biomeIgnore, biomeIgnoreAll, eslintDisable, svelteIgnore, tsExpectError, tsIgnore, tsNocheck
+# check-suppressions.ts fails when a NEW directive appears or a count grows.
+# After fixing code (the preferred outcome), shrink rows with:
+#   bun scripts/check-suppressions.ts --update

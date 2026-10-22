@@ -1,9 +1,12 @@
 /**
- * Autofill intelligence orchestrator — FormScore + identity route + replay decision.
+ * Autofill intelligence orchestrator - FormScore + identity route + replay decision.
  */
 
-import type { ReusableCredential } from '@/features/login-info/login-crypto.js';
-import { routeIdentityForDomainViaBg, shouldPreferReplayViaBg } from '@/utils/content-bg-bridge.js';
+import type { ReusableCredential } from '@/features/login-info/saved-login-credentials.js';
+import {
+  routeIdentityForDomainViaBg,
+  shouldPreferReplayViaBg,
+} from '@/utils/content/content-bg-bridge.js';
 import type { Identity } from '@/utils/types.js';
 import { normalizeDomain } from '@/utils/validation.js';
 import { scoreForm } from './form-score.js';
@@ -33,7 +36,7 @@ export async function buildAutofillPlan(
 
   let replay = opts?.replayCredential ?? null;
   if (replay === undefined) {
-    // Lookup not done yet — caller may pass null after background fetch
+    // Lookup not done yet - caller may pass null after background fetch
     replay = null;
   }
 

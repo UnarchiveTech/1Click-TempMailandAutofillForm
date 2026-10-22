@@ -1,5 +1,9 @@
-import { beforeEach, describe, expect, mock, test } from 'bun:test';
+import { afterAll, beforeEach, describe, expect, mock, test } from 'bun:test';
 
+// Restore module mocks so nothing leaks into later test files (one Bun process).
+afterAll(() => {
+  mock.restore();
+});
 // ── Mock the 'wxt/browser' module BEFORE importing favicon ──────────────────
 // favicon.ts (and its transitive deps: logger.ts, storageMonitor.ts) import
 // { browser } from 'wxt/browser'. In Bun's test runner there is no extension
@@ -48,20 +52,28 @@ const {
   CACHE_DURATION,
   FAVICON_CACHE_KEY,
   GOOGLE_DEFAULT_HASH,
-  getDomainFaviconUrl,
+  __resetFaviconMemoryMirrorForTests,
+  clearFaviconCache,
+  getCachedFaviconUrl,
   getDomainFromEmail,
   getFaviconCache,
   getFaviconCacheStats,
   getFaviconErrorCache,
-  getFaviconUrl,
+  getFaviconRequestUrl,
   getGoogleFaviconUrl,
-  getRootDomain,
-  getRootDomainFaviconUrl,
   getStrippedDomain,
-} = await import('@/utils/favicon');
+  peekCachedFaviconEntrySync,
+  resolveFaviconEntryUrl,
+  setFaviconCacheSuccess,
+  warmFaviconMemoryMirror,
+} = await import('@/utils/ui/favicon');
+const { getRootDomain } = await import('@/utils/security/root-domain');
 
 beforeEach(() => {
   for (const key of Object.keys(storageStore)) delete storageStore[key];
+  // The mirror memoizes across lookups - reset it alongside the storage mock
+  // so every test starts cold.
+  __resetFaviconMemoryMirrorForTests();
 });
 
 // ── getDomainFromEmail ──────────────────────────────────────────────────────
@@ -73,6 +85,10 @@ describe('getDomainFromEmail', () => {
 
   test('handles subdomains', () => {
     expect(getDomainFromEmail('user@mail.example.com')).toBe('mail.example.com');
+  });
+
+  test('extracts a normalized domain from a display-name From header', () => {
+    expect(getDomainFromEmail('Security Team <sender@MAIL.Example.com>')).toBe('mail.example.com');
   });
 
   test('returns empty string for invalid email', () => {
@@ -161,49 +177,33 @@ describe('getStrippedDomain', () => {
 
 // ── URL Builders ────────────────────────────────────────────────────────────
 
-describe('getDomainFaviconUrl', () => {
-  test('builds favicon URL from email', () => {
-    expect(getDomainFaviconUrl('user@example.com')).toBe('https://example.com/favicon.ico');
-  });
-
-  test('handles domain without @ sign', () => {
-    expect(getDomainFaviconUrl('example.com')).toBe('https://example.com/favicon.ico');
-  });
-});
-
-describe('getRootDomainFaviconUrl', () => {
-  test('builds root domain favicon URL', () => {
-    expect(getRootDomainFaviconUrl('user@mail.example.com')).toBe(
-      'https://example.com/favicon.ico'
-    );
-  });
-
-  test('handles multi-level TLD', () => {
-    expect(getRootDomainFaviconUrl('user@example.co.uk')).toBe('https://example.co.uk/favicon.ico');
-  });
-});
-
-describe('getFaviconUrl', () => {
+describe('getFaviconRequestUrl', () => {
   test('builds favicon URL for domain', () => {
-    expect(getFaviconUrl('example.com')).toBe('https://example.com/favicon.ico');
+    expect(getFaviconRequestUrl('example.com')).toBe('https://example.com/favicon.ico');
   });
 
   test('returns empty string for empty domain', () => {
-    expect(getFaviconUrl('')).toBe('');
+    expect(getFaviconRequestUrl('')).toBe('');
   });
 });
 
 describe('getGoogleFaviconUrl', () => {
   test('builds Google favicon API URL with default size', () => {
     const url = getGoogleFaviconUrl('example.com');
-    expect(url).toContain('www.google.com/s2/favicons');
-    expect(url).toContain('sz=32');
-    expect(url).toContain('domain=example.com');
+    expect(new URL(url).origin).toBe('https://t0.gstatic.com');
+    expect(new URL(url).searchParams.get('size')).toBe('32');
+    expect(new URL(url).searchParams.get('url')).toBe('https://example.com');
   });
 
   test('builds Google favicon API URL with custom size', () => {
     const url = getGoogleFaviconUrl('example.com', 64);
-    expect(url).toContain('sz=64');
+    expect(new URL(url).searchParams.get('size')).toBe('64');
+  });
+
+  test('encodes a domain as one query value', () => {
+    const url = new URL(getGoogleFaviconUrl('example.com&x=1'));
+    expect(url.searchParams.get('url')).toBe('https://example.com&x=1');
+    expect(url.searchParams.get('x')).toBeNull();
   });
 });
 
@@ -268,5 +268,91 @@ describe('favicon constants', () => {
 
   test('GOOGLE_DEFAULT_HASH is a SHA-256 hex string', () => {
     expect(GOOGLE_DEFAULT_HASH).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
+
+// ── Warm in-memory mirror (anti-flash fast path) ────────────────────────
+
+describe('favicon memory mirror', () => {
+  test('peek returns undefined before hydration, the entry after warm', async () => {
+    expect(peekCachedFaviconEntrySync('warm.test')).toBeUndefined();
+
+    storageStore[FAVICON_CACHE_KEY] = {
+      'warm.test': { timestamp: Date.now(), url: 'https://warm.test/favicon.ico' },
+    };
+    await warmFaviconMemoryMirror();
+
+    const entry = peekCachedFaviconEntrySync('warm.test');
+    expect(entry?.url).toBe('https://warm.test/favicon.ico');
+  });
+
+  test('mirror is an exact copy including stale-while-revalidate entries', async () => {
+    storageStore[FAVICON_CACHE_KEY] = {
+      'fresh.test': { timestamp: Date.now(), url: 'u-fresh' },
+      'stale.test': { timestamp: Date.now() - CACHE_DURATION - 60_000, url: 'u-stale' },
+    };
+    await warmFaviconMemoryMirror();
+
+    expect(peekCachedFaviconEntrySync('fresh.test')?.url).toBe('u-fresh');
+    // Stale entries MUST survive hydration - consumers own the freshness
+    // decision (stale-while-revalidate keeps the old icon visible while it
+    // refreshes; dropping aged entries here would blank them).
+    expect(peekCachedFaviconEntrySync('stale.test')?.url).toBe('u-stale');
+  });
+
+  test('getCachedFaviconUrl rejects a legacy remote URL from the sync mirror', async () => {
+    storageStore[FAVICON_CACHE_KEY] = {
+      'sync.test': { timestamp: Date.now(), url: 'https://sync.test/favicon.ico' },
+    };
+    await warmFaviconMemoryMirror();
+
+    expect(await getCachedFaviconUrl('sync.test')).toBeNull();
+  });
+
+  test('webp-only entries resolve through the mirror (no url field)', async () => {
+    storageStore[FAVICON_CACHE_KEY] = {
+      'webp.test': { timestamp: Date.now(), webpDataUrl: 'data:image/webp;base64,xx' },
+    };
+    await warmFaviconMemoryMirror();
+
+    expect(await getCachedFaviconUrl('webp.test')).toBe('data:image/webp;base64,xx');
+  });
+
+  test('setFaviconCacheSuccess updates the mirror for the next component without re-warm', async () => {
+    await warmFaviconMemoryMirror();
+    expect(peekCachedFaviconEntrySync('live.test')).toBeUndefined();
+
+    await setFaviconCacheSuccess('live.test', 'https://live.test/favicon.ico');
+
+    // The write path must keep the mirror coherent synchronously - a mailbox
+    // row rendered right after a fetch success must not miss the entry.
+    expect(peekCachedFaviconEntrySync('live.test')?.url).toBe('https://live.test/favicon.ico');
+  });
+
+  test('clearFaviconCache removes the entry from the mirror too', async () => {
+    storageStore[FAVICON_CACHE_KEY] = {
+      'gone.test': { timestamp: Date.now(), url: 'u-gone' },
+    };
+    await warmFaviconMemoryMirror();
+    expect(peekCachedFaviconEntrySync('gone.test')).toBeDefined();
+
+    await clearFaviconCache('gone.test');
+
+    expect(peekCachedFaviconEntrySync('gone.test')).toBeUndefined();
+  });
+
+  test('resolveFaviconEntryUrl prefers webpDataUrl over url and handles absence', () => {
+    expect(
+      resolveFaviconEntryUrl({
+        timestamp: 1,
+        webpDataUrl: 'data:image/webp;base64,xx',
+        url: 'data:image/png;base64,yy',
+      })
+    ).toBe('data:image/webp;base64,xx');
+    expect(
+      resolveFaviconEntryUrl({ timestamp: 1, url: 'https://legacy.test/favicon.ico' })
+    ).toBeNull();
+    expect(resolveFaviconEntryUrl({ timestamp: 1 })).toBeNull();
+    expect(resolveFaviconEntryUrl(undefined)).toBeNull();
   });
 });

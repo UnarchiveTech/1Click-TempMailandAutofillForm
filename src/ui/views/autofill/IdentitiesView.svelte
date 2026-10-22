@@ -1,27 +1,28 @@
 
 <script lang="ts">
-import { onDestroy } from 'svelte';
+import { onDestroy, tick } from 'svelte';
 import { get } from 'svelte/store';
 import { locale, t } from 'svelte-i18n';
 import { browser } from 'wxt/browser';
 import {
+  deleteIdentities,
   deleteIdentity,
   loadIdentities,
   reorderIdentities,
   saveIdentity,
   selectIdentity,
 } from '@/features/identities/identity-actions.js';
-import SelectionToolbar from '@/ui/blocks/mail/SelectionToolbar.svelte';
+import { registerEscapeTier, topEscapeTierId } from '@/features/keyboard-shortcuts/escape-stack.js';
+import ButtonGroup from '@/ui/components/composites/ButtonGroup.svelte';
+import EmptyState from '@/ui/components/composites/EmptyState.svelte';
 import SearchBar from '@/ui/components/composites/SearchBar.svelte';
+import SearchFilterHeader from '@/ui/components/composites/SearchFilterHeader.svelte';
 import Icon from '@/ui/components/icons/Icon.svelte';
-import { Checkbox, Dropdown, InputField, Toggle } from '@/ui/components/primitives';
-import {
-  isRandomActivePreferredEmail,
-  PREFERRED_EMAIL_RANDOM_ACTIVE,
-} from '@/utils/blocked-temp-mail-sites.js';
-import { decrypt, encrypt } from '@/utils/crypto.js';
-import { generateDefaultAvatarDataUrl } from '@/utils/default-avatar.js';
-import { getErrorMessage } from '@/utils/errors.js';
+import { Btn, Checkbox, Dropdown, InputField, Toggle } from '@/ui/components/primitives';
+import Badge from '@/ui/components/primitives/Badge.svelte';
+import { getRandomUserAgentConfig, USER_AGENT_PRESETS } from '@/utils/content/user-agent.js';
+import { downloadCSV, exportIdentitiesToCSV } from '@/utils/email/csv-export.js';
+import { localizedErrorMessageOrFallback } from '@/utils/errors.js';
 import {
   detectCountryLocally,
   maxAdultDobDate,
@@ -29,17 +30,119 @@ import {
   randomCity,
   randomDobInYearRange,
   randomPostalCode,
-} from '@/utils/locale-profile.js';
+} from '@/utils/i18n/locale-profile.js';
+import {
+  isProfilePictureTooLarge,
+  MAX_PROFILE_PICTURE_FILE_BYTES,
+} from '@/utils/identity/profile-picture.js';
 import { logError } from '@/utils/logger.js';
-import { PORTAL_Z, portalDialogAction } from '@/utils/portal-layers.js';
-import type { CredentialsHistoryItem, Identity } from '@/utils/types.js';
-import { getRandomUserAgentConfig, USER_AGENT_PRESETS } from '@/utils/user-agent.js';
+import {
+  isRandomActivePreferredEmail,
+  PREFERRED_EMAIL_RANDOM_ACTIVE,
+} from '@/utils/provider/blocked-temp-mail-sites.js';
+import { decrypt, encrypt, VaultLockedError } from '@/utils/security/crypto.js';
+import { getEmailMaps } from '@/utils/storage/storage-keys.js';
+import { writeWithRetry } from '@/utils/storage/storage-write.js';
+import { generateDefaultAvatarDataUrl } from '@/utils/theme/default-avatar.js';
+import { formatLocalDateTime } from '@/utils/time/time.js';
+import { localDateStamp } from '@/utils/time/time-format.js';
+import type { AddressStatus, CredentialsHistoryItem, Identity } from '@/utils/types.js';
+import { AVATAR_BOX, AVATAR_INK } from '@/utils/ui/avatar-size.js';
+import { observeDialogDensity } from '@/utils/ui/dialog-density.js';
+import { beginDialogLifecycle } from '@/utils/ui/dialog-lifecycle.js';
+import { ELEVATION } from '@/utils/ui/elevation.js';
+import { createHoldController } from '@/utils/ui/gesture-selection.js';
+import { keyboardReorder } from '@/utils/ui/keyboard-reorder.js';
+import { NAV_FLOAT_CONTENT_WIDTH_CSS } from '@/utils/ui/nav-layout.js';
+import { PORTAL_Z, PORTAL_Z_CLASS, portalDialogAction } from '@/utils/ui/portal-layers.js';
+import { observeResizeOnFrame } from '@/utils/ui/resize-observer.js';
+import { responsiveButtonLayout } from '@/utils/ui/responsive-button-layout.js';
+import {
+  controlSurface,
+  type RowInkRole,
+  rowInk,
+  rowSurface,
+  rowSurfaceState,
+} from '@/utils/ui/row-surface.js';
+import type {
+  ListSelectionState,
+  SelectionActionId,
+  SelectionApi,
+} from '@/utils/ui/selection-api.js';
+import { publishSelectionSurface } from '@/utils/ui/selection-registry.js';
+import { focusedRowId, moveRowCursor } from '@/utils/ui/selection-row-cursor.js';
+import { toastStore } from '@/utils/ui/toastStore.js';
 import {
   validateOTP,
   validatePassword,
   validatePhoneNumber,
   validateTextInput,
 } from '@/utils/validation.js';
+
+/**
+ * Svelte actions run ONCE - when only the parameter changes, the action is not
+ * re-invoked and the node is not remounted. A portal decided purely at init
+ * time would therefore leave the editor stranded in the wrong tree while its
+ * reactively-flipped attributes (fixed↔absolute, dialog role, portal layer)
+ * claim otherwise. The `update` hook moves the node between document.body and
+ * its original (split-host) parent on every `useSplitEditor` change. The
+ * original parent is captured at init because `portalToBody`'s destroy only
+ * REMOVES the node - it never restores it.
+ */
+function identityEditorFocus(node: HTMLElement, isSplit: boolean) {
+  let lifecycle: ReturnType<typeof beginDialogLifecycle> | null = null;
+  let stopDensity: (() => void) | null = null;
+  function update(split: boolean) {
+    lifecycle?.cleanup();
+    stopDensity?.();
+    stopDensity = split ? observeDialogDensity(node) : null;
+    lifecycle = split ? null : beginDialogLifecycle();
+    lifecycle?.attach(
+      node,
+      node.querySelector<HTMLElement>('button:not([disabled]):not(.absolute)')
+    );
+  }
+  update(isSplit);
+  return {
+    update,
+    destroy: () => {
+      lifecycle?.cleanup();
+      stopDensity?.();
+    },
+  };
+}
+
+function onEditorKeydown(event: KeyboardEvent) {
+  if (event.key !== 'Escape' || topEscapeTierId() !== 'identities.editor') return;
+  event.preventDefault();
+  event.stopPropagation();
+  attemptCloseEditor();
+}
+
+function portalIfNotSplit(node: HTMLElement, isSplit: boolean) {
+  const originalParent = node.parentElement;
+  let portaled = !isSplit;
+
+  if (portaled) document.body.appendChild(node);
+
+  return {
+    update(nextIsSplit: boolean) {
+      const nextPortaled = !nextIsSplit;
+      if (nextPortaled === portaled) return;
+      portaled = nextPortaled;
+      if (portaled) {
+        if (node.parentElement !== document.body) document.body.appendChild(node);
+      } else if (originalParent && node.parentElement !== originalParent) {
+        originalParent.appendChild(node);
+      }
+    },
+    destroy() {
+      // Mirror portalToBody: only unhook from body; when inline, Svelte removes
+      // the node itself as part of block teardown.
+      if (node.parentElement === document.body) node.remove();
+    },
+  };
+}
 
 /** Localized sample names for suggestions (fields start empty; user can pick/apply) */
 const LOCALIZED_NAME_SUGGESTIONS: Record<
@@ -107,18 +210,18 @@ function nextIdentityName(existing: Identity[]): string {
 
 function formatIdentityTime(ts: number): string {
   if (!ts || Number.isNaN(Number(ts))) return '';
-  try {
-    return new Date(ts).toLocaleString(undefined, {
+  return formatLocalDateTime(
+    ts,
+    {
       year: 'numeric',
       month: 'short',
       day: 'numeric',
       hour: '2-digit',
       minute: '2-digit',
-    });
-  } catch {
-    /* ignore */
-    return new Date(ts).toISOString();
-  }
+    },
+    ts,
+    $locale || 'en'
+  );
 }
 
 let {
@@ -127,7 +230,12 @@ let {
   savedLogins = [] as CredentialsHistoryItem[],
   mailboxAddresses = [] as string[],
   activeMailboxAddress = '' as string,
-  showConfirm = (_message: string, _onConfirm: () => void) => {},
+  onOpenSavedLogins,
+  showConfirm = (
+    _message: string,
+    _onConfirm: () => void,
+    _options?: import('@/utils/ui/shared-ui.js').ConfirmDialogOptions
+  ) => {},
   /** Pre-applied preferred-email filter (e.g. from message detail) */
   initialEmailFilter = '',
   /** Footer FAB: increment to open create dialog */
@@ -136,12 +244,12 @@ let {
   editIdSignal = '',
   /**
    * ≥1280 layoutSplit: mount create/edit into AppLayout's data-splitview host
-   * (third column) — never merge editor into the list mainview.
+   * (third column) - never merge editor into the list mainview.
    */
   useSplitEditor = false,
   splitHostId = 'autofill-split-host',
   splitHostRef = null as HTMLElement | null,
-} = $props<{
+}: {
   context?: 'popup' | 'sidepanel' | 'app';
   onBack?: () => void;
   savedLogins?: CredentialsHistoryItem[];
@@ -149,15 +257,24 @@ let {
   mailboxAddresses?: string[];
   /** Currently selected mailbox address (default option) */
   activeMailboxAddress?: string;
+  onOpenSavedLogins?: (identityId: string) => void;
   /** Shared confirm dialog (no browser confirm()) */
-  showConfirm?: (message: string, onConfirm: () => void) => void;
+  showConfirm?: (
+    message: string,
+    onConfirm: () => void,
+    options?: import('@/utils/ui/shared-ui.js').ConfirmDialogOptions
+  ) => void;
   initialEmailFilter?: string;
   createSignal?: number;
   editIdSignal?: string;
   useSplitEditor?: boolean;
   splitHostId?: string;
   splitHostRef?: HTMLElement | null;
-}>();
+} = $props();
+
+let loginCountFormatter = $derived(
+  new Intl.NumberFormat($locale || 'en', { notation: 'compact', maximumFractionDigits: 1 })
+);
 
 // React to createSignal increments. Also honor a non-zero value on first mount
 // (content-script handoff sets the signal before IdentitiesView mounts).
@@ -198,6 +315,16 @@ $effect(() => {
     void openIdentityEditor(found);
   }
 });
+
+function handleExportCSV() {
+  if (identities.length === 0) {
+    toastStore.warning(get(t)('identities.noIdentities'));
+    return;
+  }
+  const csv = exportIdentitiesToCSV(identities);
+  downloadCSV(csv, `1click-identities-${localDateStamp()}.csv`);
+  toastStore.success(get(t)('toasts.dataExportedSuccessfully'));
+}
 
 function restoreSplitPlaceholder() {
   try {
@@ -240,8 +367,9 @@ let identities = $state<Identity[]>([]);
 let selectedIdentityId = $state<string | null>(null);
 let editingIdentity = $state<Identity | null>(null);
 let isDirty = $state(false);
+let savedIdentityFormSignature = $state('');
+let createIdentityFormSignature = $state('');
 let showCreateDialog = $state(false);
-let showIdentityDropdown = $state(false);
 let identityStripEl = $state<HTMLElement | null>(null);
 let identityStripHeightPx = $state(0);
 
@@ -251,26 +379,23 @@ $effect(() => {
     identityStripHeightPx = 0;
     return;
   }
-  const ro = new ResizeObserver((entries) => {
+  return observeResizeOnFrame(el, (entries) => {
     for (const entry of entries) {
-      const rect = entry.target.getBoundingClientRect();
-      identityStripHeightPx = Math.ceil(rect.height);
+      identityStripHeightPx = Math.ceil(entry.target.getBoundingClientRect().height);
     }
   });
-  ro.observe(el);
-  return () => ro.disconnect();
 });
 /**
  * Preferred email select value:
- * - PREFERRED_EMAIL_RANDOM_ACTIVE = random any live mailbox at fill time (default for new/built-in)
- * - '' = currently selected mailbox at fill time
+ * - PREFERRED_EMAIL_RANDOM_ACTIVE = random any live mailbox at fill time (default for new user-created identities)
+ * - '' = currently selected mailbox at fill time (built-in default behavior)
  * - address string = pin that mailbox
  */
 let newIdentityPreferredEmail = $state<string>(PREFERRED_EMAIL_RANDOM_ACTIVE);
 let localMailboxAddresses = $state<string[]>([]);
 /** address → status for preferred-email health warnings */
-let inboxStatusByAddress = $state<
-  Record<string, { status?: string; accountStatus?: string; expiresAt?: number }>
+let addressStatusByAddress = $state<
+  Record<string, { status?: string; accountStatus?: AddressStatus; expiresAt?: number }>
 >({});
 
 const emailOptions = $derived.by(() => {
@@ -284,9 +409,9 @@ type PrefEmailIssue = 'expired' | 'archived' | 'deleted' | 'missing' | null;
 function preferredEmailIssue(pref: string | null | undefined): PrefEmailIssue {
   if (!pref?.trim() || isRandomActivePreferredEmail(pref)) return null;
   const addr = pref.trim().toLowerCase();
-  const meta = inboxStatusByAddress[addr];
+  const meta = addressStatusByAddress[addr];
   if (!meta) {
-    // Not in live list — may be archived/deleted or never existed
+    // Not in live list - may be archived/deleted or never existed
     const listed = emailOptions.some((a) => a.toLowerCase() === addr);
     if (!listed) return 'missing';
     return null;
@@ -299,22 +424,22 @@ function preferredEmailIssue(pref: string | null | undefined): PrefEmailIssue {
   return null;
 }
 
-async function refreshInboxStatusMap() {
+async function refreshAddressStatusMap() {
   try {
-    const { inboxes = [], archivedEmails = {} } = (await browser.storage.local.get([
-      'inboxes',
-      'archivedEmails',
-    ])) as {
-      inboxes?: Array<{
+    const { addresses = [] } = (await browser.storage.local.get(['addresses'])) as {
+      addresses?: Array<{
         address?: string;
         status?: string;
-        accountStatus?: string;
+        accountStatus?: AddressStatus;
         expiresAt?: number;
       }>;
-      archivedEmails?: Record<string, unknown>;
     };
-    const map: Record<string, { status?: string; accountStatus?: string; expiresAt?: number }> = {};
-    for (const i of inboxes) {
+    const { archivedEmails } = await getEmailMaps();
+    const map: Record<
+      string,
+      { status?: string; accountStatus?: AddressStatus; expiresAt?: number }
+    > = {};
+    for (const i of addresses) {
       if (!i.address) continue;
       map[i.address.toLowerCase()] = {
         status: i.status,
@@ -327,7 +452,7 @@ async function refreshInboxStatusMap() {
       const key = addr.toLowerCase();
       if (!map[key]) map[key] = { status: 'archived', accountStatus: 'archived' };
     }
-    inboxStatusByAddress = map;
+    addressStatusByAddress = map;
   } catch {
     /* ignore */
   }
@@ -374,8 +499,12 @@ const hasActiveIdentityFilters = $derived(
 
 // Multi-select state
 let selectionMode = $state(false);
+/** The identity list, for the keyboard's row cursor (`data-selectable-row`). */
+let identityListEl = $state<HTMLElement | null>(null);
 let selectedIds = $state<Set<string>>(new Set());
-let holdTimers = new Map<string, ReturnType<typeof setTimeout>>();
+// Long-press rows to multi-select: the shared controller owns the per-row
+// hold timers and the click-suppression window after a completed hold.
+const holdCtrl = createHoldController({ holdMs: 500, suppressClickMs: 400 });
 let identityFabHidden = $state(false);
 let identityLastScrollTop = 0;
 
@@ -450,10 +579,7 @@ async function handleIdentityDrop(e: DragEvent, targetId: string) {
   draggedIdentityId = null;
   dropTargetIdentityId = null;
   if (!sourceId || sourceId === targetId) return;
-  const fromIndex = identities.findIndex((i: Identity) => i.id === sourceId);
-  const toIndex = identities.findIndex((i: Identity) => i.id === targetId);
-  if (fromIndex === -1 || toIndex === -1) return;
-  await reorderIdentities(browser, identitySetters, fromIndex, toIndex);
+  await reorderIdentities(browser, identitySetters, sourceId, targetId);
 }
 
 function clearIdentityFilters() {
@@ -474,6 +600,16 @@ let newIdentityName = $state('');
 let newIdentityUsername = $state('');
 let newIdentityUseRandomPassword = $state(true);
 let newIdentityCustomPassword = $state('');
+/**
+ * Why the password field may hold no usable plaintext (edit path only):
+ * - `locked`: decrypt threw VaultLockedError - the stored blob is intact but
+ *   unreadable until unlock. Saving the (empty) field would wipe it, so save
+ *   is blocked with an unlock prompt unless the user typed a new password.
+ * - `undecryptable`: decrypt failed for any other reason (rotated/imported
+ *   key) - the field shows empty and save preserves the original stored blob
+ *   instead of re-encrypting garbage over it (no double-encryption).
+ */
+let customPasswordFieldState = $state<'ok' | 'locked' | 'undecryptable'>('ok');
 let newIdentityPhone = $state('');
 let newIdentityPin = $state('');
 let newIdentityDomainHints = $state<string[]>([]);
@@ -499,6 +635,7 @@ type DomainFieldOverride = {
 };
 let newIdentityDomainFieldOverrides = $state<DomainFieldOverride[]>([]);
 let newDomainOverrideInput = $state<Partial<DomainFieldOverride>>({});
+let addingDomainOverride = $state(false);
 
 function onUAPresetChange() {
   if (userAgentPresetMode === 'default') {
@@ -517,7 +654,7 @@ function generateRandomUA() {
 function onCustomUAInput() {
   userAgentPresetMode = 'custom';
 }
-/** User must opt in — new identities are never default by default */
+/** User must opt in - new identities are never default by default */
 let newIdentitySetAsDefault = $state(false);
 /** DOB helper: fixed date vs random within year range (always adult ≥18) */
 let dobHelperMode = $state<'date' | 'range'>('date');
@@ -563,10 +700,7 @@ const COUNTRY_OPTIONS: { code: string; name: string }[] = [
 
 $effect(() => {
   return () => {
-    for (const timer of holdTimers.values()) {
-      clearTimeout(timer);
-    }
-    holdTimers.clear();
+    holdCtrl.cancelAll();
   };
 });
 
@@ -580,14 +714,14 @@ const identitySetters = {
 };
 
 async function loadIdentitiesData() {
-  void refreshInboxStatusMap();
+  void refreshAddressStatusMap();
   await loadIdentities(browser, identitySetters);
   honoredInitialCreate = false;
   try {
-    const res = (await browser.storage.local.get(['inboxes'])) as {
-      inboxes?: Array<{ address?: string }>;
+    const res = (await browser.storage.local.get(['addresses'])) as {
+      addresses?: Array<{ address?: string }>;
     };
-    localMailboxAddresses = (res.inboxes || []).map((i) => i.address || '').filter(Boolean);
+    localMailboxAddresses = (res.addresses || []).map((i) => i.address || '').filter(Boolean);
   } catch {
     /* ignore */
     localMailboxAddresses = [];
@@ -595,12 +729,24 @@ async function loadIdentitiesData() {
 }
 
 async function tryDecryptPassword(value: string | undefined): Promise<string> {
-  if (!value) return '';
+  if (!value) {
+    customPasswordFieldState = 'ok';
+    return '';
+  }
   try {
-    return await decrypt(value);
-  } catch {
-    /* ignore */
-    return value;
+    const plaintext = await decrypt(value);
+    customPasswordFieldState = 'ok';
+    return plaintext;
+  } catch (error) {
+    // NEVER return the raw value here: it is the base64 ciphertext blob, and
+    // the save path would encrypt it again (double-encryption) - destroying
+    // the original password and filling garbage on autofill.
+    if (error instanceof VaultLockedError) {
+      customPasswordFieldState = 'locked';
+    } else {
+      customPasswordFieldState = 'undecryptable';
+    }
+    return '';
   }
 }
 
@@ -609,8 +755,102 @@ async function encryptOptionalPassword(value: string | undefined): Promise<strin
   return encrypt(value);
 }
 
-async function openIdentityEditor(identity: Identity) {
-  editingIdentity = identity;
+/**
+ * Keep the dirty state tied to the editor values, not only to bubbling DOM
+ * events. InputField/Dropdown are reusable components, and relying on a form
+ * listener alone made the footer action state unreliable after rerenders.
+ */
+function identityFormSnapshot() {
+  return {
+    newIdentitySetAsDefault,
+    newIdentityName,
+    newIdentityFirstNames,
+    newIdentityLastNames,
+    newIdentityUsername,
+    newIdentityUseRandomPassword,
+    newIdentityCustomPassword,
+    newIdentityPhone,
+    newIdentityPin,
+    newIdentityDomainHints,
+    newDomainHintInput,
+    newIdentityPreferredEmail,
+    newIdentityGender,
+    newIdentityDob,
+    newIdentityCountry,
+    newIdentityCity,
+    newIdentityState,
+    newIdentityAddress,
+    newIdentityProfilePicture,
+    newIdentityUserAgent,
+    userAgentPresetMode,
+    newIdentityDomainFieldOverrides,
+    newDomainOverrideInput,
+    addingDomainOverride,
+    dobHelperMode,
+    dobRangeFromYear,
+    dobRangeToYear,
+  };
+}
+
+function identityFormSignature(): string {
+  return JSON.stringify(identityFormSnapshot());
+}
+
+function restoreIdentityFormSnapshot(signature: string) {
+  try {
+    const snapshot = JSON.parse(signature) as ReturnType<typeof identityFormSnapshot>;
+    newIdentitySetAsDefault = snapshot.newIdentitySetAsDefault;
+    newIdentityName = snapshot.newIdentityName;
+    newIdentityFirstNames = snapshot.newIdentityFirstNames;
+    newIdentityLastNames = snapshot.newIdentityLastNames;
+    newIdentityUsername = snapshot.newIdentityUsername;
+    newIdentityUseRandomPassword = snapshot.newIdentityUseRandomPassword;
+    newIdentityCustomPassword = snapshot.newIdentityCustomPassword;
+    newIdentityPhone = snapshot.newIdentityPhone;
+    newIdentityPin = snapshot.newIdentityPin;
+    newIdentityDomainHints = [...snapshot.newIdentityDomainHints];
+    newDomainHintInput = snapshot.newDomainHintInput;
+    newIdentityPreferredEmail = snapshot.newIdentityPreferredEmail;
+    newIdentityGender = snapshot.newIdentityGender;
+    newIdentityDob = snapshot.newIdentityDob;
+    newIdentityCountry = snapshot.newIdentityCountry;
+    newIdentityCity = snapshot.newIdentityCity;
+    newIdentityState = snapshot.newIdentityState;
+    newIdentityAddress = snapshot.newIdentityAddress;
+    newIdentityProfilePicture = snapshot.newIdentityProfilePicture;
+    newIdentityUserAgent = snapshot.newIdentityUserAgent;
+    newIdentityDomainFieldOverrides = snapshot.newIdentityDomainFieldOverrides.map((override) => ({
+      ...override,
+    }));
+    newDomainOverrideInput = { ...snapshot.newDomainOverrideInput };
+    addingDomainOverride = snapshot.addingDomainOverride ?? false;
+    validationError = '';
+    isDirty = false;
+  } catch {
+    // A missing/invalid baseline should never prevent closing the editor.
+  }
+}
+
+const identityFormHasChanges = $derived.by(() => {
+  const baseline = editingIdentity
+    ? savedIdentityFormSignature
+    : showCreateDialog
+      ? createIdentityFormSignature
+      : '';
+  return !!baseline && identityFormSignature() !== baseline;
+});
+
+const formHasChanges = $derived(isDirty || identityFormHasChanges);
+
+$effect(() => {
+  if (editingIdentity && savedIdentityFormSignature) {
+    isDirty = identityFormHasChanges;
+  }
+});
+
+/** Populate every dialog field from an identity (shared by open + reset). */
+async function applyIdentityToFields(identity: Identity) {
+  customPasswordFieldState = 'ok';
   newIdentitySetAsDefault = !!identity.isDefault;
   newIdentityName = identity.name;
   newIdentityFirstNames = identity.firstNames || '';
@@ -649,8 +889,28 @@ async function openIdentityEditor(identity: Identity) {
     userAgentPresetMode = presetKey || 'custom';
   }
   newDomainHintInput = '';
+  newDomainOverrideInput = {};
+  addingDomainOverride = false;
   validationError = '';
+  await tick();
+  savedIdentityFormSignature = identityFormSignature();
   isDirty = false;
+}
+
+async function openIdentityEditor(identity: Identity) {
+  editingIdentity = identity;
+  await applyIdentityToFields(identity);
+}
+
+/** Revert every field to the last saved values without closing the dialog. */
+async function resetIdentityChanges() {
+  if (!editingIdentity) return;
+  await applyIdentityToFields(editingIdentity);
+}
+
+function resetCreateIdentityChanges() {
+  if (!showCreateDialog || !createIdentityFormSignature) return;
+  restoreIdentityFormSnapshot(createIdentityFormSignature);
 }
 
 function closeIdentityEditor() {
@@ -661,6 +921,7 @@ function closeIdentityEditor() {
   newIdentityUsername = '';
   newIdentityUseRandomPassword = true;
   newIdentityCustomPassword = '';
+  customPasswordFieldState = 'ok';
   newIdentityPhone = '';
   newIdentityPin = '';
   newIdentityDomainHints = [];
@@ -676,9 +937,11 @@ function closeIdentityEditor() {
   userAgentPresetMode = 'default';
   newIdentityDomainFieldOverrides = [];
   newDomainOverrideInput = {};
+  addingDomainOverride = false;
   newDomainHintInput = '';
   validationError = '';
   isDirty = false;
+  savedIdentityFormSignature = '';
 }
 
 function closeCreateDialog() {
@@ -689,6 +952,7 @@ function closeCreateDialog() {
   newIdentityUsername = '';
   newIdentityUseRandomPassword = true;
   newIdentityCustomPassword = '';
+  customPasswordFieldState = 'ok';
   newIdentityPhone = '';
   newIdentityPin = '';
   newIdentityDomainHints = [];
@@ -704,13 +968,15 @@ function closeCreateDialog() {
   userAgentPresetMode = 'default';
   newIdentityDomainFieldOverrides = [];
   newDomainOverrideInput = {};
+  addingDomainOverride = false;
   newDomainHintInput = '';
   validationError = '';
   isDirty = false;
+  createIdentityFormSignature = '';
 }
 
 function attemptCloseEditor() {
-  if (isDirty) {
+  if (isDirty || identityFormHasChanges) {
     showConfirm($t('identities.discardChangesPrompt'), () => {
       isDirty = false;
       closeIdentityEditor();
@@ -731,12 +997,16 @@ function onProfilePictureSelected(e: Event) {
     return;
   }
   // Cap ~500KB for storage safety
-  if (file.size > 500 * 1024) {
+  if (file.size > MAX_PROFILE_PICTURE_FILE_BYTES) {
     validationError = $t('identities.profilePictureTooLarge');
     return;
   }
   const reader = new FileReader();
   reader.onload = () => {
+    if (typeof reader.result === 'string' && isProfilePictureTooLarge(reader.result)) {
+      validationError = $t('identities.profilePictureTooLarge');
+      return;
+    }
     newIdentityProfilePicture = typeof reader.result === 'string' ? reader.result : null;
     validationError = '';
   };
@@ -770,6 +1040,26 @@ async function saveIdentityChanges() {
     const prevHistory = editingIdentity.updateHistory || [];
     const nextHistory = [...prevHistory, { at: now, summary: 'edit' }].slice(-20);
 
+    // Resolve the stored customPassword without ever re-encrypting ciphertext:
+    // a typed value is fresh plaintext (encrypt it); an untouched field keeps
+    // the original blob when undecryptable, and blocks save with an unlock
+    // prompt when the vault is locked (saving '' would wipe the password).
+    let customPasswordValue: string | undefined;
+    if (newIdentityUseRandomPassword) {
+      customPasswordValue = undefined;
+    } else if (newIdentityCustomPassword) {
+      customPasswordValue = await encryptOptionalPassword(
+        validateOptionalPassword(newIdentityCustomPassword)
+      );
+    } else if (customPasswordFieldState === 'locked') {
+      validationError = $t('contentAutofill.vaultLocked');
+      return;
+    } else if (customPasswordFieldState === 'undecryptable') {
+      customPasswordValue = editingIdentity.customPassword;
+    } else {
+      customPasswordValue = undefined;
+    }
+
     const updatedIdentity: Identity = {
       ...editingIdentity,
       name: trimmedName,
@@ -781,9 +1071,7 @@ async function saveIdentityChanges() {
         : '',
       username: newIdentityUsername.trim() || null,
       useRandomPassword: newIdentityUseRandomPassword,
-      customPassword: newIdentityUseRandomPassword
-        ? undefined
-        : await encryptOptionalPassword(validateOptionalPassword(newIdentityCustomPassword)),
+      customPassword: customPasswordValue,
       phone: validateOptionalPhone(newIdentityPhone),
       pin: validateOptionalPin(newIdentityPin),
       domainHints: newIdentityDomainHints.filter((h) => h.trim()),
@@ -815,14 +1103,18 @@ async function saveIdentityChanges() {
       updateHistory: nextHistory,
     };
 
-    await saveIdentity(browser, updatedIdentity, identitySetters);
+    const saved = await saveIdentity(browser, updatedIdentity, identitySetters);
+    if (!saved) {
+      validationError = $t('identities.saveFailed');
+      return;
+    }
     if (newIdentitySetAsDefault) {
       try {
         const list = identities.map((i) => ({
           ...i,
           isDefault: i.id === updatedIdentity.id,
         }));
-        await browser.storage.local.set({
+        await writeWithRetry({
           identities: list,
           selectedIdentityId: updatedIdentity.id,
         });
@@ -833,37 +1125,56 @@ async function saveIdentityChanges() {
     }
     closeIdentityEditor();
   } catch (error) {
-    validationError = getErrorMessage(error);
+    // A field-rule failure carries its own errors.* key; a storage/vault throw
+    // has no keyable message, so the dialog names the save failure instead.
+    validationError = localizedErrorMessageOrFallback(error, $t, 'identities.saveFailed');
   }
+}
+
+/** Number of saved logins that reference this identity (would orphan on delete). */
+function usedLoginCount(identityId: string): number {
+  return (savedLogins || []).filter((l: CredentialsHistoryItem) => l.identityId === identityId)
+    .length;
 }
 
 async function deleteIdentityHandler(identityId: string) {
-  showConfirm($t('identities.deleteConfirm'), () => {
-    void deleteIdentity(browser, identityId, identitySetters);
-  });
-}
-
-let suppressClickUntil = 0;
-
-function startHold(id: string) {
-  if (selectionMode || searchQuery) return;
-  holdTimers.set(
-    id,
-    setTimeout(() => {
-      selectionMode = true;
-      selectedIds = new Set([id]);
-      suppressClickUntil = Date.now() + 400;
-      holdTimers.delete(id);
-    }, 500)
+  const used = usedLoginCount(identityId);
+  showConfirm(
+    used > 0
+      ? $t('identities.deleteUsedConfirm', { values: { n: used } })
+      : $t('identities.deleteConfirm'),
+    () => {
+      void (async () => {
+        const deleted = await deleteIdentity(browser, identityId, identitySetters);
+        if (!deleted) toastStore.error($t('identities.deleteFailed'));
+      })();
+    },
+    { destructive: true, title: $t('identities.delete'), confirmLabel: $t('common.delete') }
   );
 }
 
+function startHold(id: string) {
+  if (selectionMode || searchQuery) return;
+  holdCtrl.start(id, () => {
+    selectionMode = true;
+    selectedIds = new Set([id]);
+  });
+}
+
 function cancelHold(id: string) {
-  const t = holdTimers.get(id);
-  if (t !== undefined) {
-    clearTimeout(t);
-    holdTimers.delete(id);
+  holdCtrl.cancel(id);
+}
+
+function handleIdentityContextMenu(e: MouseEvent, id: string) {
+  e.preventDefault();
+  e.stopPropagation();
+  cancelHold(id);
+  if (!selectionMode) {
+    selectionMode = true;
+    selectedIds = new Set([id]);
+    return;
   }
+  toggleSelect(id);
 }
 
 function toggleSelect(id: string) {
@@ -879,20 +1190,133 @@ function exitSelectionMode() {
   selectedIds = new Set();
 }
 
+// Escape tiers: both the multi-select and the editor are transient surfaces, so
+// Escape drops them instead of closing the editor *and* navigating the view
+// away (the editor's own element-level handler and this one share the key).
+$effect(() => {
+  if (!selectionMode || selectedIds.size === 0) return;
+  return registerEscapeTier('identities.selection', exitSelectionMode);
+});
+
+// Published to the SHELL's one strip (`ListSelectionBar`), which is why this view
+// renders no selection card of its own any more - the actions below are the same
+// functions its in-view buttons called.
+const selectionState = $derived.by<ListSelectionState>(() => ({
+  active: selectionMode && selectedIds.size > 0,
+  count: selectedIds.size,
+  actions: identitiesSelectionActions,
+  allMatched: filteredIdentities.length > 0 && selectedIds.size >= filteredIdentities.length,
+  matchingTotal: filteredIdentities.length,
+  universeCounted: true,
+}));
+
+/** Duplicate first, then the destructive action - the order the card used. */
+const identitiesSelectionActions: SelectionActionId[] = ['duplicate', 'delete'];
+
+const selectionApi: SelectionApi = {
+  cancel: () => exitSelectionMode(),
+  selectAll: () => selectAllVisibleIdentities(),
+  deselectAll: () => exitSelectionMode(),
+  run: (action) => {
+    switch (action) {
+      case 'duplicate':
+        return bulkDuplicateSelected();
+      case 'delete':
+        return deleteSelected();
+      default:
+        return;
+    }
+  },
+  // Keyboard: the cursor is DOM focus on the row (`data-selectable-row`).
+  moveFocus: (delta) => void moveRowCursor(identityListEl, delta),
+  hasFocusedRow: () => focusedRowId(identityListEl) !== null,
+  focusedIsSelected: () => {
+    const id = focusedRowId(identityListEl);
+    return id !== null && selectedIds.has(id);
+  },
+  setFocusedSelected: (selected) => {
+    const id = focusedRowId(identityListEl);
+    if (id === null || selected === selectedIds.has(id)) return;
+    if (selected) selectionMode = true;
+    toggleSelect(id);
+  },
+};
+
+$effect(() =>
+  publishSelectionSurface({ surface: 'identities', state: selectionState, api: selectionApi })
+);
+
+$effect(() => {
+  if (!editingIdentity && !showCreateDialog) return;
+  return registerEscapeTier('identities.editor', attemptCloseEditor);
+});
+
 async function deleteSelected() {
   const ids = [...selectedIds];
-  showConfirm($t('identities.deleteSelectedConfirm', { values: { n: ids.length } }), () => {
-    void (async () => {
-      for (const id of ids) {
-        await deleteIdentity(browser, id, identitySetters);
-      }
-      exitSelectionMode();
-    })();
-  });
+  const usedCount = ids.filter((id) => usedLoginCount(id) > 0).length;
+  showConfirm(
+    usedCount > 0
+      ? $t('identities.deleteSelectedUsedConfirm', { values: { n: usedCount } })
+      : $t('identities.deleteSelectedConfirm', { values: { n: ids.length } }),
+    () => {
+      void (async () => {
+        const deleted = await deleteIdentities(browser, ids, identitySetters);
+        if (!deleted) toastStore.error($t('identities.deleteFailed'));
+        exitSelectionMode();
+      })();
+    },
+    { destructive: true }
+  );
 }
 
 async function selectIdentityHandler(identityId: string) {
   await selectIdentity(browser, identityId, identitySetters);
+}
+
+/** Select every visible identity (selection mode; mirrors AddressesView). */
+function selectAllVisibleIdentities() {
+  const next = new Set<string>();
+  for (const identity of filteredIdentities) next.add(identity.id);
+  selectedIds = next;
+  if (next.size > 0) selectionMode = true;
+}
+
+/**
+ * Duplicate every selected identity with a fresh id and a "Copy of" name.
+ * Duplicates are never default and never auto-selected - the user just
+ * cloned a batch and can edit each copy afterwards.
+ */
+async function bulkDuplicateSelected() {
+  const ids = [...selectedIds];
+  if (ids.length === 0) return;
+  const byId = new Map(identities.map((i) => [i.id, i]));
+  const source = ids.map((id) => byId.get(id)).filter((i): i is Identity => !!i);
+  if (source.length === 0) return;
+  const existingNames = new Set(identities.map((i) => i.name.toLowerCase()));
+  const now = Date.now();
+  let failed = 0;
+  for (const [index, identity] of source.entries()) {
+    const copyOf = (n: string) => $t('common.copyOf', { values: { name: n } }) as string;
+    let name = copyOf(identity.name);
+    let suffix = 2;
+    while (existingNames.has(name.toLowerCase())) {
+      name = `${copyOf(identity.name)} ${suffix++}`;
+    }
+    existingNames.add(name.toLowerCase());
+    const copy: Identity = {
+      ...identity,
+      id: `identity_${now}_${index}`,
+      name,
+      isDefault: false,
+      createdAt: now,
+      updatedAt: now,
+      updateHistory: [...(identity.updateHistory ?? []), { at: now, summary: 'duplicate' }],
+    };
+    const savedCopy = await saveIdentity(browser, copy, identitySetters);
+    if (!savedCopy) failed += 1;
+  }
+  if (failed > 0) toastStore.error($t('identities.saveFailed'));
+  exitSelectionMode();
 }
 
 function openCreateDialog() {
@@ -905,8 +1329,10 @@ function openCreateDialog() {
   newIdentityUsername = '';
   newIdentityUseRandomPassword = true;
   newIdentityCustomPassword = '';
+  customPasswordFieldState = 'ok';
   newIdentityPhone = '';
   newIdentityPin = '';
+  newIdentityDomainHints = [];
   newIdentityPreferredEmail = PREFERRED_EMAIL_RANDOM_ACTIVE;
   newIdentityGender = '';
   newIdentityDob = '';
@@ -914,6 +1340,11 @@ function openCreateDialog() {
   newIdentityAddress = '';
   // Default fake avatar so profile-picture form fields can be filled immediately
   newIdentityProfilePicture = generateDefaultAvatarDataUrl(newIdentityName, 'I');
+  newIdentityUserAgent = null;
+  newIdentityDomainFieldOverrides = [];
+  newDomainOverrideInput = {};
+  addingDomainOverride = false;
+  newDomainHintInput = '';
   newIdentitySetAsDefault = false;
   // Local-only country (locale + timezone); sample city/ZIP for convenience
   const localCountry = detectCountryLocally() || suggest.country;
@@ -923,6 +1354,8 @@ function openCreateDialog() {
   dobHelperMode = 'date';
   dobRangeToYear = Math.max(1970, new Date().getFullYear() - 18);
   validationError = '';
+  createIdentityFormSignature = identityFormSignature();
+  isDirty = false;
   void loadIdentitiesData();
 }
 
@@ -1000,7 +1433,11 @@ async function createNewIdentity() {
       updateHistory: [{ at: now, summary: 'create' }],
     };
 
-    await saveIdentity(browser, newIdentity, identitySetters);
+    const created = await saveIdentity(browser, newIdentity, identitySetters);
+    if (!created) {
+      validationError = $t('identities.saveFailed');
+      return;
+    }
     // Only promote to default identity when user checked the box
     if (newIdentitySetAsDefault) {
       try {
@@ -1012,7 +1449,7 @@ async function createNewIdentity() {
         const idx = next.findIndex((i) => i.id === newIdentity.id);
         if (idx < 0) next.push({ ...newIdentity, isDefault: true });
         else next[idx] = { ...newIdentity, isDefault: true };
-        await browser.storage.local.set({
+        await writeWithRetry({
           identities: next.map((i) =>
             i.id === newIdentity.id ? { ...i, isDefault: true } : { ...i, isDefault: false }
           ),
@@ -1028,7 +1465,7 @@ async function createNewIdentity() {
     // Do not auto-select as the autofill default unless set as default
     closeCreateDialog();
   } catch (error) {
-    validationError = getErrorMessage(error);
+    validationError = localizedErrorMessageOrFallback(error, $t, 'identities.saveFailed');
   }
 }
 
@@ -1057,9 +1494,10 @@ loadIdentitiesData();
 </script>
 
 <div class="flex flex-col h-full relative min-h-0">
-  <!-- Mainview list only — editor never shares this column when layoutSplit -->
+  <!-- Mainview list only - editor never shares this column when layoutSplit -->
   <div
-    class="flex-1 overflow-y-auto min-h-0 min-w-0"
+    class="scroll-body flex-1 {identities.length > 0 || showIdentityFilters ? 'overflow-y-auto' : 'overflow-hidden'} min-h-0 min-w-0"
+    bind:this={identityListEl}
     onscroll={(e) => {
       const el = e.currentTarget as HTMLElement;
       const top = el.scrollTop;
@@ -1071,65 +1509,48 @@ loadIdentitiesData();
     }}
   >
     <!-- Search + filters -->
-      <div class="px-1 pt-3 pb-1 space-y-2">
-        <SelectionToolbar
-          visible={true}
-          itemCount={filteredIdentities?.length ?? identities?.length ?? 0}
-          selectedCount={selectedIds.size}
-          selectionActive={selectionMode}
-          onEnterSelection={() => {
-            selectionMode = true;
-          }}
-          onSelectAll={() => {
-            selectionMode = true;
-            const list = filteredIdentities?.length ? filteredIdentities : identities;
-            selectedIds = new Set((list || []).map((i: { id: string }) => i.id));
-          }}
-          onClear={() => {
-            selectedIds = new Set();
-          }}
-          onExit={() => {
-            selectionMode = false;
-            selectedIds = new Set();
-          }}
-        />
-        <div class="flex items-center gap-2">
-          <div class="relative flex-1 min-w-0">
-            <SearchBar
-              scope="identities"
-              bind:value={searchQuery}
-              placeholder={$t('identities.searchPlaceholder')}
-              animatedPlaceholders={[
-                $t('identities.searchPlaceholder'),
-                $t('identities.namePlaceholder'),
-                $t('identities.usernamePlaceholder'),
-              ]}
-              ariaLabel={$t('identities.searchPlaceholder')}
-              settingsStyle={true}
-              showSlashButton={true}
-              shortcuts={[
-                {
-                  prefix: 'country:',
-                  label: 'country:',
-                  description: $t('identities.filterCountry'),
-                },
-              ]}
+      <div class="pt-3 pb-1 space-y-2">
+        <SearchFilterHeader
+          scope="identities"
+          bind:value={searchQuery}
+          placeholder={$t('identities.searchPlaceholder')}
+          animatedPlaceholders={[
+            $t('searchPlaceholder.identities'),
+            $t('searchPlaceholder.names'),
+            $t('searchPlaceholder.countries'),
+            $t('searchPlaceholder.phoneNumbers'),
+          ]}
+          ariaLabel={$t('identities.searchPlaceholder')}
+          settingsStyle={true}
+          showSlashButton={false}
+          borderBottom={false}
+          paddingClass="p-0"
+        >
+          {#snippet filterControl()}
+            <button
+              type="button"
+              class="h-9 w-9 flex items-center justify-center rounded-full border border-md-outline-variant text-md-on-surface/60 hover:bg-md-surface-variant active:brightness-95 transition-colors"
+              aria-label={$t('identities.exportCsv')}
+              title={$t('identities.exportCsv')}
+              onclick={handleExportCSV}
             >
-              {#snippet filterControl()}
-                <button
-                  type="button"
-                  class="h-9 w-9 flex items-center justify-center rounded-xl border transition-colors {showIdentityFilters || hasActiveIdentityFilters ? 'border-md-primary bg-md-primary/10 text-md-primary' : 'border-md-outline-variant text-md-on-surface/60 hover:bg-md-surface-variant'}"
-                  aria-label={$t('identities.filtersToggle')}
-                  title={$t('identities.filtersToggle')}
-                  aria-pressed={showIdentityFilters}
-                  onclick={() => (showIdentityFilters = !showIdentityFilters)}
-                >
-                  <Icon name="filter" class="w-4 h-4" />
-                </button>
-              {/snippet}
-            </SearchBar>
-          </div>
-        </div>
+              <Icon name="download" class="w-4 h-4" />
+            </button>
+            <button
+              type="button"
+              id="button-identities-filter"
+              class="h-9 w-9 flex items-center justify-center rounded-full border border-md-outline-variant text-md-on-surface/60 transition-colors active:brightness-95 {controlSurface(
+                showIdentityFilters || hasActiveIdentityFilters
+              )}"
+              aria-label={$t('identities.filtersToggle')}
+              title={$t('identities.filtersToggle')}
+              aria-pressed={showIdentityFilters}
+              onclick={() => (showIdentityFilters = !showIdentityFilters)}
+            >
+              <Icon name="filter" class="w-4 h-4" />
+            </button>
+          {/snippet}
+        </SearchFilterHeader>
         {#if showIdentityFilters}
           <div class="rounded-xl border border-md-outline-variant/40 bg-md-surface-container/40 p-2.5 space-y-2">
             <div>
@@ -1197,29 +1618,59 @@ loadIdentitiesData();
       </div>
 
       <!-- Identity List -->
-      <div class="px-0 py-3 space-y-3">
-        {#if filteredIdentities.length === 0 && identities.length > 0}
-          <p class="text-center text-xs text-md-on-surface/45 py-8">{$t('identities.noFilterMatches')}</p>
+      <div class="border-t border-md-outline-variant/30 divide-y divide-md-outline-variant/50">
+        {#if identities.length === 0}
+          <EmptyState
+            icon="person"
+            title={$t('identities.noIdentities')}
+            description={$t('identities.noIdentitiesHint')}
+            actionLabel={$t('identities.create')}
+            onAction={openCreateDialog}
+            fillParent
+          />
+        {:else if filteredIdentities.length === 0 && identities.length > 0}
+          <EmptyState
+            icon="search"
+            title={$t('identities.noFilterMatches')}
+            compact
+          />
         {/if}
-        {#each filteredIdentities as identity}
+        {#each filteredIdentities as identity (identity.id)}
           {@const isChecked = selectedIds.has(identity.id)}
           {@const isDragging = draggedIdentityId === identity.id}
           {@const isDropTarget = dropTargetIdentityId === identity.id}
           {@const prefIssue = preferredEmailIssue(identity.preferredEmail)}
+          {@const usedCount = usedLoginCount(identity.id)}
+          {@const usedLabel = usedCount === 1
+            ? $t('identities.usedLoginCount', { values: { n: usedCount } })
+            : $t('identities.usedLoginCount_other', { values: { n: usedCount } })}
+          {@const identitySurface = rowSurfaceState({
+            selected: selectionMode && isChecked,
+            active: selectedIdentityId === identity.id && !selectionMode,
+          })}
+          {@const ink = (role: RowInkRole) => rowInk(role, identitySurface)}
           <div
-            class="density-row-pad relative bg-md-tertiary-container rounded-xl px-2 flex flex-col transition-all border {prefIssue ? 'border-md-error/40 bg-md-error/5' : selectedIdentityId === identity.id && !selectionMode ? 'border-md-primary/40 bg-md-primary/5' : 'border-transparent'} {selectionMode && isChecked ? 'ring-2 ring-md-secondary' : ''} {isDragging ? 'opacity-50' : ''} {isDropTarget ? 'ring-2 ring-md-primary drop-target-pulse' : ''}"
+            class="density-row relative min-h-[60px] px-2.5 py-2 flex flex-col justify-center transition-colors duration-150 {selectionMode && isChecked ? 'rounded-lg' : 'rounded-none'} {rowSurface({ selected: selectionMode && isChecked, active: selectedIdentityId === identity.id && !selectionMode })} {isDragging ? 'opacity-50' : ''} {isDropTarget ? 'ring-2 ring-inset ring-md-primary drop-target-pulse' : ''}"
             role="listitem"
+            data-selectable-row={identity.id}
+            tabindex="-1"
+            draggable={!reorderBlocked}
+            use:keyboardReorder={{ id: identity.id, ids: () => identities.map(i => i.id), disabled: reorderBlocked, hint: `${$t('identities.dragHandle')} · ${$t('keyboardShortcuts.fixedReorderRow')}`, moveBefore: async (sourceId, targetId) => {
+              await reorderIdentities(browser, identitySetters, sourceId, targetId);
+            } }}
+            ondragstart={(e) => handleIdentityDragStart(e, identity.id)}
             ondragover={(e) => handleIdentityDragOver(e, identity.id)}
             ondragleave={() => handleIdentityDragLeave(identity.id)}
+            oncontextmenu={(e) => handleIdentityContextMenu(e, identity.id)}
             ondrop={(e) => handleIdentityDrop(e, identity.id)}
             ondragend={handleIdentityDragEnd}
             aria-label={identity.name}
           >
-            <div class="flex items-center justify-between w-full">
+            <div class="flex items-center gap-2 w-full">
             <div
-              class="flex items-center gap-3 flex-1 min-w-0"
+              class="flex items-center gap-2 flex-1 min-w-0"
               onclick={() => {
-                if (Date.now() < suppressClickUntil) return;
+                if (holdCtrl.isSuppressingClick()) return;
                 if (selectionMode) { toggleSelect(identity.id); }
                 else { void openIdentityEditor(identity); }
               }}
@@ -1227,6 +1678,7 @@ loadIdentitiesData();
               onpointerup={() => cancelHold(identity.id)}
               onpointerleave={() => cancelHold(identity.id)}
               onkeydown={(e: KeyboardEvent) => {
+                if (e.target !== e.currentTarget) return;
                 if (e.key === 'Enter' || e.key === ' ') {
                   e.preventDefault();
                   if (selectionMode) toggleSelect(identity.id);
@@ -1234,43 +1686,104 @@ loadIdentitiesData();
                 }
               }}
               role="button"
+              data-row-primary
               tabindex="0"
             >
-            <div class="flex items-center gap-3">
-              <!-- Same avatar size always; selection swaps person → tick -->
-              <div
-                class="w-10 h-10 rounded-full flex items-center justify-center shrink-0 transition-colors {selectionMode && isChecked
-                  ? 'bg-md-secondary text-md-on-secondary'
-                  : selectionMode
-                    ? 'bg-md-primary/10 border-2 border-md-outline-variant'
-                    : prefIssue
-                      ? 'bg-md-error/15'
-                      : 'bg-md-primary/10'}"
+            <div class="flex items-center gap-2 flex-1 min-w-0 py-0.5">
+              <!-- Avatar - clickable to select (AddressesView-style 3D flip) -->
+              <button
+                type="button"
+                class="relative {AVATAR_BOX.row} rounded-full shrink-0 [perspective:600px] bg-transparent border-0 p-0 cursor-pointer focus:outline-none focus:ring-2 focus:ring-md-primary/30"
+                aria-label={$t('selection.select')}
+                aria-pressed={selectionMode && isChecked}
+                onclick={(e) => {
+                  e.stopPropagation();
+                  if (!selectionMode) {
+                    selectionMode = true;
+                    selectedIds = new Set([identity.id]);
+                  } else {
+                    toggleSelect(identity.id);
+                  }
+                }}
               >
-                {#if selectionMode && isChecked}
-                  <Icon name="check" class="w-5 h-5 text-md-on-secondary" />
-                {:else if prefIssue}
-                  <Icon name="alertTriangle" class="w-5 h-5 text-md-error" />
-                {:else}
-                  <Icon name="user" class="w-5 h-5 text-md-primary" />
+                <div
+                  class="flip-card w-full h-full relative transition-transform duration-300 [transform-style:preserve-3d] {selectionMode && isChecked
+                    ? '[transform:rotateY(180deg)]'
+                    : ''}"
+                >
+                  <!-- Front Face: identity avatar -->
+                  <div
+                    class="absolute inset-0 [backface-visibility:hidden] rounded-full flex items-center justify-center overflow-hidden {prefIssue
+                        ? 'bg-md-error/15'
+                        : 'bg-md-primary/10'}"
+                  >
+                    {#if prefIssue}
+                      <Icon name="warning" class="{AVATAR_INK.row} text-md-error" />
+                    {:else if identity.profilePicture}
+                      <img
+                        src={identity.profilePicture}
+                        alt={identity.name}
+                        class="w-full h-full rounded-full object-cover pointer-events-none"
+                      />
+                    {:else}
+                      <Icon name="person" class="{AVATAR_INK.row} text-md-primary" />
+                    {/if}
+                  </div>
+                  <!-- Back Face: tick checkmark -->
+                  <div
+                    class="absolute inset-0 [backface-visibility:hidden] [transform:rotateY(180deg)] rounded-full bg-md-secondary text-md-on-secondary flex items-center justify-center"
+                  >
+                    <Icon name="check" class="{AVATAR_INK.row} text-md-on-secondary" />
+                  </div>
+                </div>
+                {#if selectedIdentityId === identity.id && !selectionMode}
+                  <span class="absolute -bottom-0.5 -right-0.5 flex pointer-events-none" aria-hidden="true">
+                    <Badge
+                      variant="success"
+                      size="sm"
+                      class="{AVATAR_BOX.xs} p-0! justify-center border-0! bg-md-success! text-md-on-success!"
+                    >
+                      <Icon name="check" class={AVATAR_INK.sm} />
+                    </Badge>
+                  </span>
                 {/if}
-              </div>
-              <div class="min-w-0">
-                <div class="font-medium text-sm truncate">{identity.name}</div>
+              </button>
+              <div class="min-w-0 flex-1">
+                <div class="font-bold text-sm leading-tight mb-0.5 truncate {ink('primary')}">{identity.name}</div>
                 {#if isRandomActivePreferredEmail(identity.preferredEmail)}
-                  <div class="text-xs text-md-on-surface/45 truncate">{$t('identities.useRandomActiveMailbox')}</div>
+                  <div class="text-xs {ink('meta')} leading-tight truncate">{$t('identities.useRandomActiveMailbox')}</div>
                 {:else if identity.preferredEmail}
-                  <div class="text-xs truncate {prefIssue ? 'text-md-error' : 'text-md-on-surface/45'}">{identity.preferredEmail}</div>
+                  <div class="text-xs leading-tight truncate {prefIssue ? 'text-md-error' : ink('meta')}">{identity.preferredEmail}</div>
                 {:else}
-                  <div class="text-xs text-md-on-surface/45 truncate">{$t('identities.usesActiveMailbox')}</div>
+                  <div class="text-xs {ink('meta')} leading-tight truncate">{$t('identities.usesActiveMailbox')}</div>
+                {/if}
+                {#if selectedIdentityId === identity.id && !selectionMode}
+                  <span class="sr-only">{$t('identities.defaultBadge')}</span>
                 {/if}
               </div>
             </div>
             </div>
-            <div class="flex items-center gap-1.5">
+            <div class="flex items-center shrink-0 gap-1">
               {#if !selectionMode}
                 <button
-                  class="w-7 h-7 flex items-center justify-center rounded-lg bg-transparent hover:bg-md-secondary-container text-md-on-surface/70 transition-colors"
+                  type="button"
+                  class="rounded-full border-0 bg-transparent p-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-md-primary/30"
+                  title={usedLabel}
+                  aria-label={`${$t('savedLoginInfo.filterByIdentityName', { values: { name: identity.name } })}. ${usedLabel}`}
+                  disabled={!onOpenSavedLogins}
+                  onclick={(e) => {
+                    e.stopPropagation();
+                    onOpenSavedLogins?.(identity.id);
+                  }}
+                >
+                  <Badge variant="neutral" size="sm" class="w-7 h-7 p-0! justify-center tabular-nums {controlSurface(false)}">
+                    <span aria-hidden="true">{loginCountFormatter.format(usedCount)}</span>
+                    <span class="sr-only">{usedLabel}</span>
+                  </Badge>
+                </button>
+                <button
+                  type="button"
+                  class="flex items-center justify-center p-0.5 rounded-full bg-transparent border-0 {ink('icon')} hover:bg-md-surface-variant/40 active:bg-md-surface-variant/60 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-md-primary/30"
                   onclick={(e) => {
                     e.stopPropagation();
                     void openIdentityEditor(identity);
@@ -1278,10 +1791,11 @@ loadIdentitiesData();
                   aria-label={$t('identities.edit')}
                   title={$t('identities.edit')}
                 >
-                  <Icon name="edit" class="w-4 h-4" />
+                  <Icon name="edit" class="w-5 h-5" />
                 </button>
                 <button
-                  class="w-7 h-7 flex items-center justify-center rounded-lg bg-transparent hover:bg-md-secondary-container text-md-error transition-colors"
+                  type="button"
+                  class="flex items-center justify-center p-0.5 rounded-full bg-transparent border-0 text-md-error hover:bg-md-surface-variant/40 active:bg-md-surface-variant/60 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-md-primary/30"
                   onclick={(e) => {
                     e.stopPropagation();
                     deleteIdentityHandler(identity.id);
@@ -1289,33 +1803,10 @@ loadIdentitiesData();
                   aria-label={$t('identities.delete')}
                   title={$t('identities.delete')}
                 >
-                  <Icon name="trash" class="w-4 h-4" />
+                  <Icon name="delete" class="w-5 h-5" />
                 </button>
               {/if}
             </div>
-            {#if !selectionMode && !reorderBlocked}
-              <button
-                type="button"
-                class="shrink-0 w-7 h-8 me-1 flex items-center justify-center rounded-lg text-md-on-surface/35 hover:text-md-on-surface/70 hover:bg-md-surface-variant/50 cursor-grab active:cursor-grabbing touch-none"
-                draggable="true"
-                aria-label={$t('identities.dragHandle')}
-                title={$t('identities.dragHandle')}
-                ondragstart={(e) => handleIdentityDragStart(e, identity.id)}
-                onclick={(e) => e.stopPropagation()}
-              >
-                <Icon name="grip" class="w-4 h-4" />
-              </button>
-            {/if}
-            <!-- Notch-style "Default" like AccountSelector Live / expires label -->
-            {#if selectedIdentityId === identity.id && !selectionMode}
-              <span
-                class="notch absolute z-[2] pointer-events-none whitespace-nowrap bg-md-tertiary-container px-1.5 text-xs font-semibold leading-none text-md-primary"
-                style="top: 0; left: 14px; transform: translateY(-50%);"
-              >
-                <span class="inline-block w-1.5 h-1.5 rounded-full bg-md-primary me-1 shadow-[0_0_0_3px_rgba(76,102,43,0.15)]"></span>
-                {$t('identities.defaultBadge')}
-              </span>
-            {/if}
             </div>
             {#if prefIssue && !selectionMode}
               <div class="px-1 pb-2 pt-0.5 w-full">
@@ -1330,29 +1821,29 @@ loadIdentitiesData();
                     {$t('identities.preferredEmailMissing')}
                   {/if}
                 </p>
-                <p class="text-label-sm text-md-on-surface/50 mt-0.5 leading-snug">
+                <p class="ui-support text-md-on-surface-variant mt-0.5">
                   {$t('identities.preferredEmailFixHint')}
                 </p>
-                <div class="flex flex-wrap gap-1.5 mt-1.5">
+                <div class="flex flex-nowrap gap-3 mt-1.5" use:responsiveButtonLayout data-action-tier="S">
                   <button
                     type="button"
-                    class="text-label-sm font-semibold px-2 py-0.5 rounded-lg bg-md-primary/15 text-md-primary hover:bg-md-primary/25"
+                    class="h-10 px-4 rounded-lg bg-md-primary/15 text-md-primary hover:bg-md-primary/25 active:bg-md-primary/45"
                     onclick={(e) => {
                       e.stopPropagation();
                       void openIdentityEditor(identity);
                     }}
                   >
-                    {$t('identities.editPreferredEmail')}
+                    <span class="btn-label">{$t('identities.editPreferredEmail')}</span>
                   </button>
                   <button
                     type="button"
-                    class="text-label-sm font-semibold px-2 py-0.5 rounded-lg bg-md-surface-variant text-md-on-surface/70 hover:bg-md-surface-variant/80"
+                    class="h-10 px-4 rounded-lg bg-md-surface-variant text-md-on-surface/70 hover:bg-md-surface-variant/80 active:bg-md-surface-variant/100"
                     onclick={(e) => {
                       e.stopPropagation();
                       openCreateDialog();
                     }}
                   >
-                    {$t('identities.createNewInstead')}
+                    <span class="btn-label">{$t('identities.createNewInstead')}</span>
                   </button>
                 </div>
               </div>
@@ -1363,199 +1854,112 @@ loadIdentitiesData();
       <!-- Dynamic End-of-List Spacer: allows content to flow behind floating nav & strips while ensuring the final item can scroll cleanly above controls -->
       <div
         class="w-full shrink-0 transition-[height] duration-200 ease-in-out pointer-events-none"
-        style="height: calc(var(--bottom-safe-area, 0px) + {identityStripHeightPx}px + 12px);"
+        style="height: calc(var(--bottom-safe-area, 0px) + var(--selection-bar-offset, 0px) + {selectionState.active ? 0 : identityStripHeightPx}px + 12px);"
         aria-hidden="true"
       ></div>
   </div>
 
   <!-- Create identity is triggered from footer contextual FAB -->
 
-  <!-- Bottom strip: selection actions OR default-identity picker (same placement as InboxView) -->
-  <div bind:this={identityStripEl} class="absolute inset-x-0 z-10 flex justify-center transition-all duration-200" style="bottom: calc(var(--bottom-safe-area, 0px) + 4px);">
-    {#if selectionMode}
-      <div
-        class="selection-slide-up h-[40px] w-[350px] flex items-center box-border px-2.5 bg-md-secondary-container rounded-xl gap-1"
-        role="toolbar"
-        aria-label={$t('mailManagement.selectedCount', { values: { n: selectedIds.size } })}
+  <!-- The selection actions use the shell's shared strip. Hide the default-identity
+       picker while that strip is active so the two controls do not compete. -->
+  {#if !selectionState.active}
+  <div bind:this={identityStripEl} class="absolute inset-x-0 z-10 flex justify-center transition-all duration-200" style="bottom: calc(var(--bottom-safe-area, 0px) + var(--selection-bar-offset, 0px) + 4px);">
+    <!-- MD3 surface bar. No MD3 component is a "floating strip", so this is the
+         spec's plain elevated surface: 48dp tall (the MD3 minimum touch
+         target), large (16dp) shape, surface-container, elevation level 2 -
+         the same level the MD3 menu it opens uses. The control inside is an
+         MD3 Small menu button, inset 4dp so the radii stay concentric
+         (16 - 4 = 12dp, the MD3 medium shape). -->
+    <div class="h-12 min-w-0 max-w-full flex items-center box-border p-1 bg-md-surface-container {ELEVATION.level2} rounded-xl" style:width={NAV_FLOAT_CONTENT_WIDTH_CSS}>
+      <Dropdown
+        class="flex-1 min-w-0"
+        size="button"
+        variant="elevated"
+        placeholder={$t('identities.select')}
+        value={selectedIdentityId ?? ''}
+        disabled={identities.length === 0}
+        options={identities.map((identity) => ({ value: identity.id, label: identity.name }))}
+        onchange={(value) => {
+          const id = String(value);
+          selectedIdentityId = id;
+          selectIdentity(browser, id, identitySetters);
+        }}
       >
-        <button
-          type="button"
-          class="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-md-surface-variant/60 flex-shrink-0 transition-colors"
-          aria-label={$t('common.close')}
-          onclick={(e) => { e.stopPropagation(); exitSelectionMode(); }}
-        >
-          <Icon name="x" class="w-3.5 h-3.5 text-md-on-surface/60" />
-        </button>
-        <span class="text-label-sm font-semibold text-md-on-surface/70 flex-shrink-0 tabular-nums">
-          {$t('mailManagement.selectedCount', { values: { n: selectedIds.size } })}
-        </span>
-        <div class="flex-1 min-w-0"></div>
-        <button
-          type="button"
-          class="h-7 px-2.5 rounded-lg text-label-sm font-semibold text-md-error hover:bg-md-error/10 flex items-center gap-1 flex-shrink-0 transition-colors disabled:opacity-40"
-          disabled={selectedIds.size === 0}
-          onclick={(e) => { e.stopPropagation(); void deleteSelected(); }}
-        >
-          <Icon name="trash" class="w-3.5 h-3.5" />
-          {$t('common.delete')} ({selectedIds.size})
-        </button>
-      </div>
-    {:else}
-      <div class="h-[40px] w-[350px] flex items-center box-border px-3 bg-md-primary-container rounded-xl">
-        <div class="flex items-center gap-2 w-full">
-          <div class="relative flex-1 min-w-0">
-            <div
-              class="flex items-center gap-1 bg-md-secondary-container/70 rounded-full px-2 py-1 cursor-pointer relative"
-              role="button"
-              tabindex="0"
-              onclick={() => showIdentityDropdown = !showIdentityDropdown}
-              onkeydown={(e) => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                  e.preventDefault();
-                  showIdentityDropdown = !showIdentityDropdown;
-                }
-              }}
-            >
-              <Icon name="user" class="w-3 h-3 text-md-secondary flex-shrink-0" />
-              <div class="flex-1 min-w-0 text-label-sm font-medium text-md-on-surface pe-2 truncate">
-                {identities.find(i => i.id === selectedIdentityId)?.name || $t('identities.select')}
-              </div>
-              <Icon name="chevronDown" class="w-2.5 h-2.5 text-md-on-surface/40 flex-shrink-0 transition-transform {showIdentityDropdown ? 'rotate-180' : ''}" />
-
-              {#if showIdentityDropdown}
-                <div class="absolute bottom-full inset-x-0 mb-1 bg-md-primary-container border border-md-secondary-container rounded-xl shadow-lg z-50 max-h-48 overflow-y-auto">
-                  {#each identities as identity}
-                    <button
-                      class="w-full text-start px-3 py-2 text-label-sm font-medium text-md-on-surface hover:bg-md-secondary-container transition-colors first:rounded-t-xl last:rounded-b-xl"
-                      onclick={(e) => {
-                        e.stopPropagation();
-                        selectedIdentityId = identity.id;
-                        selectIdentity(browser, identity.id, identitySetters);
-                        showIdentityDropdown = false;
-                      }}
-                    >
-                      {identity.name}
-                    </button>
-                  {/each}
-                </div>
-              {/if}
-            </div>
-          </div>
-        </div>
-      </div>
-    {/if}
-  </div>
-
-  {#if showCreateDialog}
-    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-    <div
-      use:portalDialogAction
-      data-portal-layer="dialog"
-      class="identity-overlay fixed inset-0 z-[10000] flex items-stretch justify-stretch"
-      role="presentation"
-      onclick={(e) => {
-        if (e.target === e.currentTarget) closeCreateDialog();
-      }}
-      onkeydown={(e) => { if (e.key === 'Escape') closeCreateDialog(); }}
-    >
-      <button
-        type="button"
-        class="absolute inset-0 z-0 cursor-default border-0 bg-md-scrim/50 backdrop-blur-sm"
-        aria-label={$t('common.close')}
-        onclick={closeCreateDialog}
-      ></button>
-      <div class="relative z-10 flex flex-col w-full h-full min-h-0 p-[25px]">
-      <div class="flex justify-end shrink-0 mb-2">
-        <button
-          type="button"
-          class="w-9 h-9 rounded-full bg-md-surface hover:bg-md-surface-variant flex items-center justify-center shadow-md transition-colors border border-md-outline-variant/30"
-          onclick={closeCreateDialog}
-          aria-label={$t('common.close')}
-          title={$t('common.close')}
-        >
-          <Icon name="x" class="w-4 h-4 text-md-on-surface/70" />
-        </button>
-      </div>
-      <form
-        class="dialog-enter bg-md-surface rounded-2xl w-full flex-1 min-h-0 flex flex-col overflow-hidden shadow-2xl border border-md-outline-variant/30"
-        onsubmit={(e) => { e.preventDefault(); void createNewIdentity(); }}
-      >
-        <div class="shrink-0 px-4 pt-4 pb-2">
-          <h3 class="font-semibold text-base">{$t('identities.createNew')}</h3>
-        </div>
-        <div class="flex-1 min-h-0 overflow-y-auto px-4 pb-4">
-          <div class="space-y-3">
-            <div>
-              <label for="create-name" class="text-xs text-md-on-surface/50 mb-1 block">{$t('identities.name')}</label>
-              <InputField id="create-name" placeholder={$t('identities.namePlaceholder')} bind:value={newIdentityName} />
-            </div>
-            <div>
-              <label for="create-username" class="text-xs text-md-on-surface/50 mb-1 block">{$t('identities.username')}</label>
-              <InputField id="create-username" placeholder={$t('identities.usernamePlaceholder')} bind:value={newIdentityUsername} />
-            </div>
-          </div>
-        </div>
-        <div class="shrink-0 p-4 border-t border-md-outline-variant/30 flex justify-end gap-2">
-          <button type="button" class="px-4 py-2 rounded-lg text-sm font-semibold text-md-on-surface/70 hover:bg-md-surface-variant" onclick={closeCreateDialog}>{$t('common.cancel')}</button>
-          <button type="submit" class="px-4 py-2 rounded-lg text-sm font-semibold bg-md-primary text-md-on-primary hover:bg-md-primary/90">{$t('common.create')}</button>
-        </div>
-      </form>
-      </div>
+        {#snippet leading()}
+          <!-- MD3 avatar: 24dp circle on the secondary-container role. -->
+          <span
+            class="flex items-center justify-center w-6 h-6 rounded-full bg-md-secondary-container text-md-on-secondary-container shrink-0"
+            aria-hidden="true"
+          >
+            <Icon name="person" class="w-4 h-4" />
+          </span>
+        {/snippet}
+      </Dropdown>
     </div>
+  </div>
   {/if}
 
   <!-- Edit identity: full dialog, or mounted into AppLayout splitview host -->
   {#if editingIdentity}
-    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
     <div
-      use:portalDialogAction
+      use:portalIfNotSplit={useSplitEditor}
+      use:identityEditorFocus={useSplitEditor}
       data-portal-layer={useSplitEditor ? undefined : 'dialog'}
       class={useSplitEditor
-        ? 'identity-overlay absolute inset-0 z-[50] flex flex-col bg-md-surface min-w-0 min-h-0'
-        : 'identity-overlay fixed inset-0 z-[10000] flex items-stretch justify-stretch'}
-      role="presentation"
+        ? `identity-overlay absolute inset-0 ${PORTAL_Z_CLASS.splitOverlay} flex flex-col bg-md-surface min-w-0 min-h-0`
+        : `identity-overlay fixed inset-0 ${PORTAL_Z_CLASS.dialog} flex items-stretch justify-stretch`}
+      role={useSplitEditor ? 'presentation' : 'dialog'}
+      aria-modal={useSplitEditor ? undefined : 'true'}
+      aria-labelledby="edit-identity-title"
       onclick={(e) => {
         if (!useSplitEditor && e.target === e.currentTarget) attemptCloseEditor();
       }}
-      onkeydown={(e) => { if (e.key === 'Escape') attemptCloseEditor(); }}
+      onkeydown={onEditorKeydown}
     >
       {#if !useSplitEditor}
         <button
           type="button"
-          class="absolute inset-0 z-0 cursor-default border-0 bg-md-scrim/50 backdrop-blur-sm"
+          tabindex="-1"
+          class="absolute inset-0 z-0 cursor-default border-0 bg-md-scrim-modal backdrop-blur-sm"
           aria-label={$t('common.close')}
           onclick={attemptCloseEditor}
         ></button>
       {/if}
       <div
-        class="relative z-10 flex flex-col w-full h-full min-h-0 {useSplitEditor ? 'p-2' : ''}"
-        style={useSplitEditor ? undefined : 'padding: 25px;'}
+        class="relative z-10 flex flex-col w-full h-full min-h-0 {useSplitEditor ? 'p-2' : 'dialog-viewport-inset'}"
+        style={useSplitEditor ? undefined : 'padding-block: 25px;'}
       >
       <div class="flex justify-end shrink-0 mb-2">
         <button
           type="button"
-          class="w-9 h-9 rounded-full bg-md-surface hover:bg-md-surface-variant flex items-center justify-center shadow-md transition-colors border border-md-outline-variant/30"
+          class="w-9 h-9 rounded-full bg-md-surface hover:bg-md-surface-variant active:bg-md-surface-variant/80 flex items-center justify-center {ELEVATION.level2} transition-colors border border-md-outline-variant/30"
           onclick={attemptCloseEditor}
           aria-label={$t('common.close')}
           title={$t('common.close')}
         >
-          <Icon name="x" class="w-4 h-4 text-md-on-surface/70" />
+          <Icon name="close" class="w-4 h-4 text-md-on-surface/70" />
         </button>
       </div>
       <form
-        class="dialog-enter bg-md-surface rounded-2xl w-full flex-1 min-h-0 flex flex-col overflow-hidden {useSplitEditor
-          ? 'border border-md-outline-variant/30 shadow-sm'
-          : 'shadow-2xl border border-md-outline-variant/30'}"
+        class="dialog-surface scroll-frame dialog-enter bg-md-surface rounded-2xl w-full flex-1 min-h-0 flex flex-col overflow-hidden {useSplitEditor
+          ? 'border border-md-outline-variant/30 {ELEVATION.level1}'
+          : '{ELEVATION.level3} border border-md-outline-variant/30'}"
         onsubmit={(e) => { e.preventDefault(); void saveIdentityChanges(); }}
         oninput={() => { isDirty = true; }}
         onchange={() => { isDirty = true; }}
-        aria-labelledby="edit-identity-title"
       >
-        <div class="shrink-0 px-4 pt-4 pb-2">
-          <h3 id="edit-identity-title" class="font-semibold text-base">{$t('identities.edit')}</h3>
+        <div class="dialog-inset dialog-editor-header scroll-edge shrink-0 flex items-center gap-3 border-b border-md-outline-variant/15">
+          <div class="w-9 h-9 rounded-xl bg-md-primary/10 flex items-center justify-center shrink-0">
+            <Icon name="person" class="w-6 h-6 text-md-primary" />
+          </div>
+          <div class="min-w-0 flex-1">
+            <h2 id="edit-identity-title" class="dialog-heading break-words">{$t('identities.edit')}</h2>
+          </div>
         </div>
-        <div class="flex-1 min-h-0 overflow-y-auto px-4 pb-2">
-        <div class="mb-3 space-y-0.5 text-label-sm text-md-on-surface/50">
+        <p class="dialog-description dialog-inset scroll-edge shrink-0 py-2 break-words">{$t('identities.editSubtitle')}</p>
+        <div class="dialog-inset scroll-body scroll-body-framed flex-1 min-h-0 overflow-y-auto overflow-x-hidden pb-2">
+        <div class="mb-3 space-y-0.5 text-xs text-md-on-surface/60">
           <p>{$t('identities.createdAt', { values: { time: formatIdentityTime(editingIdentity.createdAt) } })}</p>
           {#if editingIdentity.updatedAt}
             <p>{$t('identities.lastUpdated', { values: { time: formatIdentityTime(editingIdentity.updatedAt) } })}</p>
@@ -1572,25 +1976,37 @@ loadIdentitiesData();
           <p class="mb-3 text-xs text-md-on-surface/40">{$t('identities.noUpdateHistory')}</p>
         {/if}
         <div class="space-y-3">
+          <div class="flex items-center gap-2 mt-1">
+            <div class="w-1 h-3.5 rounded-full bg-md-primary"></div>
+            <span class="text-xs font-semibold uppercase tracking-wide text-md-on-surface/45">{$t('identities.sectionBasics')}</span>
+            <div class="h-px flex-1 bg-md-outline-variant/25"></div>
+          </div>
           <div>
-            <label for="edit-identity-name" class="text-xs text-md-on-surface/50 mb-1 block">{$t('identities.name')}</label>
+            <label for="edit-identity-name" class="text-sm text-md-on-surface-variant mb-1 block">{$t('identities.name')}</label>
             <InputField id="edit-identity-name" placeholder={$t('identities.namePlaceholder')} bind:value={newIdentityName} />
           </div>
-          <div>
-            <label for="edit-first-names" class="text-xs text-md-on-surface/50 mb-1 block">{$t('identities.firstNames')}</label>
-            <InputField id="edit-first-names" bind:value={newIdentityFirstNames} />
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label for="edit-first-names" class="text-sm text-md-on-surface-variant mb-1 block">{$t('identities.firstNames')}</label>
+              <InputField id="edit-first-names" bind:value={newIdentityFirstNames} />
+            </div>
+            <div>
+              <label for="edit-last-names" class="text-sm text-md-on-surface-variant mb-1 block">{$t('identities.lastNames')}</label>
+              <InputField id="edit-last-names" bind:value={newIdentityLastNames} />
+            </div>
           </div>
           <div>
-            <label for="edit-last-names" class="text-xs text-md-on-surface/50 mb-1 block">{$t('identities.lastNames')}</label>
-            <InputField id="edit-last-names" bind:value={newIdentityLastNames} />
-          </div>
-          <div>
-            <label for="edit-username" class="text-xs text-md-on-surface/50 mb-1 block">{$t('identities.username')}</label>
+            <label for="edit-username" class="text-sm text-md-on-surface-variant mb-1 block">{$t('identities.username')}</label>
             <p class="text-xs text-md-on-surface/40 mb-1">{$t('identities.usernameHint')}</p>
             <InputField id="edit-username" placeholder={$t('identities.usernamePlaceholder')} bind:value={newIdentityUsername} />
           </div>
+          <div class="flex items-center gap-2 mt-5">
+            <div class="w-1 h-3.5 rounded-full bg-md-primary"></div>
+            <span class="text-xs font-semibold uppercase tracking-wide text-md-on-surface/45">{$t('identities.sectionLocation')}</span>
+            <div class="h-px flex-1 bg-md-outline-variant/25"></div>
+          </div>
           <div>
-            <label for="edit-country-ov" class="text-xs text-md-on-surface/50 mb-1 block">{$t('identities.country')}</label>
+            <label for="edit-country-ov" class="text-sm text-md-on-surface-variant mb-1 block">{$t('identities.country')}</label>
             <Dropdown
               id="edit-country-ov"
               variant="outlined"
@@ -1604,7 +2020,7 @@ loadIdentitiesData();
             />
           </div>
           <div>
-            <label for="edit-gender-ov" class="text-xs text-md-on-surface/50 mb-1 block">{$t('identities.gender')}</label>
+            <label for="edit-gender-ov" class="text-sm text-md-on-surface-variant mb-1 block">{$t('identities.gender')}</label>
             <Dropdown
               id="edit-gender-ov"
               variant="outlined"
@@ -1621,36 +2037,43 @@ loadIdentitiesData();
             />
           </div>
           <div>
-            <label for="edit-dob-ov" class="text-xs text-md-on-surface/50 mb-1 block">{$t('identities.dateOfBirth')}</label>
+            <label for="edit-dob-ov" class="text-sm text-md-on-surface-variant mb-1 block">{$t('identities.dateOfBirth')}</label>
             <InputField id="edit-dob-ov" type="date" bind:value={newIdentityDob} />
           </div>
-          <div>
-            <label for="edit-city-ov" class="text-xs text-md-on-surface/50 mb-1 block">{$t('identities.city')}</label>
-            <InputField id="edit-city-ov" bind:value={newIdentityCity} />
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label for="edit-city-ov" class="text-sm text-md-on-surface-variant mb-1 block">{$t('identities.city')}</label>
+              <InputField id="edit-city-ov" bind:value={newIdentityCity} />
+            </div>
+            <div>
+              <label for="edit-state-ov" class="text-sm text-md-on-surface-variant mb-1 block">{$t('identities.state')}</label>
+              <InputField id="edit-state-ov" placeholder={$t('identities.optional')} bind:value={newIdentityState} />
+            </div>
           </div>
           <div>
-            <label for="edit-state-ov" class="text-xs text-md-on-surface/50 mb-1 block">{$t('identities.state')}</label>
-            <InputField id="edit-state-ov" placeholder={$t('identities.optional')} bind:value={newIdentityState} />
-          </div>
-          <div>
-            <label for="edit-address-ov" class="text-xs text-md-on-surface/50 mb-1 block">{$t('identities.address')}</label>
+            <label for="edit-address-ov" class="text-sm text-md-on-surface-variant mb-1 block">{$t('identities.address')}</label>
             <InputField id="edit-address-ov" placeholder={$t('identities.optional')} bind:value={newIdentityAddress} />
           </div>
+          <div class="flex items-center gap-2 mt-5">
+            <div class="w-1 h-3.5 rounded-full bg-md-primary"></div>
+            <span class="text-xs font-semibold uppercase tracking-wide text-md-on-surface/45">{$t('identities.sectionProfile')}</span>
+            <div class="h-px flex-1 bg-md-outline-variant/25"></div>
+          </div>
           <div>
-            <label for="edit-avatar-ov" class="text-xs text-md-on-surface/50 mb-1 block">{$t('identities.profilePicture')}</label>
+            <label for="edit-avatar-ov" class="text-sm text-md-on-surface-variant mb-1 block">{$t('identities.profilePicture')}</label>
             <p class="text-xs text-md-on-surface/40 mb-1">{$t('identities.profilePictureHint')}</p>
-            <div class="flex items-center gap-3">
+            <div class="flex flex-wrap items-center gap-3 min-w-0 max-w-full overflow-hidden">
               {#if newIdentityProfilePicture}
-                <img src={newIdentityProfilePicture} alt="" class="w-12 h-12 rounded-full object-cover border border-md-outline-variant" />
+                <img src={newIdentityProfilePicture} alt={$t('identities.profilePicture')} class="w-12 h-12 rounded-full object-cover border border-md-outline-variant shrink-0" />
               {/if}
-              <input id="edit-avatar-ov" type="file" accept="image/*" class="text-xs max-w-full" onchange={onProfilePictureSelected} />
+              <input id="edit-avatar-ov" type="file" accept="image/*" class="text-xs min-w-0 max-w-full flex-1 basis-0" onchange={onProfilePictureSelected} />
               {#if newIdentityProfilePicture}
-                <button type="button" class="text-xs text-md-error hover:underline" onclick={clearProfilePicture}>{$t('identities.clearProfilePicture')}</button>
+                <button type="button" class="text-xs text-md-error hover:underline whitespace-nowrap shrink-0" onclick={clearProfilePicture}>{$t('identities.clearProfilePicture')}</button>
               {/if}
             </div>
           </div>
           <div>
-            <label for="edit-ua-select" class="text-xs text-md-on-surface/50 mb-1 block">{$t('identities.userAgentAnonymity')}</label>
+            <label for="edit-ua-select" class="text-sm text-md-on-surface-variant mb-1 block">{$t('identities.userAgentAnonymity')}</label>
             <div class="flex gap-2 mb-2">
               <Dropdown
                 id="edit-ua-select"
@@ -1669,7 +2092,7 @@ loadIdentitiesData();
                   { value: 'custom', label: $t('identities.uaPresetCustom') },
                 ]}
               />
-              <button type="button" class="px-3 py-2 rounded-lg border border-md-outline text-xs text-md-primary hover:bg-md-primary/10 font-semibold" onclick={generateRandomUA}>
+              <button type="button" class="px-3 py-2 rounded-lg border border-md-outline text-xs text-md-primary hover:bg-md-primary/10 active:bg-md-primary/30 font-semibold" onclick={generateRandomUA}>
                 {$t('identities.generateRandomUa')}
               </button>
             </div>
@@ -1699,7 +2122,7 @@ loadIdentitiesData();
                   />
                   <button
                     type="button"
-                    class="w-7 h-7 rounded-lg bg-md-error/10 text-md-error hover:bg-md-error/20 flex items-center justify-center transition-colors"
+                    class="w-7 h-7 rounded-full bg-md-error/10 text-md-error hover:bg-md-error/20 active:bg-md-error/40 flex items-center justify-center transition-colors"
                     onclick={(e) => {
                       e.stopPropagation();
                       newIdentityDomainFieldOverrides = newIdentityDomainFieldOverrides.filter((_, j) => j !== i);
@@ -1708,7 +2131,7 @@ loadIdentitiesData();
                     }}
                     aria-label={$t('common.remove')}
                   >
-                    <Icon name="x" class="w-3.5 h-3.5" />
+                    <Icon name="close" class="w-3.5 h-3.5" />
                   </button>
                 </div>
                 <div class="grid grid-cols-1 gap-1.5">
@@ -1721,7 +2144,7 @@ loadIdentitiesData();
               </div>
             {/each}
 
-            {#if newDomainOverrideInput.domain}
+            {#if addingDomainOverride}
               <div class="mb-2 p-2 border border-md-outline-variant/30 rounded-lg bg-md-surface-variant/20">
                 <div class="grid grid-cols-1 gap-1.5">
                   <InputField placeholder={$t('identities.domainPlaceholder')} bind:value={newDomainOverrideInput.domain} />
@@ -1731,20 +2154,21 @@ loadIdentitiesData();
                   <InputField placeholder={$t('identities.phoneNumber')} bind:value={newDomainOverrideInput.phone} />
                   <InputField placeholder={$t('identities.preferredEmail')} bind:value={newDomainOverrideInput.preferredEmail} />
                 </div>
-                <div class="flex gap-1.5 mt-1.5">
+                <div class="flex flex-nowrap gap-3 mt-1.5" use:responsiveButtonLayout data-action-tier="S">
                   <button
                     type="button"
-                    class="flex-1 h-8 px-3 rounded-lg border border-md-outline text-xs font-semibold text-md-primary hover:bg-md-primary/10"
+                    class="flex-1 h-10 px-4 rounded-lg border border-md-outline text-sm font-semibold text-md-primary hover:bg-md-primary/10 active:bg-md-primary/30"
                     onclick={(e) => {
                       e.stopPropagation();
                       newDomainOverrideInput = {};
+                      addingDomainOverride = false;
                     }}
                   >
-                    {$t('common.cancel')}
+                    <span class="btn-label">{$t('common.cancel')}</span>
                   </button>
                   <button
                     type="button"
-                    class="flex-1 h-8 px-3 rounded-lg bg-md-primary text-md-on-primary hover:bg-md-primary/90 text-xs font-semibold"
+                    class="flex-1 h-10 px-4 rounded-lg bg-md-primary text-sm text-md-on-primary hover:bg-md-primary/90 active:brightness-95 font-semibold"
                     onclick={(e) => {
                       e.stopPropagation();
                       const d = (newDomainOverrideInput.domain || '').trim();
@@ -1758,10 +2182,11 @@ loadIdentitiesData();
                         preferredEmail: newDomainOverrideInput.preferredEmail || '',
                       }];
                       newDomainOverrideInput = {};
+                      addingDomainOverride = false;
                       isDirty = true;
                     }}
                   >
-                    {$t('common.add')}
+                    <span class="btn-label">{$t('common.add')}</span>
                   </button>
                 </div>
               </div>
@@ -1772,6 +2197,7 @@ loadIdentitiesData();
                 onclick={(e) => {
                   e.stopPropagation();
                   newDomainOverrideInput = { domain: '', firstNames: '', lastNames: '', username: '', phone: '', preferredEmail: '' };
+                  addingDomainOverride = true;
                 }}
               >
                 {$t('identities.addDomainOverride')}
@@ -1784,10 +2210,22 @@ loadIdentitiesData();
         </div>
         </div>
         <!-- Sticky save at bottom of popup -->
-        <div class="shrink-0 px-4 py-3 border-t border-md-outline-variant/30 bg-md-surface">
-          <button type="submit" class="w-full px-4 py-2.5 text-sm font-semibold rounded-xl bg-md-primary text-md-on-primary hover:bg-md-primary/90">
-            {$t('identities.save')}
-          </button>
+        <div class="dialog-inset scroll-edge shrink-0 py-3 border-t border-md-outline-variant/30 bg-md-surface">
+          <ButtonGroup>
+            <Btn
+              type="button"
+              variant={isDirty || identityFormHasChanges ? 'warningOutline' : 'outline'}
+              icon={isDirty || identityFormHasChanges ? 'refresh' : undefined}
+              label={isDirty || identityFormHasChanges ? $t('identities.resetChanges') : $t('common.cancel')}
+              onclick={isDirty || identityFormHasChanges ? (editingIdentity ? resetIdentityChanges : resetCreateIdentityChanges) : attemptCloseEditor}
+              title={isDirty || identityFormHasChanges ? $t('identities.resetChangesHint') : undefined}
+            />
+            <Btn
+              type="submit"
+              variant="primary"
+              label={$t('identities.save')}
+            />
+          </ButtonGroup>
         </div>
       </form>
       </div>
@@ -1796,58 +2234,74 @@ loadIdentitiesData();
 
   <!-- Create: full dialog, or mounted into AppLayout splitview host -->
   {#if showCreateDialog}
-    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
     <div
+      use:portalIfNotSplit={useSplitEditor}
+      use:identityEditorFocus={useSplitEditor}
+      data-portal-layer={useSplitEditor ? undefined : 'dialog'}
       class={useSplitEditor
-        ? 'identity-overlay absolute inset-0 z-[50] flex flex-col bg-md-surface min-w-0 min-h-0'
-        : 'identity-overlay fixed inset-0 z-[100] flex items-stretch justify-stretch'}
-      role="presentation"
+        ? `identity-overlay absolute inset-0 ${PORTAL_Z_CLASS.splitOverlay} flex flex-col bg-md-surface min-w-0 min-h-0`
+        : `identity-overlay fixed inset-0 ${PORTAL_Z_CLASS.dialog} flex items-stretch justify-stretch`}
+      role={useSplitEditor ? 'presentation' : 'dialog'}
+      aria-modal={useSplitEditor ? undefined : 'true'}
+      aria-labelledby="create-identity-title"
       onclick={(e) => {
         if (!useSplitEditor && e.target === e.currentTarget) attemptCloseEditor();
       }}
-      onkeydown={(e) => { if (e.key === 'Escape') attemptCloseEditor(); }}
+      onkeydown={onEditorKeydown}
     >
       {#if !useSplitEditor}
         <button
           type="button"
-          class="absolute inset-0 z-0 cursor-default border-0 bg-md-scrim/50 backdrop-blur-sm"
+          tabindex="-1"
+          class="absolute inset-0 z-0 cursor-default border-0 bg-md-scrim-modal backdrop-blur-sm"
           aria-label={$t('common.close')}
           onclick={attemptCloseEditor}
         ></button>
       {/if}
       <div
-        class="relative z-10 flex flex-col w-full h-full min-h-0 {useSplitEditor ? 'p-2' : ''}"
-        style={useSplitEditor ? undefined : 'padding: 25px;'}
+        class="relative z-10 flex flex-col w-full h-full min-h-0 {useSplitEditor ? 'p-2' : 'dialog-viewport-inset'}"
+        style={useSplitEditor ? undefined : 'padding-block: 25px;'}
       >
       <div class="flex justify-end shrink-0 mb-2">
         <button
           type="button"
-          class="w-9 h-9 rounded-full bg-md-surface hover:bg-md-surface-variant flex items-center justify-center shadow-md transition-colors border border-md-outline-variant/30"
+          class="w-9 h-9 rounded-full bg-md-surface hover:bg-md-surface-variant active:bg-md-surface-variant/80 flex items-center justify-center {ELEVATION.level2} transition-colors border border-md-outline-variant/30"
           onclick={attemptCloseEditor}
           aria-label={$t('common.close')}
           title={$t('common.close')}
         >
-          <Icon name="x" class="w-4 h-4 text-md-on-surface/70" />
+          <Icon name="close" class="w-4 h-4 text-md-on-surface/70" />
         </button>
       </div>
       <div
-        class="dialog-enter bg-md-surface rounded-2xl w-full max-w-full flex-1 min-h-0 min-w-0 flex flex-col overflow-hidden shadow-2xl border border-md-outline-variant/30 box-border"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="create-identity-title"
+        class="dialog-surface scroll-frame dialog-enter bg-md-surface rounded-2xl w-full max-w-full flex-1 min-h-0 min-w-0 flex flex-col overflow-hidden {ELEVATION.level3} border border-md-outline-variant/30 box-border"
+        role="presentation"
+        data-activity-dialog-key={editingIdentity ? 'dialog:identityEdit' : 'dialog:identityCreate'}
         tabindex="-1"
         oninput={() => { isDirty = true; }}
         onchange={() => { isDirty = true; }}
       >
-        <div class="shrink-0 px-4 pt-4 pb-2">
-          <h3 id="create-identity-title" class="font-semibold text-base">{$t('identities.create')}</h3>
+        <div class="dialog-inset dialog-editor-header scroll-edge shrink-0 flex items-center gap-3 border-b border-md-outline-variant/15">
+          <div class="w-9 h-9 rounded-xl bg-md-primary/10 flex items-center justify-center shrink-0">
+            <Icon name="person" class="w-6 h-6 text-md-primary" />
+          </div>
+          <div class="min-w-0 flex-1">
+            <h2 id="create-identity-title" class="dialog-heading break-words">{$t('identities.create')}</h2>
+          </div>
         </div>
+        <p class="dialog-description dialog-inset scroll-edge shrink-0 py-2 break-words">{$t('identities.noIdentitiesHint')}</p>
 
-        <div class="flex-1 min-h-0 overflow-y-auto overflow-x-auto px-4 pb-2">
-        <div class="space-y-4 min-w-0 max-w-full w-full">
+        <div class="dialog-inset scroll-body scroll-body-framed flex-1 min-h-0 overflow-y-auto overflow-x-hidden pb-2">
+        <div class="dialog-content-stack min-w-0 max-w-full w-full">
+          <div class="flex items-center gap-2 mt-1">
+            <div class="w-1 h-3.5 rounded-full bg-md-primary"></div>
+            <span class="text-xs font-semibold uppercase tracking-wide text-md-on-surface/45">{$t('identities.sectionBasics')}</span>
+            <div class="h-px flex-1 bg-md-outline-variant/25"></div>
+          </div>
+
           <!-- Identity Name -->
           <div>
-            <label for="create-identity-name" class="text-xs text-md-on-surface/50 mb-1 block">{$t('identities.name')}</label>
+            <label for="create-identity-name" class="text-sm text-md-on-surface-variant mb-1 block">{$t('identities.name')}</label>
             <InputField
               id="create-identity-name"
               placeholder={$t('identities.namePlaceholder')}
@@ -1858,27 +2312,27 @@ loadIdentitiesData();
           <!-- Name Selection (empty by default; suggest localized samples) -->
           <div>
             <div class="flex items-center justify-between mb-1">
-              <label for="create-first-names" class="text-xs text-md-on-surface/50">{$t('identities.firstNames')}</label>
               <button type="button" class="text-xs text-md-primary hover:underline" onclick={applySuggestedNames}>
                 {$t('identities.suggestedNamesHint')}
               </button>
             </div>
-            <InputField
-              id="create-first-names"
-              placeholder={$t('identities.optional')}
-              bind:value={newIdentityFirstNames}
-            />
+            <div class="grid grid-cols-2 gap-3">
+              <InputField
+                id="create-first-names"
+                label={$t('identities.firstNames')}
+                placeholder={$t('identities.optional')}
+                bind:value={newIdentityFirstNames}
+              />
+              <InputField
+                id="create-last-names"
+                label={$t('identities.lastNames')}
+                placeholder={$t('identities.optional')}
+                bind:value={newIdentityLastNames}
+              />
+            </div>
           </div>
           <div>
-            <label for="create-last-names" class="text-xs text-md-on-surface/50 mb-1 block">{$t('identities.lastNames')}</label>
-            <InputField
-              id="create-last-names"
-              placeholder={$t('identities.optional')}
-              bind:value={newIdentityLastNames}
-            />
-          </div>
-          <div>
-            <label for="create-username" class="text-xs text-md-on-surface/50 mb-1 block">{$t('identities.username')}</label>
+            <label for="create-username" class="text-sm text-md-on-surface-variant mb-1 block">{$t('identities.username')}</label>
             <p class="text-xs text-md-on-surface/40 mb-1">{$t('identities.usernameHint')}</p>
             <InputField
               id="create-username"
@@ -1889,7 +2343,7 @@ loadIdentitiesData();
 
           <!-- Preferred mailbox email -->
           <div>
-            <label for="create-preferred-email" class="text-xs text-md-on-surface/50 mb-1 block">{$t('identities.preferredEmail')}</label>
+            <label for="create-preferred-email" class="text-sm text-md-on-surface-variant mb-1 block">{$t('identities.preferredEmail')}</label>
             <p class="text-xs text-md-on-surface/40 mb-1.5">{$t('identities.preferredEmailHint')}</p>
             <Dropdown
               id="create-preferred-email"
@@ -1922,7 +2376,7 @@ loadIdentitiesData();
           <!-- Password Settings -->
           <div>
             <div class="flex items-center justify-between mb-2">
-              <label for="create-password" class="text-xs text-md-on-surface/50">{$t('identities.password')}</label>
+              <label for="create-password" class="text-sm text-md-on-surface-variant">{$t('identities.password')}</label>
               <div class="flex items-center gap-2">
                 <Toggle
                   checked={newIdentityUseRandomPassword}
@@ -1944,10 +2398,16 @@ loadIdentitiesData();
             {/if}
           </div>
 
+          <div class="flex items-center gap-2 mt-5">
+            <div class="w-1 h-3.5 rounded-full bg-md-primary"></div>
+            <span class="text-xs font-semibold uppercase tracking-wide text-md-on-surface/45">{$t('identities.sectionLocation')}</span>
+            <div class="h-px flex-1 bg-md-outline-variant/25"></div>
+          </div>
+
           <!-- Gender / DOB / Country -->
           <div class="space-y-2">
             <div>
-              <label class="text-xs text-md-on-surface/50 mb-1 block" for="create-gender">{$t('identities.gender')} ({$t('identities.optional')})</label>
+              <label class="text-sm text-md-on-surface-variant mb-1 block" for="create-gender">{$t('identities.gender')} ({$t('identities.optional')})</label>
               <Dropdown
                 id="create-gender"
                 variant="outlined"
@@ -1964,17 +2424,21 @@ loadIdentitiesData();
               />
             </div>
             <div>
-              <label class="text-xs text-md-on-surface/50 mb-1 block" for="create-dob">{$t('identities.dateOfBirth')} ({$t('identities.optional')})</label>
+              <label class="text-sm text-md-on-surface-variant mb-1 block" for="create-dob">{$t('identities.dateOfBirth')} ({$t('identities.optional')})</label>
               <p class="text-xs text-md-on-surface/40 mb-1">{$t('identities.dobAdultHint')}</p>
               <div class="flex gap-1 mb-1.5">
                 <button
                   type="button"
-                  class="flex-1 px-2 py-1 text-xs font-semibold rounded-lg {dobHelperMode === 'date' ? 'bg-md-primary/15 text-md-primary' : 'bg-md-surface-variant text-md-on-surface/60'}"
+                  class="flex-1 px-2 py-1 text-xs font-semibold rounded-lg bg-md-surface-variant text-md-on-surface/60 {controlSurface(
+                    dobHelperMode === 'date'
+                  )}"
                   onclick={() => (dobHelperMode = 'date')}
                 >{$t('identities.dobPickDate')}</button>
                 <button
                   type="button"
-                  class="flex-1 px-2 py-1 text-xs font-semibold rounded-lg {dobHelperMode === 'range' ? 'bg-md-primary/15 text-md-primary' : 'bg-md-surface-variant text-md-on-surface/60'}"
+                  class="flex-1 px-2 py-1 text-xs font-semibold rounded-lg bg-md-surface-variant text-md-on-surface/60 {controlSurface(
+                    dobHelperMode === 'range'
+                  )}"
                   onclick={() => (dobHelperMode = 'range')}
                 >{$t('identities.dobFromRange')}</button>
               </div>
@@ -1992,7 +2456,7 @@ loadIdentitiesData();
               {:else}
                 <div class="grid grid-cols-2 gap-2">
                   <div>
-                    <label class="text-xs text-md-on-surface/45" for="dob-from-y">{$t('identities.dobFromYear')}</label>
+                    <label class="text-sm text-md-on-surface-variant" for="dob-from-y">{$t('identities.dobFromYear')}</label>
                     <InputField
                       id="dob-from-y"
                       type="number"
@@ -2003,7 +2467,7 @@ loadIdentitiesData();
                     />
                   </div>
                   <div>
-                    <label class="text-xs text-md-on-surface/45" for="dob-to-y">{$t('identities.dobToYear')}</label>
+                    <label class="text-sm text-md-on-surface-variant" for="dob-to-y">{$t('identities.dobToYear')}</label>
                     <InputField
                       id="dob-to-y"
                       type="number"
@@ -2016,7 +2480,7 @@ loadIdentitiesData();
                 </div>
                 <button
                   type="button"
-                  class="mt-1.5 w-full py-1.5 text-label-sm font-semibold rounded-lg bg-md-primary/15 text-md-primary hover:bg-md-primary/25"
+                  class="mt-1.5 w-full py-1.5 text-sm font-semibold rounded-lg bg-md-primary/15 text-md-primary hover:bg-md-primary/25 active:bg-md-primary/45"
                   onclick={applyDobFromRange}
                 >{$t('identities.dobGenerateFromRange')}</button>
                 {#if newIdentityDob}
@@ -2025,7 +2489,7 @@ loadIdentitiesData();
               {/if}
             </div>
             <div>
-              <label class="text-xs text-md-on-surface/50 mb-1 block" for="create-country">{$t('identities.country')} ({$t('identities.optional')})</label>
+              <label class="text-sm text-md-on-surface-variant mb-1 block" for="create-country">{$t('identities.country')} ({$t('identities.optional')})</label>
               <Dropdown
                 id="create-country"
                 variant="outlined"
@@ -2044,41 +2508,48 @@ loadIdentitiesData();
                 ]}
               />
             </div>
-            <div>
-              <label class="text-xs text-md-on-surface/50 mb-1 block" for="create-city">{$t('identities.city')} ({$t('identities.optional')})</label>
-              <InputField id="create-city" bind:value={newIdentityCity} />
+            <div class="grid grid-cols-2 gap-2">
+              <div>
+                <label class="text-sm text-md-on-surface-variant mb-1 block" for="create-city">{$t('identities.city')} ({$t('identities.optional')})</label>
+                <InputField id="create-city" bind:value={newIdentityCity} />
+              </div>
+              <div>
+                <label class="text-sm text-md-on-surface-variant mb-1 block" for="create-state">{$t('identities.state')} ({$t('identities.optional')})</label>
+                <InputField
+                  id="create-state"
+                  placeholder={$t('identities.optional')}
+                  bind:value={newIdentityState}
+                />
+              </div>
             </div>
             <div>
-              <label class="text-xs text-md-on-surface/50 mb-1 block" for="create-state">{$t('identities.state')} ({$t('identities.optional')})</label>
-              <InputField
-                id="create-state"
-                placeholder={$t('identities.optional')}
-                bind:value={newIdentityState}
-              />
-            </div>
-            <div>
-              <label class="text-xs text-md-on-surface/50 mb-1 block" for="create-address">{$t('identities.address')} ({$t('identities.optional')})</label>
+              <label class="text-sm text-md-on-surface-variant mb-1 block" for="create-address">{$t('identities.address')} ({$t('identities.optional')})</label>
               <InputField
                 id="create-address"
                 placeholder={$t('identities.optional')}
                 bind:value={newIdentityAddress}
               />
             </div>
+            <div class="flex items-center gap-2 pt-2">
+              <div class="w-1 h-3.5 rounded-full bg-md-primary"></div>
+              <span class="text-xs font-semibold uppercase tracking-wide text-md-on-surface/45">{$t('identities.sectionProfile')}</span>
+              <div class="h-px flex-1 bg-md-outline-variant/25"></div>
+            </div>
             <div>
-              <label class="text-xs text-md-on-surface/50 mb-1 block" for="create-avatar">{$t('identities.profilePicture')} ({$t('identities.optional')})</label>
+              <label class="text-sm text-md-on-surface-variant mb-1 block" for="create-avatar">{$t('identities.profilePicture')} ({$t('identities.optional')})</label>
               <p class="text-xs text-md-on-surface/40 mb-1">{$t('identities.profilePictureHint')}</p>
-              <div class="flex items-center gap-3">
+              <div class="flex flex-wrap items-center gap-3 min-w-0 max-w-full overflow-hidden">
                 {#if newIdentityProfilePicture}
-                  <img src={newIdentityProfilePicture} alt="" class="w-12 h-12 rounded-full object-cover border border-md-outline-variant" />
+                  <img src={newIdentityProfilePicture} alt={$t('identities.profilePicture')} class="w-12 h-12 rounded-full object-cover border border-md-outline-variant shrink-0" />
                 {/if}
-                <input id="create-avatar" type="file" accept="image/*" class="text-xs max-w-full" onchange={onProfilePictureSelected} />
+                <input id="create-avatar" type="file" accept="image/*" class="text-xs min-w-0 max-w-full flex-1 basis-0" onchange={onProfilePictureSelected} />
                 {#if newIdentityProfilePicture}
-                  <button type="button" class="text-xs text-md-error hover:underline" onclick={clearProfilePicture}>{$t('identities.clearProfilePicture')}</button>
+                  <button type="button" class="text-xs text-md-error hover:underline whitespace-nowrap shrink-0" onclick={clearProfilePicture}>{$t('identities.clearProfilePicture')}</button>
                 {/if}
               </div>
             </div>
             <div>
-              <label for="create-ua-select" class="text-xs text-md-on-surface/50 mb-1 block">{$t('identities.userAgentAnonymity')}</label>
+              <label for="create-ua-select" class="text-sm text-md-on-surface-variant mb-1 block">{$t('identities.userAgentAnonymity')}</label>
               <div class="flex gap-2 mb-2">
                 <Dropdown
                   id="create-ua-select"
@@ -2097,7 +2568,7 @@ loadIdentitiesData();
                     { value: 'custom', label: $t('identities.uaPresetCustom') },
                   ]}
                 />
-                <button type="button" class="px-3 py-2 rounded-lg border border-md-outline text-xs text-md-primary hover:bg-md-primary/10 font-semibold" onclick={generateRandomUA}>
+                <button type="button" class="px-3 py-2 rounded-lg border border-md-outline text-xs text-md-primary hover:bg-md-primary/10 active:bg-md-primary/30 font-semibold" onclick={generateRandomUA}>
                   {$t('identities.generateRandomUa')}
                 </button>
               </div>
@@ -2114,25 +2585,25 @@ loadIdentitiesData();
             </div>
           </div>
 
-          <!-- Phone Number -->
-          <div>
-            <label for="create-phone" class="text-xs text-md-on-surface/50 mb-1 block">{$t('identities.phoneNumber')} ({$t('identities.optional')})</label>
-            <InputField
-              id="create-phone"
-              type="tel"
-              placeholder={$t('identities.optional')}
-              bind:value={newIdentityPhone}
-            />
-          </div>
-
-          <!-- PIN Code -->
-          <div>
-            <label for="create-pin" class="text-xs text-md-on-surface/50 mb-1 block">{$t('identities.pinCode')} ({$t('identities.optional')})</label>
-            <InputField
-              id="create-pin"
-              placeholder={$t('identities.optional')}
-              bind:value={newIdentityPin}
-            />
+          <!-- Phone / PIN -->
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label for="create-phone" class="text-sm text-md-on-surface-variant mb-1 block">{$t('identities.phoneNumber')} ({$t('identities.optional')})</label>
+              <InputField
+                id="create-phone"
+                type="tel"
+                placeholder={$t('identities.optional')}
+                bind:value={newIdentityPhone}
+              />
+            </div>
+            <div>
+              <label for="create-pin" class="text-sm text-md-on-surface-variant mb-1 block">{$t('identities.pinCode')} ({$t('identities.optional')})</label>
+              <InputField
+                id="create-pin"
+                placeholder={$t('identities.optional')}
+                bind:value={newIdentityPin}
+              />
+            </div>
           </div>
 
           <label class="flex items-start gap-2.5 cursor-pointer rounded-xl border border-md-outline-variant/40 bg-md-surface-container-low px-3 py-2.5">
@@ -2149,10 +2620,23 @@ loadIdentitiesData();
         </div>
         </div>
         <!-- Sticky save pinned at bottom of popup -->
-        <div class="shrink-0 px-5 py-3 border-t border-md-outline-variant/30 bg-md-surface">
-          <button type="button" class="w-full px-4 py-2.5 text-sm font-semibold rounded-xl bg-md-primary text-md-on-primary hover:bg-md-primary/90 transition-colors" onclick={createNewIdentity}>
-            {$t('identities.save')}
-          </button>
+        <div class="dialog-inset scroll-edge shrink-0 py-3 border-t border-md-outline-variant/30 bg-md-surface">
+          <ButtonGroup>
+            <Btn
+              type="button"
+              variant={formHasChanges ? 'warningOutline' : 'outline'}
+              icon={formHasChanges ? 'refresh' : undefined}
+              label={formHasChanges ? $t('identities.resetChanges') : $t('common.cancel')}
+              onclick={formHasChanges ? resetCreateIdentityChanges : attemptCloseEditor}
+              title={formHasChanges ? $t('identities.resetChangesHint') : undefined}
+            />
+            <Btn
+              type="button"
+              variant="primary"
+              label={$t('identities.save')}
+              onclick={createNewIdentity}
+            />
+          </ButtonGroup>
         </div>
       </div>
       </div>

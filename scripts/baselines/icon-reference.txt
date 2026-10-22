@@ -1,0 +1,27 @@
+# Icon-reference baseline - a ratchet: rows may only disappear.
+# Format: <path><TAB><icon name>[<TAB># why]
+# Each row is a reference to a glyph the catalog in
+# src/ui/components/icons/Icon.svelte does not define, so it renders NOTHING
+# (see scripts/check-icon-references.ts). A row is either a rename that was
+# missed (map it to the catalog's current name) or a glyph that must still be
+# added with its real upstream path - and the why column must say which, which
+# --update preserves. A new finding that is not listed here fails the gate, and
+# a row whose reference was fixed also fails, so the list can only shrink.
+#
+# This ledger is currently EMPTY: every reference in the repo resolves. A row is
+# owed only when a glyph genuinely has no catalog entry AND adding one is not the
+# fix (no upstream glyph matches, or the call site is being retired) - a missing
+# upstream glyph is fixed by adding it to Icon.svelte with its real Material
+# Symbols path, not by a row here. When a row is unavoidable, its why column must
+# name the upstream glyph that retires it or the reason it cannot be retired.
+#
+# This ledger holds UNDEFINED REFERENCES only. The same gate's other half - an
+# icon field declared `string` / the open `IconName` instead of
+# `KnownIconName` - has NO baseline on purpose, so a new table cannot be added
+# untyped and then excused with a row: its single exception (the provider-config
+# schema's `ui.icon`) is named in UNTYPED_ICON_FIELD_EXCEPTIONS in the script,
+# where a reviewer sees it beside the compile-time-typing rule it carves out.
+#
+# Refresh (after shrinking) with:
+#   bun scripts/check-icon-references.ts --update
+

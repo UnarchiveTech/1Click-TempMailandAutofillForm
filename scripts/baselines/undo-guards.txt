@@ -1,0 +1,14 @@
+# Toast-undo ratchet baseline - a ratchet: counts may only decrease.
+# Format: <path> <count> # reason
+# check-undo-guards.ts fails when a NEW toast carries an undo callback
+# without an isUndoCurrent(...) guard inside that callback.
+# After guarding a site (the preferred outcome), shrink rows with:
+#   bun scripts/check-undo-guards.ts --update
+
+src/features/address/address-creator.ts 1 # NOT-AN-UNDO: the third arg navigates to the mailbox ("Go to mailbox"), it restores nothing.
+src/features/address/address-management.ts 1 # DIFF-BASED: single-archive undo sends unarchiveAddress for the same id; storage re-derives server-side.
+src/features/address/email-bulk-ui.ts 1 # DIFF-BASED: email archive/delete undo applies a restore local-action over the CURRENT bag list, not a snapshot.
+src/ui/blocks/layout/AppLayout.svelte 4 # PLUMBING: setShowToast/onAction contract fields forwarding the callback argument; producers are gated separately.
+src/ui/blocks/layout/use-toast.ts 2 # PLUMBING: the central showToast → toastStore.add forward; every producer's callback flows through here.
+src/ui/views/mailbox/MailboxView.svelte 1 # DIFF-BASED: label-change undo replays a label diff through emailLabelsStore, not a storage snapshot.
+src/utils/ui/toastStore.ts 4 # PLUMBING: success/warning/info/error forward their undoAction into add(); producers are gated separately.

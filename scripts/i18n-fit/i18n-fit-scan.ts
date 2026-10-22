@@ -1,6 +1,6 @@
 /**
  * Core i18n fit scan: compare locale strings to English design + slot budgets.
- * Used by scripts/i18n-fit-scanner.ts and unit tests.
+ * Used by scripts/check-i18n-fit.ts and unit tests.
  */
 
 import { DEFAULT_PLACEHOLDER_SAMPLES, FIT_BUDGETS, type FitBudget } from './i18n-fit-budgets';

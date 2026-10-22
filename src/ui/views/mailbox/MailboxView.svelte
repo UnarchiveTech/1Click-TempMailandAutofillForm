@@ -2,228 +2,269 @@
 import { onDestroy, onMount, tick, untrack } from 'svelte';
 import { t } from 'svelte-i18n';
 import { browser } from 'wxt/browser';
+import { storage } from 'wxt/utils/storage';
+import {
+  flushQueuedEmailReadState,
+  queueEmailReadStates,
+} from '@/features/address/address-actions.js';
+import { canUnarchive } from '@/features/address/address-management.js';
+import { filterEmails } from '@/features/address/email-filters.js';
+import { useVerificationPreferences } from '@/features/address/use-verification-preferences.svelte.js';
+import {
+  collectVerificationItems,
+  type VerificationItem,
+} from '@/features/address/verification-items.js';
 import {
   getSelectedIdentity,
   loadIdentities,
   selectIdentity,
 } from '@/features/identities/identity-actions.js';
-import { filterEmails } from '@/features/inbox/email-filters.js';
-import { canUnarchive } from '@/features/inbox/inbox-management.js';
-import AccountCard from '@/ui/blocks/account/AccountCard.svelte';
-import AccountSelector from '@/ui/blocks/account/AccountSelectorBar.svelte';
+import { registerEscapeTier } from '@/features/keyboard-shortcuts/escape-stack.js';
+import { domainMatchesHost } from '@/features/login-info/saved-login-credentials.js';
+import AddressCard from '@/ui/blocks/addresses/AddressCard.svelte';
+import AddressSelector from '@/ui/blocks/addresses/AddressSelectorBar.svelte';
+import AttachmentLibraryDialog from '@/ui/blocks/dialogs/AttachmentLibraryDialog.svelte';
 import TagDialog from '@/ui/blocks/dialogs/TagDialog.svelte';
+import { type ToastFn } from '@/ui/blocks/layout/use-toast.js';
 import FilterList from '@/ui/blocks/mail/FilterList.svelte';
-import SelectionToolbar from '@/ui/blocks/mail/SelectionToolbar.svelte';
+import type { FilterQueryProps } from '@/ui/blocks/mail/filter-list-props.js';
+import MailboxStripDock, {
+  type MailboxStripId,
+  type MailboxStripTab,
+} from '@/ui/blocks/mail/MailboxStripDock.svelte';
+import MessageCodeBadges from '@/ui/blocks/mail/MessageCodeBadges.svelte';
+import ResponsiveMailboxTags from '@/ui/blocks/mail/ResponsiveMailboxTags.svelte';
+import VerificationHistory from '@/ui/blocks/mail/VerificationHistory.svelte';
+import ButtonGroup from '@/ui/components/composites/ButtonGroup.svelte';
 import EmptyState from '@/ui/components/composites/EmptyState.svelte';
+import ModalDialog from '@/ui/components/composites/ModalDialog.svelte';
+import { sidebarTabsVisible } from '@/ui/components/composites/tabs-sidebar-store.js';
 import Icon from '@/ui/components/icons/Icon.svelte';
-import { Checkbox, Toggle } from '@/ui/components/primitives';
+import { Btn, Checkbox, IconButton, Toggle } from '@/ui/components/primitives';
 import AutoRenewToggle from '@/ui/components/primitives/AutoRenewToggle.svelte';
+import Avatar from '@/ui/components/primitives/Avatar.svelte';
+import Dropdown from '@/ui/components/primitives/Dropdown.svelte';
 import FaviconImage from '@/ui/components/primitives/FaviconImage.svelte';
 import Skeleton from '@/ui/components/primitives/Skeleton.svelte';
-import TagPill from '@/ui/components/primitives/TagPill.svelte';
-import { AVATAR_MUTED, avatarColor } from '@/utils/avatar-color.js';
-import { copyToClipboardAndSchedulePurge } from '@/utils/clipboard.js';
+import { isTimeExpired } from '@/utils/address/address-status.js';
 import {
-  type ConnectivityEvent,
-  getConnectivityLog,
-  isRangeFullyOffline,
-} from '@/utils/connectivity-log.js';
+  addressTagsList,
+  buildTagAddressUsage,
+  buildTagColors,
+  existingTagNames,
+} from '@/utils/address/address-tags.js';
+import {
+  getWebmcpAccessChoice,
+  setWebmcpAccessChoice,
+  type WebmcpAccessChoice,
+} from '@/utils/browser/webmcp-access.js';
+import { copyToClipboardAndSchedulePurge } from '@/utils/clipboard/clipboard.js';
+import { emailBodyPreview, emailHoverPreview } from '@/utils/email/body-preview.js';
+import type { EmailLabelDef } from '@/utils/email/email-label-catalog.js';
+import {
+  getEmailLabelCatalog,
+  hashLabelColor,
+  labelColorFor,
+  mergeLabelsIntoCatalog,
+  setEmailLabelCatalog,
+} from '@/utils/email/email-label-catalog.js';
+import { emailLabelKey, emailLabelKeyForEmail } from '@/utils/email/email-label-key.js';
 import {
   DEFAULT_PROVIDER,
   loadAllProviderConfigs,
   loadProviderConfig,
-} from '@/utils/email-service.js';
-import { isEmailStarred, starKeyForEmail, toggleStarInSet } from '@/utils/email-star-key.js';
-import { emailTagsStore } from '@/utils/email-tags-store.js';
-import type { EmailThread } from '@/utils/email-threads.js';
-import { groupEmailsByThread } from '@/utils/email-threads.js';
+} from '@/utils/email/email-service.js';
+import { isEmailStarred, starKeyForEmail, toggleStarInSet } from '@/utils/email/email-star-key.js';
+import type { EmailThread } from '@/utils/email/email-threads.js';
+import { groupEmailsByThread } from '@/utils/email/email-threads.js';
+import { htmlToPlainText } from '@/utils/email/sanitize-html.js';
+import { logError, logWarn } from '@/utils/logger.js';
+import { formatRemaining } from '@/utils/otp/otp-magic-expiry.js';
 import {
-  getRootDomain,
-  getSafeDomainFaviconUrl,
-  getSafeRootDomainFaviconUrl,
-} from '@/utils/favicon.js';
-import { fitActionButtonsLayout, fitButtonsLabelFont } from '@/utils/fit-label-font.js';
-import { logError } from '@/utils/logger.js';
+  type ConnectivityEvent,
+  getConnectivityLog,
+  isRangeFullyOffline,
+} from '@/utils/provider/connectivity-log.js';
+import {
+  highlightMatches,
+  parseSearchShortcuts,
+  SHORTCUT_REGEX,
+} from '@/utils/search/search-shortcuts.js';
+import { getRootDomain } from '@/utils/security/root-domain.js';
+import { emailLabelsStore } from '@/utils/storage/email-labels-store.js';
+import { parseStringList, toggleDomainListItem, updateStoredObject } from '@/utils/storage/rmw.js';
+import {
+  EMAIL_STORAGE_ADDRESS_INDEX_KEY,
+  getEmailMaps,
+  getStoredEmailsForAddress,
+  isEmailStorageBagKey,
+  resolveBagKey,
+} from '@/utils/storage/storage-keys.js';
+import { writeWithRetry } from '@/utils/storage/storage-write.js';
+import { peekStoredBooleansSync } from '@/utils/storage/stored-prefs-sync.js';
+import { AVATAR_MUTED, avatarColor } from '@/utils/theme/avatar-color.js';
+import { avatarInitial } from '@/utils/theme/avatar-initials.js';
+import { hexToRgba } from '@/utils/theme/color-utils.js';
+import { toMs } from '@/utils/time/time.js';
+import { formatFullDateTime, timeAgo } from '@/utils/time/time-format.js';
+import { useCurrentTime } from '@/utils/time/time-store.js';
+import type {
+  Address,
+  Email,
+  EmailPreviewMode,
+  Identity,
+  SavedSearchFilter,
+} from '@/utils/types.js';
+import { anchoredFlyout, hasInlineFlyoutSpace } from '@/utils/ui/anchored-flyout.js';
+import { AVATAR_BOX, AVATAR_INK } from '@/utils/ui/avatar-size.js';
+import { ELEVATION } from '@/utils/ui/elevation.js';
+import { createHoldController, onStripDragOver } from '@/utils/ui/gesture-selection.js';
+import {
+  mailRowStarClass,
+  mailRowSurfaceClass,
+  SELECTED_ROW_INK,
+} from '@/utils/ui/mail-row-state.js';
 import {
   collectIntersectingIds,
   isInteractiveTarget,
   isMarqueeSelectionEnabled,
   MARQUEE_THRESHOLD,
   normalizeMarquee,
-} from '@/utils/marquee-selection.js';
-import { formatRemaining } from '@/utils/otp-magic-expiry.js';
-import { PORTAL_Z_CLASS, portalToBody } from '@/utils/portal-layers.js';
-import { htmlToPlainText } from '@/utils/sanitize-html.js';
+} from '@/utils/ui/marquee-selection.js';
+import { NAV_FLOAT_CONTENT_WIDTH_CSS } from '@/utils/ui/nav-layout.js';
+import { PORTAL_Z_CLASS } from '@/utils/ui/portal-layers.js';
+import { pullToRefresh } from '@/utils/ui/pull-to-refresh.js';
+import { createResizeObserverOnFrame, observeResizeOnFrame } from '@/utils/ui/resize-observer.js';
+import { responsiveButtonLayout } from '@/utils/ui/responsive-button-layout.js';
+import { controlSurface, rowSurface } from '@/utils/ui/row-surface.js';
 import {
-  highlightMatches,
-  parseSearchShortcuts,
-  SHORTCUT_REGEX,
-} from '@/utils/search-shortcuts.js';
-import { toMs } from '@/utils/time.js';
-import { formatFullDateTime, timeAgo } from '@/utils/time-format.js';
-import { useCurrentTime } from '@/utils/time-store.js';
-import type { Account, Email, Identity, SavedSearchFilter } from '@/utils/types.js';
+  type ListSelectionState,
+  type SelectionActionId,
+  type SelectionApi,
+} from '@/utils/ui/selection-api.js';
+import { publishSelectionSurface } from '@/utils/ui/selection-registry.js';
+import { focusedRowId } from '@/utils/ui/selection-row-cursor.js';
+import {
+  createVirtualListMeasurementCache,
+  getVirtualListWindow,
+  invalidateVirtualListMeasurements,
+} from '@/utils/ui/virtual-list.js';
+import { hostMatchesDomainScope } from '@/utils/validation.js';
 
-let otpCollapsed = $state(false);
-let otpDropupOpen = $state(false);
-/** Dynamic font & layout for mailbox action row labels (single-line, no truncate/wrap) */
-let actionBtnFontPx = $state(12);
-let actionBtnEqualWidth = $state(true);
-let actionRowEl = $state<HTMLElement | null>(null);
+let attachmentLibraryOpen = $state(false);
+let verificationExpanded = $state(false);
 
 // Renewal strip state - session-only dismissal. Re-appears on reload.
 let renewalStripDismissed = $state(false);
 let renewalStripCollapsed = $state(false);
 
-type OtpHistoryItem = {
-  otp: string;
-  from: string;
-  from_name: string;
-  received_at: number;
-  inboxAddress: string;
-};
-
-let otpHistoryCurrent = $state<OtpHistoryItem[]>([]);
-let otpHistoryOther = $state<OtpHistoryItem[]>([]);
+const verificationPreferences = useVerificationPreferences(() =>
+  showToast($t('toasts.operationFailed'), 'error')
+);
+let verificationInboxes = $state<Array<{ address: string; emails: Email[] }>>([]);
+let verificationHistoryLoading = $state(false);
+let verificationHistoryError = $state(false);
+let verificationHistoryRevision = $state(0);
+let verificationRequestId = 0;
 
 // Identity state
 let identities = $state<Identity[]>([]);
+const autofillIdentity = $derived(
+  identities.find((identity) => identity.id === selectedIdentityId)
+);
 let selectedIdentityId = $state<string | null>(null);
+const autofillActionLabel = $derived(
+  autofillIdentity
+    ? `${$t('inbox.autofillAction')} (${autofillIdentity.name})`
+    : $t('inbox.autofillAction')
+);
+let identitySelectionSaving = $state(false);
 let showAutofillStrip = $state(true);
 let showSavedLoginStrip = $state(true);
-let showMagicLinkStrip = $state(true);
 let showFilterAppliedStrip = $state(true);
 /** Hide "Save as filter" after a successful quick-save */
 let filterQuickSaved = $state(false);
 /** Inbox lifecycle intelligence suggestions for current / all accounts */
 let lifecycleHints = $state<
-  Array<{ kind: string; inboxId: string; address: string; reasonKey: string; score: number }>
+  Array<{ kind: string; addressId: string; address: string; reasonKey: string; score: number }>
 >([]);
 let lifecycleHintDismissed = $state(false);
 /** Layout prefs: allow user to hide bottom strips permanently until re-enabled */
-let preferHideOtpStrip = $state(false);
+let preferHideVerificationStrip = $state(false);
 let preferHideAutofillStrip = $state(false);
-let preferHideMagicStrip = $state(false);
 let currentDomain = $state<string>('');
-let showIdentityDropdown = $state(false);
+let siteAccessTab = $state<{ id: number; url: string } | null>(null);
+let siteAccessChoice = $state<WebmcpAccessChoice | null>(null);
+let siteAccessBusy = $state(false);
 
-// Track which bottom strip should be in front
-let frontStrip = $state<'autofill' | 'otp' | 'savedLogin' | 'magic' | 'filter'>('autofill');
-
-// Track previous values to detect actual changes - plain let, NOT $state,
-// so mutations inside $effect don't re-trigger the effect.
-let _prevFormDetected = false;
-let _prevLatestOtp = '------';
-let _prevLatestOtpEmailId = '';
-
-// React to prop changes: formDetected change → autofill front; new OTP → otp front.
-// "Last changed wins" - visiting a site always overrides a prior OTP.
-$effect(() => {
-  // Read reactive props (tracked by Svelte)
-  const fd = formDetected;
-  const otp = latestOtp;
-  const otpEmailId = latestLiveOtp?.email?.id || '';
-
-  untrack(() => {
-    // Read prev-values (NOT tracked - plain let)
-    const formJustDetected = fd && !_prevFormDetected;
-    const newOtpArrived =
-      otp !== '------' &&
-      (otp !== _prevLatestOtp || (otpEmailId && otpEmailId !== _prevLatestOtpEmailId));
-
-    if (formJustDetected) {
-      // Visiting a site always brings autofill to front, regardless of OTP
-      frontStrip = 'autofill';
-    } else if (newOtpArrived) {
-      // New OTP arrived (and no simultaneous form detection)
-      frontStrip = 'otp';
-    }
-
-    untrack(() => {
-      // Update prev values (not $state - no reactivity triggered)
-      _prevFormDetected = fd;
-      _prevLatestOtp = otp;
-      _prevLatestOtpEmailId = otpEmailId;
-    });
-  });
-});
+// Keep the user's category and message stable while other strips receive updates.
+let frontStrip = $state<MailboxStripId>('verification');
 
 // Load all providers dynamically from config
 let allProviders = $derived.by(() => loadAllProviderConfigs());
 
-async function loadOtpHistory() {
-  try {
-    const { storedEmails = {}, inboxes = [] } = (await browser.storage.local.get([
-      'storedEmails',
-      'inboxes',
-    ])) as {
-      storedEmails?: Record<string, Email[]>;
-      inboxes?: Account[];
-    };
-    const current: OtpHistoryItem[] = [];
-    const other: OtpHistoryItem[] = [];
-    // Normalize selection (domain display alias + case) so OTPs never land in wrong section
-    const selectedNorm = (selectedEmail || '').toLowerCase();
-    const displayedNorm = (displayedEmail || '').toLowerCase();
-    const currentLocal = selectedNorm.split('@')[0] || '';
-    // Restrict multi-domain alias match to same provider (avoid cross-provider local-part bleed)
-    const currentProvider =
-      currentAccount?.provider ||
-      inboxes.find((i) => (i.address || '').toLowerCase() === selectedNorm)?.provider ||
-      '';
-    const providerByAddress = new Map(
-      inboxes.map((i) => [(i.address || '').toLowerCase(), i.provider || ''] as const)
-    );
-    for (const [addr, msgs] of Object.entries(storedEmails)) {
-      const addrNorm = (addr || '').toLowerCase();
-      const addrProvider = providerByAddress.get(addrNorm) || '';
-      for (const m of msgs.slice(0, 15)) {
-        if (!m.otp) continue;
-        const item: OtpHistoryItem = {
-          otp: m.otp,
-          from:
-            (m as Email & { from_address?: string }).from_address || m.from || m.from_name || '',
-          from_name: m.from_name || '',
-          received_at: m.received_at,
-          inboxAddress: addr,
-        };
-        const orig = (
-          (m as Email & { original_inbox?: string }).original_inbox || ''
-        ).toLowerCase();
-        const sameExact =
-          addrNorm === selectedNorm ||
-          addrNorm === displayedNorm ||
-          (!!orig && (orig === selectedNorm || orig === displayedNorm));
-        // Multi-domain alias only when same provider (abc@x.com vs abc@y.com on one provider)
-        const sameProviderAlias =
-          !!currentLocal &&
-          addrNorm.startsWith(`${currentLocal}@`) &&
-          !!currentProvider &&
-          addrProvider === currentProvider;
-        const isCurrent = sameExact || sameProviderAlias;
-        if (isCurrent) {
-          current.push(item);
-        } else {
-          other.push(item);
-        }
-      }
-    }
-    current.sort((a, b) => b.received_at - a.received_at);
-    other.sort((a, b) => b.received_at - a.received_at);
-    otpHistoryCurrent = current.slice(0, 50);
-    otpHistoryOther = other.slice(0, 50);
-  } catch (error: unknown) {
-    logError(
-      'Failed to load OTP history:',
-      undefined,
-      error instanceof Error ? error : new Error(String(error))
-    );
-  }
-}
+// Global bags are read only while expanded. Requests are invalidated on close,
+// selection changes, disposal and storage updates so older reads cannot restore data.
+$effect(() => {
+  void verificationHistoryRevision;
+  void selectedEmail;
+  void emails;
+  const requestId = ++verificationRequestId;
+  if (!verificationExpanded || frontStrip !== 'verification' || stripsEdgeCollapsed) return;
+  verificationHistoryLoading = true;
+  verificationHistoryError = false;
+  void getEmailMaps()
+    .then((maps) => {
+      if (requestId !== verificationRequestId) return;
+      const addresses = new Set([
+        ...Object.keys(maps.storedEmails),
+        ...Object.keys(maps.archivedEmails),
+      ]);
+      verificationInboxes = [...addresses].map((address) => ({
+        address,
+        emails: [...(maps.storedEmails[address] || []), ...(maps.archivedEmails[address] || [])],
+      }));
+    })
+    .catch((error) => {
+      if (requestId !== verificationRequestId) return;
+      verificationHistoryError = true;
+      logError('Failed to load verification history', error);
+      showToast($t('toasts.operationFailed'), 'error');
+    })
+    .finally(() => {
+      if (requestId === verificationRequestId) verificationHistoryLoading = false;
+    });
+  return () => {
+    verificationRequestId++;
+  };
+});
+onMount(() => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const onChange = (changes: Record<string, unknown>, area: string) => {
+    if (
+      area !== 'local' ||
+      !Object.keys(changes).some(
+        (key) => key === EMAIL_STORAGE_ADDRESS_INDEX_KEY || isEmailStorageBagKey(key)
+      )
+    )
+      return;
+    // Invalidate immediately; debounce reads during mail ingestion.
+    verificationRequestId++;
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      verificationHistoryRevision++;
+    }, 100);
+  };
+  browser.storage.onChanged.addListener(onChange);
+  return () => {
+    verificationRequestId++;
+    clearTimeout(timer);
+    browser.storage.onChanged.removeListener(onChange);
+  };
+});
 
-function toggleOtpDropup() {
-  otpDropupOpen = !otpDropupOpen;
-  if (otpDropupOpen) loadOtpHistory();
+function toggleVerificationExpansion() {
+  verificationExpanded = !verificationExpanded;
 }
 
 async function clearAllOtps() {
@@ -231,7 +272,7 @@ async function clearAllOtps() {
     await doClearAllOtps();
     return;
   }
-  showConfirm($t('inbox.confirmClearAllOtps'), doClearAllOtps);
+  showConfirm($t('inbox.confirmClearAllOtps'), doClearAllOtps, { destructive: true });
 }
 
 async function doClearAllOtps() {
@@ -240,10 +281,13 @@ async function doClearAllOtps() {
     if (response && !response.success) {
       throw new Error(response.error || 'Failed to clear OTPs');
     }
-    otpHistoryCurrent = [];
-    otpHistoryOther = [];
+    // Prevent a read that started before the clear from restoring old OTPs.
+    verificationRequestId += 1;
+    verificationInboxes = [];
+    verificationHistoryRevision++;
     showToast($t('inbox.otpsCleared'));
   } catch (error: unknown) {
+    showToast($t('toasts.operationFailed'), 'error');
     logError(
       'Failed to clear OTPs:',
       undefined,
@@ -276,7 +320,7 @@ async function loadIdentitiesData() {
 
 async function handleIdentityChange() {
   if (selectedIdentityId) {
-    await browser.storage.local.set({ selectedIdentityId });
+    await writeWithRetry({ selectedIdentityId });
   }
 }
 
@@ -287,11 +331,21 @@ loadIdentitiesData();
 async function getCurrentTabDomain() {
   try {
     const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
-    if (tab?.url) {
-      const url = new URL(tab.url);
-      currentDomain = url.hostname;
-    }
+    const url = tab?.url ? new URL(tab.url) : null;
+    siteAccessTab =
+      typeof tab?.id === 'number' && tab.url && url && ['http:', 'https:'].includes(url.protocol)
+        ? { id: tab.id, url: tab.url }
+        : null;
+    await loadWebmcpAccessList();
+    // Website controls do not apply to browser-internal or extension pages.
+    currentDomain =
+      url &&
+      (url.protocol === 'http:' || url.protocol === 'https:') &&
+      !url.href.startsWith(new URL('./', window.location.href).href)
+        ? url.hostname
+        : '';
   } catch (error: unknown) {
+    currentDomain = '';
     logError(
       'Failed to get current tab domain:',
       undefined,
@@ -303,7 +357,14 @@ async function getCurrentTabDomain() {
 let otpOptInList = $state<string[]>([]);
 let isOtpOptedIn = $derived(
   currentDomain
-    ? otpOptInList.some(
+    ? otpOptInList.some((domain) => hostMatchesDomainScope(currentDomain, domain))
+    : false
+);
+
+let otpAutoCopyList = $state<string[]>([]);
+let isOtpAutoCopy = $derived(
+  currentDomain
+    ? otpAutoCopyList.some(
         (d) =>
           typeof d === 'string' &&
           d.toLowerCase() === currentDomain.replace(/^www\./, '').toLowerCase()
@@ -320,25 +381,83 @@ async function loadOtpOptInList() {
   }
 }
 
+async function loadWebmcpAccessList() {
+  try {
+    const tab = siteAccessTab;
+    const choice = tab ? await getWebmcpAccessChoice(tab.id, tab.url) : null;
+    if (tab === siteAccessTab) siteAccessChoice = choice;
+  } catch (error) {
+    logError('Failed to load WebMCP access list', error);
+  }
+}
+
+async function loadOtpAutoCopyList() {
+  try {
+    const res = await browser.storage.local.get(['otpAutoCopyList']);
+    otpAutoCopyList = Array.isArray(res.otpAutoCopyList) ? res.otpAutoCopyList : [];
+  } catch (error) {
+    logError('Failed to load OTP auto-copy list', error);
+  }
+}
+
+async function toggleOtpAutoCopy() {
+  if (!currentDomain) return;
+  const domainKey = currentDomain.replace(/^www\./, '').toLowerCase();
+  const add = !isOtpAutoCopy;
+  try {
+    // Serialized RMW: a toggle in another surface lands between our read and
+    // write instead of being clobbered by the whole-list write.
+    otpAutoCopyList = await updateStoredObject(
+      'otpAutoCopyList',
+      (current) => toggleDomainListItem(current, domainKey, add),
+      parseStringList
+    );
+  } catch (error) {
+    logError('Failed to persist OTP auto-copy list', error);
+    showToast($t('toasts.operationFailed'), 'error');
+    return;
+  }
+  showToast($t(add ? 'toasts.otpAutoCopyEnabled' : 'toasts.otpAutoCopyDisabled'), 'success');
+}
+
 async function toggleOtpOptIn() {
   if (!currentDomain) return;
   const domainKey = currentDomain.replace(/^www\./, '').toLowerCase();
-  let updated: string[];
-  if (isOtpOptedIn) {
-    updated = otpOptInList.filter((d) => typeof d === 'string' && d.toLowerCase() !== domainKey);
-  } else {
-    updated = [...otpOptInList, domainKey];
+  const add = !isOtpOptedIn;
+  try {
+    otpOptInList = await updateStoredObject(
+      'otpOptInList',
+      (current) => toggleDomainListItem(current, domainKey, add),
+      parseStringList
+    );
+  } catch (error) {
+    logError('Failed to persist OTP opt-in list', error);
+    showToast($t('toasts.operationFailed'), 'error');
+    return;
   }
-  otpOptInList = updated;
-  await browser.storage.local.set({ otpOptInList: updated });
-  showToast(
-    $t(isOtpOptedIn ? 'toasts.otpAutofillEnabled' : 'toasts.otpAutofillDisabled'),
-    'success'
-  );
+  showToast($t(add ? 'toasts.otpAutofillEnabled' : 'toasts.otpAutofillDisabled'), 'success');
+}
+
+async function chooseWebmcpAccess(choice: WebmcpAccessChoice) {
+  const tab = siteAccessTab;
+  if (!tab || siteAccessBusy) return;
+  siteAccessBusy = true;
+  try {
+    await setWebmcpAccessChoice(tab.id, tab.url, choice);
+    await loadWebmcpAccessList();
+  } catch (error) {
+    logError('Failed to persist WebMCP access list', error);
+    showToast($t('toasts.operationFailed'), 'error');
+  } finally {
+    siteAccessBusy = false;
+  }
 }
 
 onMount(() => {
   loadOtpOptInList();
+  loadWebmcpAccessList();
+  loadOtpAutoCopyList();
+  void loadLabelCatalog();
 
   const handleStorageChange = (
     changes: Record<string, { oldValue?: unknown; newValue?: unknown }>
@@ -347,6 +466,17 @@ onMount(() => {
       const newValue = changes.otpOptInList.newValue;
       otpOptInList = Array.isArray(newValue) ? (newValue as string[]) : [];
     }
+    if (
+      changes.webmcpAccessList ||
+      changes.webmcpSiteDecisions ||
+      Object.keys(changes).some((key) => key.startsWith('webmcpOnce_'))
+    )
+      void loadWebmcpAccessList();
+    if (changes.otpAutoCopyList) {
+      const newValue = changes.otpAutoCopyList.newValue;
+      otpAutoCopyList = Array.isArray(newValue) ? (newValue as string[]) : [];
+    }
+    if (changes.emailLabelCatalog) void loadLabelCatalog();
   };
   browser.storage.onChanged.addListener(handleStorageChange);
 
@@ -363,22 +493,24 @@ let domainHintApplied = false;
 $effect(() => {
   if (domainHintApplied || !currentDomain || identities.length === 0) return;
   const rootDomain = getRootDomain(currentDomain);
-  const match = identities.find((i) =>
-    i.domainHints?.some((h) => h === rootDomain || h === currentDomain)
-  );
+  const match = identities.find((i) => {
+    const hints = i.domainHints || [];
+    const overrideDomains = i.domainFieldOverrides ? Object.keys(i.domainFieldOverrides) : [];
+    const allDomains = [...hints, ...overrideDomains];
+    return allDomains.some((h) => {
+      const norm = h
+        .toLowerCase()
+        .trim()
+        .replace(/^www\./, '');
+      return norm === rootDomain || norm === currentDomain || currentDomain.endsWith(`.${norm}`);
+    });
+  });
   if (match && match.id !== selectedIdentityId) {
     selectedIdentityId = match.id;
     handleIdentityChange();
   }
   domainHintApplied = true;
 });
-
-function domainMatchesHost(loginDomain: string, host: string): boolean {
-  const a = (loginDomain || '').toLowerCase().replace(/^www\./, '');
-  const b = (host || '').toLowerCase().replace(/^www\./, '');
-  if (!a || !b) return false;
-  return a === b || b.endsWith(`.${a}`) || a.endsWith(`.${b}`);
-}
 
 function formatOtp(otp: string): string {
   const clean = otp.replace(/\s/g, '');
@@ -395,11 +527,12 @@ let {
   selectedEmail = '',
   displayedEmail = $bindable(''),
   accounts = [],
-  allAccounts = [],
+  allAddresses = [],
   loading = false,
   searchQuery = '',
   sortBy = 'newest',
   otpOnly = false,
+  unreadOnly = false,
   hasAttachment = false,
   senderDomain = '',
   senderEmail = '',
@@ -414,13 +547,12 @@ let {
   dateTo = '',
   notificationsEnabled = false,
   activeThreadMessageId = '',
+  activeThreadInbox = '',
   filteredEmails = [],
   emails = [],
   /** Folder tabs + label filter (bindable for sidebar control) */
   emailListTab = $bindable('inbox' as EmailListTab),
   activeLabelFilter = $bindable(null as string | null),
-  /** When true, status chips only show while searching (sidebar owns them when wide) */
-  hideListTabsUnlessSearch = false,
   /** All mailbox bags for cross-address search */
   allStoredEmails = {} as Record<string, Email[]>,
   latestOtp = '------',
@@ -429,6 +561,7 @@ let {
   otpContext = '',
   formDetected = false,
   providerFailoverHint = null as null | {
+    addressId: string;
     show: boolean;
     otherProvidersOk: boolean;
     nextRetryAt: number;
@@ -436,33 +569,34 @@ let {
   },
   savedSearchFilters = [],
   savedLogins = [] as import('@/utils/types.js').CredentialsHistoryItem[],
-  onSelectAccount = () => {},
+  onSelectAddress = () => {},
   onCopyEmail = () => {},
   onOpenQrDialog = () => {},
-  onCreateInbox = () => {},
+  onCreateAddress = () => {},
   onAutofillForm = () => {},
-  onRefreshInbox = async () => {},
+  onCreateIdentity = () => {},
+  onRefreshMailbox = async () => {},
   onToggleNotifications = () => {},
   onRefillSavedLogin = (_login: import('@/utils/types.js').CredentialsHistoryItem) => {},
   onSaveFilterQuick = () => {},
   onOpenMagicLink = (_url: string) => {},
-  onArchiveAccount = () => {},
-  onUnarchiveAccount = () => {},
-  onRemoveAccount = () => {},
-  onRestoreAccount = () => {},
-  onReloadAccounts = async () => {},
-  onEditAccount = () => {},
+  onArchiveAddress = () => {},
+  onUnarchiveAddress = () => {},
+  onRemoveAddress = () => {},
+  onRestoreAddress = () => {},
+  onReloadAddresses = async () => {},
+  onEditAddress = () => {},
   onToggleAutoExtend = () => {},
-  onExtendAccount = () => {},
+  onExtendAddress = () => {},
   onOpenMessageDetail = () => {},
   onClearFilters = () => {},
-  onCopyOtp = () => {},
   onCopyOtpFromMessage = () => {},
   onOpenArchivedEmails = () => {},
   onOpenExpiredEmails = () => {},
   onSearchChange = (_v: string) => {},
   onSortChange = (_v: string) => {},
   onOtpOnlyChange = () => {},
+  onUnreadOnlyChange = () => {},
   onHasAttachmentChange = () => {},
   onSenderDomainChange = () => {},
   onSelectedSendersChange = (_v: string[]) => {},
@@ -477,13 +611,17 @@ let {
     _dateFrom: string,
     _dateTo: string,
     _selectedSenders: string[],
-    _sortBy: string
+    _sortBy: string,
+    _recipient: string,
+    _subject: string,
+    _unreadOnly: boolean
   ) => {},
   onLoadFilter = (_filter: SavedSearchFilter) => {},
   onRenameFilter = (_id: string, _name: string) => {},
   onDeleteFilter = (_id: string) => {},
-  onNavigateToSettings = () => {},
   onNavigateToManage = () => {},
+  onManageTags = () => {},
+  onManageLabels = () => {},
   onArchiveEmails = (_emails: Email[]) => {},
   onDeleteEmails = (_emails: Email[]) => {},
   onRestoreEmails = (_emails: Email[]) => {},
@@ -493,64 +631,36 @@ let {
   dropdownOpen = undefined,
   openSection = undefined,
   onDropdownOpenChange = (_open: boolean) => {},
-  onCreateInboxWithProvider = () => {},
-  showToast = (_message: string, _type?: string, _undo?: (() => void | Promise<void>) | null) => {},
-  showConfirm = (_message: string, _onConfirm: () => void) => {},
-  selectedProviderInstance = null as string | null,
-  emailPreviewEnabled = true,
+  showToast = (
+    _message: string | { message: string },
+    _type?: string,
+    _undo?: (() => void | Promise<void>) | null
+  ) => {},
+  showConfirm = (
+    _message: string,
+    _onConfirm: () => void,
+    _options?: import('@/utils/ui/shared-ui.js').ConfirmDialogOptions
+  ) => {},
+  emailPreviewMode = 'tooltip' as EmailPreviewMode,
   highlightedEmailId = '',
-  onSelectionChange = (_state: {
-    mode: boolean;
-    count: number;
-    canArchive: boolean;
-    canDelete: boolean;
-    canRestore: boolean;
-  }) => {},
-  selectionApi = $bindable({
-    cancel: () => {},
-    archive: () => {},
-    delete: () => {},
-    restore: () => {},
-    star: () => {},
-    label: () => {},
-    selectAll: () => {},
-    deselectAll: () => {},
-    applyLabel: async (_lab: string) => {},
-  }),
-  externalSelectionBar = false,
   gesturesEnabled = true,
-  onScrollDirection = (_dir: 'up' | 'down') => {},
+  scrollChromeHidden = false,
+  onScrollDirection = (_dir: 'up' | 'down', _atTop = false) => {},
   loadMoreEmails: externalLoadMoreEmails = () => {},
-}: {
+  onCreateRuleFromEmail = (_from = '') => {},
+}: FilterQueryProps & {
   context?: 'popup' | 'sidepanel' | 'app';
   selectedEmail?: string;
   displayedEmail?: string;
   dropdownOpen?: boolean;
-  accounts?: Account[];
-  allAccounts?: Account[];
+  accounts?: Address[];
+  allAddresses?: Address[];
   loading?: boolean;
-  searchQuery?: string;
-  sortBy?: string;
-  otpOnly?: boolean;
-  hasAttachment?: boolean;
-  senderDomain?: string;
-  senderEmail?: string;
-  recipient?: string;
-  subject?: string;
-  notSenderDomain?: string;
-  notSenderEmail?: string;
-  notRecipient?: string;
-  notSubject?: string;
-  selectedSenders?: string[];
-  dateFrom?: string;
-  dateTo?: string;
-  notificationsEnabled?: boolean;
   activeThreadMessageId?: string;
+  activeThreadInbox?: string;
   filteredEmails?: Email[];
-  emails?: Email[];
   emailListTab?: EmailListTab;
   activeLabelFilter?: string | null;
-  hideListTabsUnlessSearch?: boolean;
   allStoredEmails?: Record<string, Email[]>;
   latestOtp?: string;
   latestOtpSender?: string;
@@ -558,66 +668,45 @@ let {
   otpContext?: string;
   formDetected?: boolean;
   providerFailoverHint?: null | {
+    addressId: string;
     show: boolean;
     otherProvidersOk: boolean;
     nextRetryAt: number;
     failCount: number;
   };
-  savedSearchFilters?: SavedSearchFilter[];
   savedLogins?: import('@/utils/types.js').CredentialsHistoryItem[];
-  onSelectAccount?: (email: string) => void;
+  onSelectAddress?: (email: string) => void | Promise<void>;
   onCopyEmail?: () => void;
   onOpenQrDialog?: () => void;
-  onCreateInbox?: (provider?: string, instanceId?: string) => void;
+  onCreateAddress?: (provider?: string, instanceId?: string) => void;
   onAutofillForm?: () => void;
-  onRefreshInbox?: () => Promise<void>;
-  onToggleNotifications?: () => void;
+  onCreateIdentity?: () => void;
+  onRefreshMailbox?: (addressId?: string) => Promise<void>;
   onRefillSavedLogin?: (login: import('@/utils/types.js').CredentialsHistoryItem) => void;
   onSaveFilterQuick?: () => void;
-  onOpenMagicLink?: (url: string) => void;
-  onArchiveAccount?: (account: Account) => void;
-  onUnarchiveAccount?: (account: Account) => void;
-  onRemoveAccount?: (address: string) => void;
-  onRestoreAccount?: (address: string) => void;
-  onReloadAccounts?: (skipEmailSelection?: boolean) => Promise<void>;
-  onEditAccount?: (account: Account) => void;
-  onToggleAutoExtend?: (account: Account) => void | Promise<void>;
-  onExtendAccount?: (account: Account) => void | Promise<void>;
+  onOpenMagicLink?: (url: string, address?: string) => void;
+  onArchiveAddress?: (account: Address) => void;
+  onUnarchiveAddress?: (account: Address) => void;
+  onRemoveAddress?: (address: string) => void;
+  onRestoreAddress?: (address: string) => void;
+  onReloadAddresses?: (skipEmailSelection?: boolean) => Promise<void>;
+  onEditAddress?: (account: Address) => void;
+  onToggleAutoExtend?: (account: Address) => void | Promise<void>;
+  onExtendAddress?: (account: Address) => void | Promise<void>;
   onOpenMessageDetail?: (thread: Email[]) => void;
   onSearchText?: (query: string) => void;
-  onClearFilters?: () => void | Promise<void>;
-  onCopyOtp?: () => void;
   onCopyOtpFromMessage?: (otp: string) => void;
   onOpenArchivedEmails?: () => void;
   onOpenExpiredEmails?: () => void;
-  onSearchChange?: (v: string) => void;
-  onSortChange?: (v: string) => void;
-  onOtpOnlyChange?: (v: boolean) => void;
-  onHasAttachmentChange?: (v: boolean) => void;
-  onSenderDomainChange?: (v: string) => void;
-  onSelectedSendersChange?: (v: string[]) => void;
-  onDateFromChange?: (v: string) => void;
-  showToast?: (message: string, type?: string, undo?: (() => void | Promise<void>) | null) => void;
-  showConfirm?: (message: string, onConfirm: () => void) => void;
-  onDateToChange?: (v: string) => void;
-  onSaveFilter?: (
-    name: string,
-    searchQuery: string,
-    hasOTP: boolean,
-    hasAttachment: boolean,
-    senderDomain: string,
-    dateFrom: string,
-    dateTo: string,
-    selectedSenders: string[],
-    sortBy: string,
-    recipient: string,
-    subject: string
+  showToast?: ToastFn;
+  showConfirm?: (
+    message: string,
+    onConfirm: () => void,
+    options?: import('@/utils/ui/shared-ui.js').ConfirmDialogOptions
   ) => void;
-  onLoadFilter?: (filter: SavedSearchFilter) => void;
-  onRenameFilter?: (id: string, name: string) => void;
-  onDeleteFilter?: (id: string) => void;
-  onNavigateToSettings?: () => void | Promise<void>;
   onNavigateToManage?: () => void | Promise<void>;
+  onManageTags?: () => void;
+  onManageLabels?: () => void;
   onArchiveEmails?: (emails: Email[]) => void | Promise<void>;
   onDeleteEmails?: (emails: Email[]) => void | Promise<void>;
   onRestoreEmails?: (emails: Email[]) => void | Promise<void>;
@@ -626,32 +715,15 @@ let {
   defaultDomain?: string;
   openSection?: 'active' | 'archived' | 'expired' | null;
   onDropdownOpenChange?: (open: boolean) => void;
-  onCreateInboxWithProvider?: (providerId: string, instanceId?: string) => void;
-  selectedProviderInstance?: string | null;
-  emailPreviewEnabled?: boolean;
+  emailPreviewMode?: EmailPreviewMode;
   highlightedEmailId?: string;
-  onSelectionChange?: (state: {
-    mode: boolean;
-    count: number;
-    canArchive: boolean;
-    canDelete: boolean;
-    canRestore: boolean;
-  }) => void;
-  selectionApi?: {
-    cancel: () => void;
-    archive: () => void;
-    delete: () => void;
-    restore: () => void;
-    star: () => void;
-    label: () => void;
-    selectAll: () => void;
-    deselectAll: () => void;
-    applyLabel: (lab: string) => Promise<void>;
-  };
-  externalSelectionBar?: boolean;
   gesturesEnabled?: boolean;
-  onScrollDirection?: (dir: 'up' | 'down') => void;
+  /** Shared bottom chrome state; strips hide while the list is actively scrolling. */
+  scrollChromeHidden?: boolean;
+  onScrollDirection?: (dir: 'up' | 'down', atTop?: boolean) => void;
   loadMoreEmails?: () => void;
+  /** Right-click “Create rule from this email” - receives the email's sender. */
+  onCreateRuleFromEmail?: (from?: string) => void;
 } = $props();
 
 /** Best matching saved login for the active tab domain */
@@ -664,49 +736,27 @@ let matchingSavedLogin = $derived.by(() => {
   return [...matches].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))[0];
 });
 
-/** Live (non-archived, non-deleted) emails only — strips must not use archived/deleted messages */
-let liveEmails = $derived.by(() =>
-  (Array.isArray(emails) ? emails : []).filter((e) => !e.local_archived && !e.local_deleted)
+/** Live (non-archived, non-deleted) emails only - strips must not use archived/deleted messages */
+// Reserve each website/inbox/type lane before filtering expiry: an expired
+// newer message must not promote an older code with a longer detected expiry.
+let currentVerificationItems = $derived.by(() =>
+  collectVerificationItems(
+    [{ address: currentAddress?.address || selectedEmail, emails }],
+    verificationPreferences.value.maxAgeMinutes,
+    Date.now()
+  )
 );
-
-/** Latest magic link across live mailbox emails */
-let latestMagicLink = $derived.by(() => {
-  for (const e of liveEmails) {
-    const links = e.magicLinks;
-    if (Array.isArray(links) && links.length) {
-      const link = links[0];
-      return {
-        url: link.url,
-        host: link.host || '',
-        email: e,
-        expiresAt: (link as { expiresAt?: number }).expiresAt || e.otpExpiresAt || null,
-      };
-    }
-  }
-  return null;
-});
-
-/** Latest live OTP from current mailbox emails (ignores archived/deleted) */
-let latestLiveOtp = $derived.by(() => {
-  const latest = liveEmails.reduce(
-    (max, e) => {
-      if (e.otp && String(e.otp).trim() && e.otp !== '------') {
-        if (!max || (e.received_at || 0) > (max.received_at || 0)) return e;
-      }
-      return max;
-    },
-    null as Email | null
-  );
-
-  if (!latest) return null;
-  return {
-    otp: String(latest.otp),
-    sender: latest.from || '',
-    senderName: latest.from_name || '',
-    email: latest,
-    expiresAt: latest.otpExpiresAt || null,
-  };
-});
+let historyVerificationItems = $derived.by(() =>
+  collectVerificationItems(
+    verificationInboxes,
+    verificationPreferences.value.maxAgeMinutes,
+    Date.now()
+  )
+);
+let hasVerificationContent = $derived(
+  currentVerificationItems.length > 0 ||
+    (verificationExpanded && historyVerificationItems.length > 0)
+);
 
 let hasActiveListFilters = $derived(
   sortBy !== 'newest' ||
@@ -719,18 +769,8 @@ let hasActiveListFilters = $derived(
     !!searchQuery?.trim()
 );
 
-// Promote front strip only when the "winner" changes (avoid thrashing writes).
-// Compare frontStrip via untrack so the write does not re-subscribe this effect.
 $effect(() => {
-  let next: typeof frontStrip | null = null;
-  if (hasActiveListFilters) next = 'filter';
-  else if (matchingSavedLogin) next = 'savedLogin';
-  else if (latestMagicLink) next = 'magic';
-  if (next) {
-    const current = untrack(() => frontStrip);
-    if (current !== next) frontStrip = next;
-  }
-  if (next === 'filter') {
+  if (hasActiveListFilters) {
     const showing = untrack(() => showFilterAppliedStrip);
     if (!showing) {
       untrack(() => {
@@ -741,52 +781,122 @@ $effect(() => {
   }
 });
 
-// Lifecycle intelligence: recompute when accounts change
+// Lifecycle intelligence: recompute when accounts change. Older passes may
+// finish after a mailbox switch; only the newest pass may publish suggestions.
+let lifecycleHintsGeneration = 0;
 $effect(() => {
-  const list = (allAccounts?.length ? allAccounts : accounts) || [];
+  const list = (allAddresses?.length ? allAddresses : accounts) || [];
   void list.length;
+  const generation = ++lifecycleHintsGeneration;
+  let active = true;
   void (async () => {
     try {
       const { suggestLifecycleActions, recomputeLifecycleFromStorage } = await import(
         '@/features/intelligence/inbox-lifecycle.js'
       );
-      await recomputeLifecycleFromStorage(list as import('@/utils/types.js').Account[]);
-      lifecycleHints = await suggestLifecycleActions(list as import('@/utils/types.js').Account[]);
+      await recomputeLifecycleFromStorage(list as import('@/utils/types.js').Address[]);
+      if (!active || generation !== lifecycleHintsGeneration) return;
+      const suggestions = await suggestLifecycleActions(
+        list as import('@/utils/types.js').Address[]
+      );
+      if (!active || generation !== lifecycleHintsGeneration) return;
+      lifecycleHints = suggestions;
     } catch {
       /* ignore */
-      lifecycleHints = [];
+      if (active && generation === lifecycleHintsGeneration) lifecycleHints = [];
     }
   })();
+  return () => {
+    active = false;
+  };
 });
-
-let otpSenderEmail = $derived(latestLiveOtp?.sender || latestOtpSender);
-
-let latestOtpEmail = $derived(latestLiveOtp?.email ?? null);
-
-/** OTP code shown in strip — never from archived/deleted messages */
-let stripOtpCode = $derived(latestLiveOtp?.otp || '------');
 
 let stripClockTick = $state(Date.now());
 $effect(() => {
   const id = setInterval(() => {
     stripClockTick = Date.now();
-  }, 30_000);
+  }, 1_000);
   return () => clearInterval(id);
 });
 
-let stripOtpRemaining = $derived.by(() => {
-  void stripClockTick;
-  const exp = latestLiveOtp?.expiresAt;
-  if (!exp) return '';
-  return formatRemaining(exp, stripClockTick);
+let selectedVerificationId = $state<string | null>(null);
+let verificationInbox = '';
+let copiedVerificationId = $state<string | null>(null);
+let copyFeedbackTimer: ReturnType<typeof setTimeout> | undefined;
+let selectedVerification = $derived(
+  currentVerificationItems.find((item) => item.id === selectedVerificationId) ?? null
+);
+let verificationIndex = $derived(
+  currentVerificationItems.findIndex((item) => item.id === selectedVerificationId)
+);
+$effect(() => {
+  const address = selectedEmail;
+  const items = currentVerificationItems;
+  untrack(() => {
+    if (verificationInbox !== address) {
+      verificationInbox = address;
+      selectedVerificationId = null;
+    }
+    if (selectedVerificationId && items.some((item) => item.id === selectedVerificationId)) return;
+    selectedVerificationId = items.find((item) => item.status === 'current')?.id ?? null;
+  });
 });
+function moveVerification(delta: number) {
+  const next = currentVerificationItems[verificationIndex < 0 ? 0 : verificationIndex + delta];
+  if (next) selectedVerificationId = next.id;
+}
+async function chooseVerification(item: VerificationItem) {
+  if (item.address.toLowerCase() !== selectedEmail.toLowerCase()) {
+    await onSelectAddress(item.address);
+    await tick();
+    if (item.address.toLowerCase() !== selectedEmail.toLowerCase()) return;
+  }
+  if (!currentVerificationItems.some((entry) => entry.id === item.id)) return;
+  selectedVerificationId = item.id;
+  verificationExpanded = false;
+}
+async function copySelectedVerification() {
+  const item = selectedVerification;
+  if (item?.kind !== 'otp') return;
+  try {
+    const ok = await copyToClipboardAndSchedulePurge(item.value);
+    if (ok) {
+      copiedVerificationId = item.id;
+      clearTimeout(copyFeedbackTimer);
+      copyFeedbackTimer = setTimeout(() => {
+        copiedVerificationId = null;
+      }, 1500);
+    }
+    showToast($t(ok ? 'inbox.otpCopied' : 'inbox.copyFailed'), ok ? 'success' : 'error');
+  } catch (error) {
+    logError('Failed to copy current verification', error);
+    showToast($t('inbox.copyFailed'), 'error');
+  }
+}
+onDestroy(() => clearTimeout(copyFeedbackTimer));
 
-let stripMagicRemaining = $derived.by(() => {
-  void stripClockTick;
-  const exp = latestMagicLink?.expiresAt;
-  if (!exp) return '';
-  return formatRemaining(exp, stripClockTick);
-});
+async function openVerificationMessage(email: Email) {
+  const address = (email.original_inbox || '').toLowerCase();
+  const target = (allAddresses.length ? allAddresses : accounts).find(
+    (entry) => entry.address.toLowerCase() === address
+  );
+  if (!target) {
+    showToast($t('toasts.operationFailed'), 'error');
+    return;
+  }
+  try {
+    if ((currentAddress?.address || selectedEmail).toLowerCase() !== address) {
+      await onSelectAddress(target.address);
+      await tick();
+      // A newer mailbox selection may have superseded the asynchronous switch.
+      if ((currentAddress?.address || selectedEmail).toLowerCase() !== address) return;
+    }
+    onOpenMessageDetail([email]);
+  } catch (error) {
+    logError('Failed to open verification source inbox', error);
+    showToast($t('toasts.operationFailed'), 'error');
+  }
+}
 
 // Tag editing state
 let tagDialogOpen = $state(false);
@@ -794,11 +904,13 @@ let actionRowCollapsed = $state(false);
 let actionRowCollapsedInitialized = $state(false);
 let accountSelectorHovered = $state(false);
 let actionRowHovered = $state(false);
+/** Scroll-driven compact mode for the mailbox address/action header. */
+let addressBarCollapsed = $state(false);
 let searchBarFocused = $state(false);
-/** Email count when search focus began — only count arrivals while focused */
+/** Email count when search focus began - only count arrivals while focused */
 let searchFocusEmailBaseline = $state(0);
 let searchFocusNewMailCount = $state(0);
-let tagTargetAccount = $state<Account | null>(null);
+let tagTargetAddress = $state<Address | null>(null);
 
 // Load actionRowCollapsed state from storage
 async function loadActionRowCollapsedState() {
@@ -823,7 +935,7 @@ async function loadActionRowCollapsedState() {
 // Save actionRowCollapsed state to storage
 async function saveActionRowCollapsedState() {
   try {
-    await browser.storage.local.set({ actionRowCollapsed });
+    await writeWithRetry({ actionRowCollapsed });
   } catch (error) {
     logError(
       'Failed to save actionRowCollapsed state:',
@@ -854,7 +966,38 @@ let showFavicons = $state(true);
 let viewDropdownOpen = $state(false);
 let viewSortSubOpen = $state(false);
 let viewShowSubOpen = $state(false);
+let viewMenuBtnEl = $state<HTMLButtonElement | null>(null);
+let viewMenuPos = $state({ top: 0, left: 0 });
 let showFaviconsInitialized = $state(false);
+
+function resetLayoutSettings() {
+  showFavicons = true;
+  hideLabels = false;
+  hideOtpLabels = false;
+  hideAttachmentBadges = false;
+  threadGrouping = false;
+  showStarredOnly = false;
+  preferHideVerificationStrip = false;
+  preferHideAutofillStrip = false;
+  expandedThreadIds = new Set();
+  void writeWithRetry({
+    showFavicons: true,
+    hideLabels: false,
+    hideOtpLabels: false,
+    hideAttachmentBadges: false,
+    threadGrouping: false,
+    showStarredOnly: false,
+    preferHideVerificationStrip: false,
+    preferHideAutofillStrip: false,
+    preferHideOtpStrip: false,
+    preferHideMagicStrip: false,
+  });
+  void handleSortChange('newest');
+  void setPageSize(20);
+  viewDropdownOpen = false;
+  viewSortSubOpen = false;
+  viewShowSubOpen = false;
+}
 
 // View mode: whether to hide per-email labels (Local, custom tags) and OTP badges
 let hideLabels = $state(false);
@@ -864,17 +1007,47 @@ let hideOtpLabelsInitialized = $state(false);
 let hideAttachmentBadges = $state(false);
 let hideAttachmentBadgesInitialized = $state(false);
 
+// Anti-flash: sync-first preludes via the shared prefs mirror
+// (stored-prefs-sync). When the mirror is warm (import-time hydration), the
+// row pill/badge gates and strip prefs hold their STORED value at first
+// paint instead of popping from defaults after the async reads resolve.
+// The async loads below still run to backfill `gesturesEnabled` (not
+// mirrored) and to confirm mirror values from storage.
+(function primeMailboxLayoutPrefsSync() {
+  const warm = peekStoredBooleansSync([
+    'showFavicons',
+    'hideLabels',
+    'hideOtpLabels',
+    'hideAttachmentBadges',
+    'preferHideVerificationStrip',
+    'preferHideAutofillStrip',
+  ]);
+  if (!warm) return; // mirror cold - async loaders keep the old behavior
+  showFavicons = warm.showFavicons;
+  hideLabels = warm.hideLabels;
+  hideOtpLabels = warm.hideOtpLabels;
+  hideAttachmentBadges = warm.hideAttachmentBadges;
+  preferHideVerificationStrip = warm.preferHideVerificationStrip;
+  preferHideAutofillStrip = warm.preferHideAutofillStrip;
+  showFaviconsInitialized = true;
+  hideLabelsInitialized = true;
+  hideOtpLabelsInitialized = true;
+  hideAttachmentBadgesInitialized = true;
+})();
+
 async function loadShowFaviconsState() {
   try {
     const result = (await browser.storage.local.get([
       'showFavicons',
       'gesturesEnabled',
+      'preferHideVerificationStrip',
       'preferHideOtpStrip',
       'preferHideAutofillStrip',
       'preferHideMagicStrip',
     ])) as {
       showFavicons?: boolean;
       gesturesEnabled?: boolean;
+      preferHideVerificationStrip?: boolean;
       preferHideOtpStrip?: boolean;
       preferHideAutofillStrip?: boolean;
       preferHideMagicStrip?: boolean;
@@ -884,12 +1057,16 @@ async function loadShowFaviconsState() {
       showFavicons = result.showFavicons;
     } else {
       showFavicons = true;
-      void browser.storage.local.set({ showFavicons: true });
+      void writeWithRetry({ showFavicons: true });
     }
     if (result.gesturesEnabled === false) gesturesEnabled = false;
-    preferHideOtpStrip = !!result.preferHideOtpStrip;
+    preferHideVerificationStrip =
+      result.preferHideVerificationStrip ??
+      (result.preferHideOtpStrip === true && result.preferHideMagicStrip === true);
+    if (result.preferHideVerificationStrip === undefined) {
+      void writeWithRetry({ preferHideVerificationStrip });
+    }
     preferHideAutofillStrip = !!result.preferHideAutofillStrip;
-    preferHideMagicStrip = !!result.preferHideMagicStrip;
   } catch (error) {
     logError(
       'Failed to load showFavicons state:',
@@ -903,7 +1080,7 @@ async function loadShowFaviconsState() {
 
 async function saveShowFaviconsState() {
   try {
-    await browser.storage.local.set({ showFavicons });
+    await writeWithRetry({ showFavicons });
   } catch (error) {
     logError(
       'Failed to save showFavicons state:',
@@ -934,7 +1111,7 @@ async function loadHideLabelsState() {
 
 async function saveHideLabelsState() {
   try {
-    await browser.storage.local.set({ hideLabels });
+    await writeWithRetry({ hideLabels });
   } catch (error) {
     logError(
       'Failed to save hideLabels state:',
@@ -965,7 +1142,7 @@ async function loadHideOtpLabelsState() {
 
 async function saveHideOtpLabelsState() {
   try {
-    await browser.storage.local.set({ hideOtpLabels });
+    await writeWithRetry({ hideOtpLabels });
   } catch (error) {
     logError(
       'Failed to save hideOtpLabels state:',
@@ -996,7 +1173,7 @@ async function loadHideAttachmentBadgesState() {
 
 async function saveHideAttachmentBadgesState() {
   try {
-    await browser.storage.local.set({ hideAttachmentBadges });
+    await writeWithRetry({ hideAttachmentBadges });
   } catch (error) {
     logError(
       'Failed to save hideAttachmentBadges state:',
@@ -1090,28 +1267,8 @@ let showStarredOnly = $state(false);
 /** True while a renew-once / always-renew action is in progress (renewal strip). */
 let isRenewing = $state(false);
 
-// Selection toolbar preference
-let selectionToolbarEnabled = $state(true);
-
 // Load persisted prefs once on mount
 onMount(() => {
-  void browser.storage.local.get(['selectionToolbarEnabled']).then((r) => {
-    selectionToolbarEnabled =
-      (r as { selectionToolbarEnabled?: boolean }).selectionToolbarEnabled !== false;
-  });
-  const onSelectionToolbarChanged = (
-    changes: Record<string, { newValue?: unknown }>,
-    area: string
-  ) => {
-    if (area !== 'local' || !changes.selectionToolbarEnabled) return;
-    selectionToolbarEnabled = changes.selectionToolbarEnabled.newValue !== false;
-  };
-  try {
-    browser.storage.onChanged.addListener(onSelectionToolbarChanged);
-  } catch {
-    /* ignore */
-  }
-
   void (async () => {
     try {
       const result = (await browser.storage.local.get([
@@ -1141,55 +1298,41 @@ onMount(() => {
       // Storage read failed - keep defaults
     }
   })();
-
-  return () => {
-    try {
-      browser.storage.onChanged.removeListener(onSelectionToolbarChanged);
-    } catch {
-      /* ignore */
-    }
-  };
 });
 
 async function setPageSize(n: number) {
+  const previousPageSize = pageSize;
+  const previousDisplayedCount = displayedEmailCount;
   pageSize = n;
   displayedEmailCount = n;
   try {
-    await browser.storage.local.set({ emailListPageSize: n });
-  } catch {
-    /* ignore */
+    await writeWithRetry({ emailListPageSize: n });
+  } catch (error) {
+    pageSize = previousPageSize;
+    displayedEmailCount = previousDisplayedCount;
+    logError('Failed to persist email list page size', error);
+    showToast($t('toasts.operationFailed'), 'error');
   }
 }
 
-// Multi-select strip (hosted here so it matches OTP strip size/placement)
-let emailSelection = $state({
-  mode: false,
-  count: 0,
-  canArchive: false,
-  canDelete: false,
-  canRestore: false,
-});
-let emailSelectionApi = $state({
-  cancel: () => {},
-  archive: () => {},
-  delete: () => {},
-  restore: () => {},
-  star: () => {},
-  label: () => {},
-  selectAll: () => {},
-  deselectAll: () => {},
-  applyLabel: async (_lab: string) => {},
-});
-/** Hide Search FAB while scrolling down the list */
-let fabHidden = $state(false);
-
 // Label filter chips (alongside Inbox/Archived/…)
-let emailTagsMap = $state<Record<string, string[]>>({});
+let emailLabelsMap = $state<Record<string, string[]>>({});
 let labelOverflowOpen = $state(false);
+let labelCatalog = $state<EmailLabelDef[]>([]);
+
+const labelColor = (name: string) => labelColorFor(labelCatalog, name);
+
+async function loadLabelCatalog() {
+  try {
+    labelCatalog = await getEmailLabelCatalog();
+  } catch {
+    labelCatalog = [];
+  }
+}
 
 $effect(() => {
-  return emailTagsStore.subscribe((map) => {
-    emailTagsMap = map;
+  return emailLabelsStore.subscribe((map) => {
+    emailLabelsMap = map;
   });
 });
 
@@ -1199,6 +1342,7 @@ $effect(() => {
   void sortBy;
   void searchQuery;
   void otpOnly;
+  void unreadOnly;
   void emailListTab;
   void activeLabelFilter;
   void senderDomain;
@@ -1213,7 +1357,7 @@ $effect(() => {
 });
 
 // When switching mailbox (prev/next), drop label/star/tab filters that would hide all mails
-// Plain let — must NOT be $state (read+write in same effect → infinite loop)
+// Plain let - must NOT be $state (read+write in same effect → infinite loop)
 let lastFilterMailbox = '';
 $effect(() => {
   const addr = selectedEmail || '';
@@ -1225,8 +1369,7 @@ $effect(() => {
     emailListTab = 'inbox';
     displayedEmailCount = pageSize;
     expandedThreadIds = new Set();
-    emailSelectionApi.cancel?.();
-    emailSelectionApi.deselectAll?.();
+    deselectAll();
     untrack(() => {
       onSearchChange?.('');
       onOtpOnlyChange?.(false);
@@ -1242,26 +1385,62 @@ $effect(() => {
 
 let lastFilterTab = '';
 $effect(() => {
-  if (lastFilterTab && lastFilterTab !== emailListTab) {
+  // Selection only makes sense against one filtered view: switching the tab OR
+  // narrowing the list with a label filter / starred-only toggle must clear it,
+  // otherwise bulk ops (archive/delete/tag) would silently apply to just the
+  // visible subset and drop the rest of the selection (AGENTS.md §5).
+  const filterKey = [
+    emailListTab,
+    activeLabelFilter || '',
+    showStarredOnly ? 'starred' : '',
+    searchQuery || '',
+    otpOnly ? 'otp' : '',
+    unreadOnly ? 'unread' : '',
+    hasAttachment ? 'attachment' : '',
+    senderDomain || '',
+    senderEmail || '',
+    recipient || '',
+    subject || '',
+    notSenderDomain || '',
+    notSenderEmail || '',
+    notRecipient || '',
+    notSubject || '',
+    selectedSenders.join(','),
+    dateFrom || '',
+    dateTo || '',
+  ].join('|');
+  if (lastFilterTab && lastFilterTab !== filterKey) {
     untrack(() => {
       expandedThreadIds = new Set();
       deselectAll();
     });
   }
-  lastFilterTab = emailListTab;
+  lastFilterTab = filterKey;
 });
 
-let tabCounts = $derived.by(
-  (): Record<EmailListTab, number> => ({
-    inbox: filteredEmails.filter((e: Email) => !e.local_archived && !e.local_deleted).length,
-    archived: filteredEmails.filter((e: Email) => e.local_archived && !e.local_deleted).length,
-    deleted: filteredEmails.filter((e: Email) => !!e.local_deleted).length,
-    storedLocally: filteredEmails.filter(
-      (e: Email) => (!!e.local_only || !!e.local_archived) && !e.local_deleted
-    ).length,
-    all: filteredEmails.length,
-  })
-);
+let tabCounts = $derived.by((): Record<EmailListTab, number> => {
+  // Single pass: the previous version ran four full filter passes over the
+  // same list (inbox / archived / deleted / storedLocally). Counts share the
+  // same deleted/archived predicates, so one walk computes all of them.
+  let inbox = 0;
+  let archived = 0;
+  let deleted = 0;
+  let storedLocally = 0;
+  for (const e of filteredEmails as Email[]) {
+    if (e.local_deleted) {
+      deleted += 1;
+      continue;
+    }
+    if (e.local_archived) {
+      archived += 1;
+      storedLocally += 1;
+    } else {
+      inbox += 1;
+      if (e.local_only) storedLocally += 1;
+    }
+  }
+  return { inbox, archived, deleted, storedLocally, all: (filteredEmails as Email[]).length };
+});
 
 /** Base list for current status tab (before label / starred filters) */
 let statusTabEmails = $derived.by((): Email[] => {
@@ -1290,6 +1469,21 @@ type CrossMailboxGroup = {
 };
 let crossMailboxSearchActive = $derived(!!searchQuery?.trim());
 let collapsedCrossMailboxes = $state<Set<string>>(new Set());
+let crossMailboxVisibleCounts = $state<Record<string, number>>({});
+const CROSS_MAILBOX_INITIAL_ROWS = 50;
+let lastCrossMailboxSearch = '';
+$effect(() => {
+  const currentSearch = searchQuery.trim().toLowerCase();
+  if (currentSearch !== lastCrossMailboxSearch) {
+    lastCrossMailboxSearch = currentSearch;
+    crossMailboxVisibleCounts = {};
+  }
+});
+function emailSelectionKey(email: Email): string {
+  if (!crossMailboxSearchActive) return email.id;
+  const address = email.original_inbox || (email as Email & { address?: string }).address || '';
+  return `${address.toLowerCase()}\u0000${email.id}`;
+}
 /** Free-text portion of searchQuery (shortcut tokens stripped) for cross-mailbox filtering */
 let searchQueryFreeText = $derived(parseSearchShortcuts(searchQuery || '').searchQuery);
 let crossMailboxGroups = $derived.by((): CrossMailboxGroup[] => {
@@ -1298,6 +1492,7 @@ let crossMailboxGroups = $derived.by((): CrossMailboxGroup[] => {
   const criteria = {
     searchQuery: searchQueryFreeText,
     otpOnly,
+    unreadOnly,
     hasAttachment,
     senderDomain,
     senderEmail,
@@ -1311,20 +1506,17 @@ let crossMailboxGroups = $derived.by((): CrossMailboxGroup[] => {
     dateFrom,
     dateTo,
     sortBy,
-    emailTagsById: emailTagsMap,
+    emailLabelsById: emailLabelsMap,
   };
   const addrs = new Set<string>([
     ...Object.keys(allStoredEmails || {}),
-    ...(allAccounts || []).map((a: Account) => a.address).filter(Boolean),
+    ...(allAddresses || []).map((a: Address) => a.address).filter(Boolean),
   ]);
   const groups: CrossMailboxGroup[] = [];
   for (const address of addrs) {
     const rawBag = allStoredEmails[address];
-    const bag = (Array.isArray(rawBag) ? rawBag : []).map((e) => ({
-      ...e,
-      original_inbox: e.original_inbox || address,
-    }));
-    let list = filterEmails(bag, criteria);
+    const bag = Array.isArray(rawBag) ? rawBag : [];
+    let list = filterEmails(bag, { ...criteria, defaultRecipient: address });
     switch (emailListTab) {
       case 'archived':
         list = list.filter((e) => e.local_archived && !e.local_deleted);
@@ -1337,6 +1529,11 @@ let crossMailboxGroups = $derived.by((): CrossMailboxGroup[] => {
       default:
         list = list.filter((e) => !e.local_archived && !e.local_deleted);
     }
+    // Preserve the cross-mailbox provenance expected by row actions while
+    // cloning only matches rather than every email on every query keystroke.
+    list = list.map((email) =>
+      email.original_inbox ? email : { ...email, original_inbox: address }
+    );
     const isCurrent = address.toLowerCase() === current;
     // Always include current mailbox; others only if they have matches
     if (!isCurrent && list.length === 0) continue;
@@ -1355,26 +1552,47 @@ let crossMailboxGroups = $derived.by((): CrossMailboxGroup[] => {
   return groups;
 });
 
+function loadMoreCrossMailbox(address: string): void {
+  const key = address.toLowerCase();
+  crossMailboxVisibleCounts = {
+    ...crossMailboxVisibleCounts,
+    [key]:
+      (crossMailboxVisibleCounts[key] || CROSS_MAILBOX_INITIAL_ROWS) + CROSS_MAILBOX_INITIAL_ROWS,
+  };
+}
+
 /** Unique labels present on emails in the current status tab */
-let availableLabels = $derived.by((): string[] => {
-  const set = new Set<string>();
-  for (const e of statusTabEmails) {
-    const tags = emailTagsMap[e.id];
-    if (!tags) continue;
-    for (const t of tags) set.add(t);
+let statusTabLabels = $derived.by(() => {
+  const labels = new Set<string>();
+  const counts = new Map<string, number>();
+  for (const email of statusTabEmails) {
+    // Match the previous `.includes()` behavior: one email contributes at
+    // most once to a label even if corrupt storage repeats that label.
+    for (const label of new Set(
+      emailLabelsMap[emailLabelKeyForEmail(email, selectedEmail)] || []
+    )) {
+      labels.add(label);
+      counts.set(label, (counts.get(label) || 0) + 1);
+    }
   }
-  return Array.from(set).sort((a, b) => a.localeCompare(b));
+  return {
+    available: Array.from(labels).sort((a, b) => a.localeCompare(b)),
+    counts,
+  };
 });
+let availableLabels = $derived(statusTabLabels.available);
 
 function labelCountInStatusTab(lab: string): number {
-  return statusTabEmails.filter((e) => (emailTagsMap[e.id] || []).includes(lab)).length;
+  return statusTabLabels.counts.get(lab) || 0;
 }
 
 let tabFilteredEmails = $derived.by((): Email[] => {
   let list = statusTabEmails;
   const labelFilter = activeLabelFilter;
   if (labelFilter) {
-    list = list.filter((e: Email) => (emailTagsMap[e.id] || []).includes(labelFilter));
+    list = list.filter((e: Email) =>
+      (emailLabelsMap[emailLabelKeyForEmail(e, selectedEmail)] || []).includes(labelFilter)
+    );
   }
   if (showStarredOnly) {
     return list.filter((e: Email) => {
@@ -1419,6 +1637,24 @@ let emailThreads = $derived.by((): EmailThread[] => {
   return groupEmailsByThread(tabFilteredEmails);
 });
 
+let emailThreadIndexes = $derived.by(() => {
+  const byLatestEmailId = new Map<string, EmailThread>();
+  const byEmailId = new Map<string, EmailThread>();
+  const byNestedEmailId = new Map<string, EmailThread>();
+  for (const thread of emailThreads) {
+    if (!byLatestEmailId.has(thread.latestEmail.id)) {
+      byLatestEmailId.set(thread.latestEmail.id, thread);
+    }
+    for (const email of thread.emails) {
+      if (!byEmailId.has(email.id)) byEmailId.set(email.id, thread);
+      if (email.id !== thread.latestEmail.id && !byNestedEmailId.has(email.id)) {
+        byNestedEmailId.set(email.id, thread);
+      }
+    }
+  }
+  return { byLatestEmailId, byEmailId, byNestedEmailId };
+});
+
 function toggleThread(threadId: string) {
   const next = new Set(expandedThreadIds);
   if (next.has(threadId)) next.delete(threadId);
@@ -1426,22 +1662,25 @@ function toggleThread(threadId: string) {
   expandedThreadIds = next;
 }
 
-// Displayed emails for lazy loading (flattened from threads when grouping is on)
-let displayedEmails = $derived.by(() => {
+// Full logical list for the current filters. Small lists retain the existing
+// progressive rendering behavior; larger lists use a bounded virtual window
+// so scrolling never grows the DOM without limit.
+let allDisplayedEmails = $derived.by(() => {
   if (threadGrouping) {
-    // When thread grouping is on, show only thread header emails (latest per thread)
-    // The full thread is expanded inline
-    return emailThreads
-      .flatMap(
-        (t) =>
-          expandedThreadIds.has(t.id)
-            ? t.emails // expanded: show all emails in thread
-            : [t.latestEmail] // collapsed: show only the latest
-      )
-      .slice(0, displayedEmailCount);
+    return emailThreads.flatMap((t) => (expandedThreadIds.has(t.id) ? t.emails : [t.latestEmail]));
   }
-  return tabFilteredEmails.slice(0, displayedEmailCount);
+  return tabFilteredEmails;
 });
+
+const MAILBOX_VIRTUALIZATION_THRESHOLD = 50;
+const MAILBOX_DEFAULT_ROW_HEIGHT = 72;
+const MAILBOX_OFFLINE_GAP_HEIGHT = 34;
+const MAILBOX_THREAD_HEADER_HEIGHT = 34;
+const MAILBOX_VIRTUAL_OVERSCAN = 8;
+let isVirtualized = $derived(allDisplayedEmails.length > MAILBOX_VIRTUALIZATION_THRESHOLD);
+let displayedEmails = $derived(
+  isVirtualized ? allDisplayedEmails : allDisplayedEmails.slice(0, displayedEmailCount)
+);
 
 // Load more emails when scrolling near bottom / button
 function loadMoreEmails() {
@@ -1455,82 +1694,54 @@ function handleSortChange(value: string) {
   displayedEmailCount = pageSize;
 }
 
-function fitActionButtonFonts() {
-  const row = actionRowEl;
-  if (!row) return;
-  const buttons = Array.from(row.querySelectorAll<HTMLElement>('button'));
-  if (!buttons.length) return;
-  const items = buttons.map((btn) => {
-    const el = btn.querySelector('span.leading-tight, span.whitespace-nowrap, .btn-label');
-    const text = (el?.textContent || btn.textContent || '').trim();
-    return { text };
-  });
-  const res = fitActionButtonsLayout(items, row.clientWidth, {
-    basePx: 12,
-    minPx: 8.5,
-    weight: 700,
-    reservedPx: 36,
-    gapPx: 6,
-  });
-  actionBtnFontPx = res.fontPx;
-  actionBtnEqualWidth = res.equalWidth;
-}
-
-let currentAccount = $derived.by(() => {
+let currentAddress = $derived.by(() => {
   if (!selectedEmail) return null;
   const exact =
-    allAccounts.find((a: Account) => a.address === selectedEmail) ||
-    accounts.find((a: Account) => a.address === selectedEmail);
+    allAddresses.find((a: Address) => a.address === selectedEmail) ||
+    accounts.find((a: Address) => a.address === selectedEmail);
   if (exact) return exact;
   // Case-insensitive fallback (provider domain rewrites can change casing)
   const lower = selectedEmail.toLowerCase();
   return (
-    allAccounts.find((a: Account) => (a.address || '').toLowerCase() === lower) ||
-    accounts.find((a: Account) => (a.address || '').toLowerCase() === lower) ||
+    allAddresses.find((a: Address) => (a.address || '').toLowerCase() === lower) ||
+    accounts.find((a: Address) => (a.address || '').toLowerCase() === lower) ||
     null
   );
 });
 
 // Container background class based on account status
 let containerBgClass = $derived.by(() => {
-  if (!currentAccount) return 'bg-md-surface-container-highest';
-  if (currentAccount.accountStatus === 'deleted') return 'bg-md-error-container';
-  if (currentAccount.accountStatus === 'archived') return 'bg-md-tertiary-container';
+  if (!currentAddress) return 'bg-md-surface-container-highest';
+  if (currentAddress.accountStatus === 'deleted') return 'bg-md-error-container';
+  if (currentAddress.accountStatus === 'archived') return 'bg-md-tertiary-container';
   return 'bg-md-surface-container-highest';
 });
 
-$effect(() => {
-  void $t;
-  void currentAccount;
-  void actionRowCollapsed;
-  void tick().then(() => {
-    fitActionButtonFonts();
-    requestAnimationFrame(fitActionButtonFonts);
-  });
-});
+// (The old `buttonText` derived - 'Always Show' / 'Temporary Hidden' / 'Show' /
+// 'Hide' - was never referenced by the markup: a dead English label no gate can
+// see because nothing renders it. Removed rather than keyed: a locale key for a
+// string no surface shows would be just as dead, only harder to notice.)
 
-// Button text based on collapse state and temporary expansion
-let buttonText = $derived.by(() => {
-  const isTemporarilyExpanded = actionRowCollapsed && (accountSelectorHovered || actionRowHovered);
-  const isTemporarilyHidden = !actionRowCollapsed && (searchBarFocused || emailSelection.mode);
-  if (isTemporarilyExpanded) return 'Always Show';
-  if (isTemporarilyHidden) return 'Temporary Hidden';
-  return actionRowCollapsed ? 'Show' : 'Hide';
-});
-
-/** Dialog after user chooses Hide — explains hover + Always Show */
+/** Dialog after user chooses Hide - explains hover + Always Show */
 let hideHintDialogOpen = $state(false);
 let hideHintDontShow = $state(false);
-let hideHintOverlayEl = $state<HTMLElement | null>(null);
 
-// Portal the hide-hint blocking dialog to document.body so it sits above
-// every transformed ancestor and uses the documented dialog z-layer
-// (PORTAL_Z.dialog = 10000), per AGENTS §4.
-$effect(() => {
-  if (hideHintDialogOpen && hideHintOverlayEl) {
-    return portalToBody(hideHintOverlayEl);
+function handleAddressBarScroll(direction: 'up' | 'down', top: number) {
+  // Keep the header visible at the list origin. While browsing, collapse it on
+  // upward list movement and restore it on downward movement, matching the
+  // requested compact mailbox browsing behavior.
+  if (top <= 24) {
+    addressBarCollapsed = false;
+    return;
   }
-});
+  if (direction === 'up') {
+    addressBarCollapsed = true;
+    dropdownOpen = false;
+    onDropdownOpenChange(false);
+  } else {
+    addressBarCollapsed = false;
+  }
+}
 
 function handleActionRowToggle() {
   if (!actionRowCollapsed) {
@@ -1549,28 +1760,20 @@ function handleActionRowToggle() {
 async function dismissHideHint(forever: boolean) {
   hideHintDialogOpen = false;
   if (forever || hideHintDontShow) {
-    await browser.storage.local.set({ hideActionRowHintDismissed: true });
+    await writeWithRetry({ hideActionRowHintDismissed: true });
   }
 }
 
-// Use shared time store
+// Use shared ticking time store
 const timeStore = useCurrentTime();
-let currentTime = $state(timeStore.currentTime);
-
-// Subscribe to time updates
-$effect(() => {
-  const unsubscribe = timeStore.subscribe(() => {
-    currentTime = timeStore.currentTime;
-  });
-  return unsubscribe;
-});
+const currentTime = $derived($timeStore);
 
 // Calculate expiry progress percentage
 let expiryProgress = $derived.by(() => {
-  if (!currentAccount?.expiresAt || !currentAccount.createdAt) return 0;
+  if (!currentAddress?.expiresAt || !currentAddress.createdAt) return 0;
   const now = currentTime;
-  const totalDuration = currentAccount.expiresAt - currentAccount.createdAt;
-  const remaining = currentAccount.expiresAt - now;
+  const totalDuration = currentAddress.expiresAt - currentAddress.createdAt;
+  const remaining = currentAddress.expiresAt - now;
   if (totalDuration <= 0) return 0;
   const percentage = Math.max(0, Math.min(100, (remaining / totalDuration) * 100));
   return percentage;
@@ -1578,10 +1781,14 @@ let expiryProgress = $derived.by(() => {
 
 // Check if current account's provider supports auto-renew
 const supportsAutoRenew = $derived.by(() => {
-  if (!currentAccount?.provider) return false;
+  if (!currentAddress?.provider) return false;
   try {
-    const config = loadProviderConfig(currentAccount.provider);
-    return config.expiry?.renewable || false;
+    const config = loadProviderConfig(currentAddress.provider);
+    return (
+      (config.expiry?.renewable === true || config.capabilities?.supportsRenew === true) &&
+      typeof config.expiry?.renewalMethod === 'string' &&
+      config.expiry.renewalMethod.length > 0
+    );
   } catch {
     /* ignore */
     return false;
@@ -1589,31 +1796,46 @@ const supportsAutoRenew = $derived.by(() => {
 });
 
 // Check if current account is expired
-const isCurrentAccountExpired = $derived.by(() => {
+const isCurrentAddressExpired = $derived.by(() => {
   void stripClockTick;
-  if (!currentAccount?.expiresAt) return false;
-  return Date.now() > currentAccount.expiresAt;
+  return isTimeExpired(currentAddress, Date.now());
 });
+const showExpiredMailboxHealth = $derived(
+  isCurrentAddressExpired &&
+    currentAddress?.accountStatus !== 'archived' &&
+    currentAddress?.accountStatus !== 'deleted'
+);
+let mailboxHealthRetrying = $state(false);
+
+async function retryMailboxRefresh() {
+  if (!currentAddress?.id || mailboxHealthRetrying) return;
+  mailboxHealthRetrying = true;
+  try {
+    await onRefreshMailbox(currentAddress.id);
+  } finally {
+    mailboxHealthRetrying = false;
+  }
+}
 
 // Renewal strip is eligible when: provider supports auto-renew AND
 // account is currently expired AND auto-renew is NOT enabled AND not archived.
 // (If auto-renew were enabled, the address would not have expired.)
-const isCurrentAccountArchived = $derived(
-  currentAccount?.accountStatus === 'archived' || currentAccount?.status === 'archived'
+const isCurrentAddressArchived = $derived(
+  currentAddress?.accountStatus === 'archived' || currentAddress?.status === 'archived'
 );
-const canUnarchiveCurrent = $derived(!!currentAccount && canUnarchive(currentAccount as Account));
+const canUnarchiveCurrent = $derived(!!currentAddress && canUnarchive(currentAddress as Address));
 const renewalStripEligible = $derived(
   supportsAutoRenew &&
-    isCurrentAccountExpired &&
-    !(currentAccount?.autoExtend ?? false) &&
-    !isCurrentAccountArchived
+    isCurrentAddressExpired &&
+    !(currentAddress?.autoExtend ?? false) &&
+    !isCurrentAddressArchived
 );
 
 // Reset dismissal when the account changes (so a different expired inbox shows the strip again).
-// Plain let — NOT $state (read+write in same effect → effect_update_depth_exceeded).
+// Plain let - NOT $state (read+write in same effect → effect_update_depth_exceeded).
 let _lastRenewalAddress: string | null = null;
 $effect(() => {
-  const addr = currentAccount?.address ?? null;
+  const addr = currentAddress?.address ?? null;
   if (addr !== _lastRenewalAddress) {
     _lastRenewalAddress = addr;
     untrack(() => {
@@ -1625,56 +1847,85 @@ $effect(() => {
 // Final show flag = eligible AND not dismissed (still show while renew request in flight)
 const showRenewalStrip = $derived((renewalStripEligible && !renewalStripDismissed) || isRenewing);
 
-/** Edge handle: collapse OTP / Magic / Autofill (and related) strips to a thin tab */
+/** Collapse only the dock's content; its category row remains reachable. */
 let stripsEdgeCollapsed = $state(false);
 
 async function setStripsEdgeCollapsed(next: boolean) {
   if (stripsEdgeCollapsed === next) return;
   stripsEdgeCollapsed = next;
   try {
-    await browser.storage.local.set({ stripsEdgeCollapsed: next });
-  } catch {
-    /* ignore */
+    await writeWithRetry({ stripsEdgeCollapsed: next });
+  } catch (error) {
+    logError('Failed to save strip dock presentation', error);
+    showToast($t('toasts.operationFailed'), 'error');
   }
 }
 
-// New OTP / magic mail auto-expands the strip stack (only when collapsed → expand once)
-let _prevHadStripAlert = false;
+let verificationSeenId = $state('');
+let renewalDockVisible = $derived(
+  showRenewalStrip ||
+    !!(providerFailoverHint?.show && currentAddress?.autoExtend && isCurrentAddressExpired)
+);
+let lifecycleDockVisible = $derived(
+  !lifecycleHintDismissed &&
+    lifecycleHints.length > 0 &&
+    !(
+      lifecycleHints[0].kind === 'renew_high_value' &&
+      currentAddress?.id === lifecycleHints[0].addressId &&
+      showRenewalStrip
+    )
+);
+let stripTabs = $derived.by(() => {
+  const tabs: MailboxStripTab[] = [];
+  if (showExpiredMailboxHealth || currentAddress?.mailboxRefreshFailure)
+    tabs.push({
+      id: 'health',
+      label: $t(
+        showExpiredMailboxHealth ? 'inbox.refreshHealth.expiredTitle' : 'inbox.refreshHealth.title'
+      ),
+      attention: true,
+    });
+  if (hasVerificationContent && !preferHideVerificationStrip)
+    tabs.push({
+      id: 'verification',
+      label: $t('inbox.verificationTitle'),
+      count: currentVerificationItems.length,
+      attention:
+        !!currentVerificationItems[0] && currentVerificationItems[0].id !== verificationSeenId,
+    });
+  if (formDetected && showAutofillStrip && !preferHideAutofillStrip)
+    tabs.push({ id: 'autofill', label: $t('inbox.autofillAction') });
+  if (matchingSavedLogin && showSavedLoginStrip && currentDomain)
+    tabs.push({ id: 'savedLogin', label: $t('inbox.savedLoginRefill') });
+  if (hasActiveListFilters && showFilterAppliedStrip)
+    tabs.push({ id: 'filter', label: $t('inbox.filtersApplied') });
+  if (renewalDockVisible)
+    tabs.push({ id: 'renewal', label: $t('stripDock.renewal'), attention: !isRenewing });
+  if (lifecycleDockVisible) tabs.push({ id: 'suggestion', label: $t('filters.suggestions') });
+  if (currentDomain) tabs.push({ id: 'siteAccess', label: $t('stripDock.siteAccess') });
+  return tabs;
+});
+function selectStrip(id: MailboxStripId) {
+  frontStrip = id;
+  if (id === 'verification') verificationSeenId = currentVerificationItems[0]?.id || '';
+}
 $effect(() => {
-  const hasAlert = !!(latestLiveOtp || latestMagicLink);
-  // Read collapsed flag without re-subscribing on every expand/collapse write
-  const collapsed = untrack(() => stripsEdgeCollapsed);
-  if (hasAlert && !_prevHadStripAlert && collapsed) {
-    void setStripsEdgeCollapsed(false);
-  }
-  _prevHadStripAlert = hasAlert;
+  const tabs = stripTabs;
+  if (tabs.length && !tabs.some((tab) => tab.id === frontStrip)) selectStrip(tabs[0].id);
 });
 
 let hasCollapsibleStrips = $derived.by(() => {
-  if (emailSelection.mode) return false;
-  return !!(
-    (latestMagicLink && showMagicLinkStrip && !preferHideMagicStrip) ||
-    (matchingSavedLogin && showSavedLoginStrip) ||
-    (formDetected && showAutofillStrip && !preferHideAutofillStrip) ||
-    (latestLiveOtp && !preferHideOtpStrip) ||
-    showRenewalStrip ||
-    (hasActiveListFilters && showFilterAppliedStrip)
-  );
+  // In a short popup the absolute strip stack can cover inline filter actions.
+  // Give the focused search/filter controls the space without changing strip preferences.
+  if (selectionActive || searchBarFocused) return false;
+  return stripTabs.length > 0;
 });
 
 /** Reserve space under email list for absolute strip stack so rows aren't covered */
 let stripReservePx = $derived.by(() => {
-  if (emailSelection.mode) return 88;
-  if (stripsEdgeCollapsed && hasCollapsibleStrips) return 36;
-  let n = 0;
-  if (hasActiveListFilters && showFilterAppliedStrip) n += 1;
-  if (latestMagicLink && showMagicLinkStrip && !preferHideMagicStrip) n += 1;
-  if (matchingSavedLogin && showSavedLoginStrip) n += 1;
-  if (formDetected && showAutofillStrip && !preferHideAutofillStrip) n += 1;
-  // Only live (non-archived/deleted) OTPs keep the strip visible
-  if (latestLiveOtp && !preferHideOtpStrip) n += 1;
-  if (showRenewalStrip) n += 1;
-  return Math.max(8, n * 36 + (n > 0 ? 12 : 0));
+  if (selectionActive) return 88;
+  if (searchBarFocused) return 0;
+  return hasCollapsibleStrips ? bottomStripsHeightPx + 8 : 8;
 });
 
 let bottomStripsWrapperEl = $state<HTMLElement | null>(null);
@@ -1686,22 +1937,19 @@ $effect(() => {
     bottomStripsHeightPx = 0;
     return;
   }
-  const ro = new ResizeObserver((entries) => {
+  return observeResizeOnFrame(el, (entries) => {
     for (const entry of entries) {
-      const rect = entry.target.getBoundingClientRect();
-      bottomStripsHeightPx = Math.ceil(rect.height);
+      bottomStripsHeightPx = Math.ceil(entry.target.getBoundingClientRect().height);
     }
   });
-  ro.observe(el);
-  return () => ro.disconnect();
 });
 
-/** Pure dynamic measurement of strip stack — zero hardcoded numbers or fallbacks */
+/** Pure dynamic measurement of strip stack - zero hardcoded numbers or fallbacks */
 let totalBottomSpacerHeightPx = $derived(bottomStripsHeightPx);
 
 // Auto-renew is now enabled → strip should disappear (the address will renew itself)
 $effect(() => {
-  if (currentAccount?.autoExtend && renewalStripEligible === false && !isRenewing) {
+  if (currentAddress?.autoExtend && renewalStripEligible === false && !isRenewing) {
     untrack(() => {
       if (!renewalStripDismissed) renewalStripDismissed = true;
     });
@@ -1710,10 +1958,10 @@ $effect(() => {
 
 /** Renew once or always-renew: show loading feedback so UI is not stuck on “expired”. */
 async function handleRenewOnce() {
-  if (!currentAccount || isRenewing) return;
+  if (!currentAddress || isRenewing) return;
   isRenewing = true;
   try {
-    await onExtendAccount(currentAccount);
+    await onExtendAddress(currentAddress);
   } catch (e) {
     logError('handleRenewOnce failed', undefined, e as Error);
   } finally {
@@ -1722,14 +1970,19 @@ async function handleRenewOnce() {
 }
 
 async function handleRenewAlways() {
-  if (!currentAccount || isRenewing) return;
+  if (!currentAddress || isRenewing) return;
   isRenewing = true;
   try {
     // Enable auto-extend first, then immediately renew so status leaves “expired”
-    if (!currentAccount.autoExtend) {
-      await onToggleAutoExtend(currentAccount);
+    if (!currentAddress.autoExtend) {
+      // Enabling auto-renew on an expired/near-expiry inbox already performs
+      // the immediate renewal in the shared toggle action. Do not issue a
+      // second request with the stale pre-toggle account object; the duplicate
+      // call races the first one and can invalidate the provider session.
+      await onToggleAutoExtend(currentAddress);
+      return;
     }
-    await onExtendAccount(currentAccount);
+    await onExtendAddress(currentAddress);
   } catch (e) {
     logError('handleRenewAlways failed', undefined, e as Error);
   } finally {
@@ -1738,63 +1991,96 @@ async function handleRenewAlways() {
 }
 
 // Tag functions
-async function updateTag(accountId: string, tag: string, color: string | undefined = undefined) {
+async function updateAddressTagsOnServer(
+  accountId: string,
+  tags: Array<{ name: string; color: string }>
+): Promise<boolean> {
   try {
-    await browser.runtime.sendMessage({ type: 'updateInboxTag', inboxId: accountId, tag, color });
-    await onReloadAccounts();
+    const response = await browser.runtime.sendMessage({
+      type: 'updateAddressesTag',
+      addressIds: [accountId],
+      tag: tags[0]?.name || '',
+      color: tags[0]?.color,
+      tags,
+    });
+    if (response && (response as { success?: boolean }).success) {
+      await onReloadAddresses();
+      return true;
+    }
+    // success:false (e.g. stale addressId deleted in another window) - the
+    // tags were NOT applied; don't pretend by reloading optimistically.
+    logWarn('updateAddressesTag rejected by background:', {
+      accountId,
+      error: (response as { error?: unknown } | undefined)?.error,
+    });
+    return false;
   } catch (e) {
-    logError('Failed to update tag:', e);
+    logError('Failed to update tags:', e);
+    return false;
   }
 }
 
 function openTagDialog() {
-  if (!currentAccount) return;
-  tagTargetAccount = currentAccount;
+  if (!currentAddress) return;
+  tagTargetAddress = currentAddress;
   tagDialogOpen = true;
 }
 
 function closeTagDialog() {
   tagDialogOpen = false;
-  tagTargetAccount = null;
+  tagTargetAddress = null;
 }
 
-function saveTag(tag: string, color: string) {
-  if (!tagTargetAccount) return;
-  updateTag(tagTargetAccount.id, tag, color);
+async function saveTags(tags: Array<{ name: string; color: string }>): Promise<boolean> {
+  if (!tagTargetAddress) return true;
+  const ok = await updateAddressTagsOnServer(tagTargetAddress.id, tags);
+  if (!ok) {
+    // success:false (e.g. stale addressId deleted elsewhere) - keep the dialog
+    // open (TagDialog gates its close on this) and surface the rejection.
+    showToast($t('toasts.tagSaveFailed'), 'error');
+    return false;
+  }
   closeTagDialog();
+  return true;
 }
 
-// Extract existing tags from all accounts (supports both legacy a.tag and new a.tags[])
-let existingTags = $derived.by(() => {
-  const tags = new Set<string>();
-  allAccounts.forEach((a: Account) => {
-    if (a.tag) tags.add(a.tag);
-    if (Array.isArray(a.tags) && a.tags.length) {
-      for (const t of a.tags) if (t?.name) tags.add(t.name);
-    }
-  });
-  return Array.from(tags);
-});
+// Existing tags across all accounts, one spelling per tag (case-insensitive) so
+// the dialog can never list `Banking` and `banking` as two separate tags.
+let existingTags = $derived(existingTagNames(allAddresses));
 
-// Extract tag colors from all accounts (supports both legacy a.tag/a.tagColor and new a.tags[])
-let tagColors = $derived.by(() => {
-  const colors: Record<string, string> = {};
-  allAccounts.forEach((a: Account) => {
-    if (a.tag && a.tagColor) colors[a.tag] = a.tagColor;
-    if (Array.isArray(a.tags) && a.tags.length) {
-      for (const t of a.tags) if (t?.name && t.color) colors[t.name] = t.color;
-    }
-  });
-  return colors;
-});
+// Which addresses carry each tag: the hover info on every existing tag in the
+// tag dialog.
+let tagAddressUsage = $derived(buildTagAddressUsage(allAddresses));
+
+// One color per tag, keyed case-insensitively like the usage map: a tag written
+// `banking` on one address and `Banking` on another is ONE tag, so it gets one
+// color instead of a different chip per row.
+let tagColors = $derived(buildTagColors(allAddresses));
 // --- Merged Email List State & Logic ---
+// Pull-to-refresh gesture state (the drag itself lives in the pullToRefresh action).
 let pullDistance = $state(0);
-let startY = $state(0);
-let isPulling = $state(false);
 let pullRefreshing = $state(false);
 let refreshRotation = $derived(Math.min(pullDistance * 4.5, 360));
 
 let listRootEl = $state<HTMLElement | null>(null);
+const MAIL_SKELETON_ROW_HEIGHT = 60;
+let mailSkeletonCount = $state(3);
+$effect(() => {
+  const list = listRootEl;
+  if (!loading || displayedEmails.length > 0 || !list) return;
+
+  const updateSkeletonCount = () => {
+    mailSkeletonCount = Math.max(1, Math.ceil(list.clientHeight / MAIL_SKELETON_ROW_HEIGHT));
+  };
+  updateSkeletonCount();
+  if (typeof ResizeObserver !== 'undefined') {
+    const observer = new ResizeObserver(updateSkeletonCount);
+    observer.observe(list);
+    return () => observer.disconnect();
+  }
+  window.addEventListener('resize', updateSkeletonCount);
+  return () => window.removeEventListener('resize', updateSkeletonCount);
+});
 let marqueeActive = $state(false);
 let marqueeStart = $state<{ x: number; y: number } | null>(null);
 let marqueeRect = $state<{ left: number; top: number; right: number; bottom: number } | null>(null);
@@ -1806,7 +2092,16 @@ let starPopId = $state<string | null>(null);
 let prefersReducedMotion = $state(false);
 
 let renderLimit = $state(50);
-let renderedEmails = $derived(displayedEmails.slice(0, renderLimit));
+// Mirror of displayedEmails.length so deferred callbacks (IntersectionObserver)
+// read a $state snapshot instead of the $derived after teardown - reading a
+// destroyed component's $derived triggers Svelte's `derived_inert` warning.
+let displayedEmailTotal = $state(0);
+$effect(() => {
+  displayedEmailTotal = displayedEmails.length;
+});
+let renderedEmails = $derived(
+  isVirtualized ? displayedEmails : displayedEmails.slice(0, renderLimit)
+);
 
 // ── Offline-gap labels ──────────────────────────────────────────────────────
 // Connectivity log (online/offline transitions, UTC) used to label time ranges
@@ -1859,6 +2154,25 @@ const emailsWithGaps = $derived.by((): RenderedRow[] => {
   return rows;
 });
 
+/**
+ * Cache the expanded-thread height lookup used by virtualization. The old
+ * estimator searched every thread for every row during scroll calculations,
+ * turning a bounded virtual-list pass into an avoidable nested scan.
+ */
+let threadHeightByLatestId = $derived.by(() => {
+  const heights = new Map<string, number>();
+  if (!threadGrouping) return heights;
+  for (const thread of emailThreads) {
+    if (thread.emails.length > 1) {
+      heights.set(
+        String(thread.latestEmail.id),
+        MAILBOX_DEFAULT_ROW_HEIGHT + MAILBOX_THREAD_HEADER_HEIGHT
+      );
+    }
+  }
+  return heights;
+});
+
 let hoveredEmail = $state<Email | null>(null);
 let previewPosition = $state({ x: 0, y: 0, above: false });
 let hoverTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1886,11 +2200,17 @@ async function toggleStar(email: Email | string) {
   if (!mail?.id || starToggleBusy) return;
   starToggleBusy = true;
   try {
-    const result = (await browser.storage.local.get(['starredEmails'])) as {
-      starredEmails?: string[];
-    };
     const addr = mail.original_inbox || selectedEmail;
-    const updated = toggleStarInSet(result.starredEmails || [], mail.id, addr);
+    // Serialized RMW: the toggle is computed from the last landed write for the
+    // key, so a concurrent star change survives instead of being clobbered.
+    // The updater returns the ARRAY stored shape (parse is array-shaped).
+    const updated = new Set(
+      await updateStoredObject<string[]>(
+        'starredEmails',
+        (current) => Array.from(toggleStarInSet(new Set(current), mail.id, addr)),
+        parseStringList
+      )
+    );
     starredEmailIds = updated;
     if (!prefersReducedMotion) {
       starPopId = mail.id;
@@ -1898,7 +2218,6 @@ async function toggleStar(email: Email | string) {
         if (starPopId === mail.id) starPopId = null;
       }, 180);
     }
-    await browser.storage.local.set({ starredEmails: Array.from(updated) });
   } catch (e) {
     logError('toggleStar failed', undefined, e as Error);
     await loadStarredEmails();
@@ -1929,6 +2248,8 @@ function getDisplayName(email: string, name: string | undefined = undefined): st
 }
 
 function handleMouseEnter(email: Email, e: MouseEvent) {
+  // In 'expanded' mode the row grows in place; the floating tooltip is off.
+  if (emailPreviewMode !== 'tooltip') return;
   if (hoverTimer) clearTimeout(hoverTimer);
   const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
   hoverTimer = setTimeout(() => {
@@ -1945,6 +2266,10 @@ function handleMouseEnter(email: Email, e: MouseEvent) {
   }, 250);
 }
 
+// Also wired to the list container's onscroll: scrolling moves rows under a
+// stationary cursor, which fires spurious row mouseenter events - dismissing
+// here keeps the preview from jumping to another mail mid-scroll. It re-arms
+// 250ms after scrolling settles.
 function handleMouseLeave() {
   if (hoverTimer) {
     clearTimeout(hoverTimer);
@@ -1959,15 +2284,16 @@ let swipeDistance = $state(0);
 let swipeDirection = $state<'left' | 'right' | null>(null);
 let swipingEmail = $state<Email | null>(null);
 let swipeActionTriggered = $state(false);
-let pullToRefresh = $state(false);
 
-let longPressTimer: ReturnType<typeof setTimeout> | null = null;
+// Long-press / right-click / marquee share the hold engine: the single hold
+// timer plus the click-suppression window armed after a completed gesture.
+const holdCtrl = createHoldController({ holdMs: 500, suppressClickMs: 500 });
 let longPressEmail = $state<Email | null>(null);
-// Long-press context menu — dead state: the long-press flow now routes to the
-// selection toolbar (externalSelectionBar), so nothing renders from this flag.
+// Right-click / long-press context menu - a small per-email popup with
+// “Create rule from this email”.
 let contextMenuOpen = $state(false);
 let contextMenuPosition = $state({ x: 0, y: 0 });
-let suppressClickUntil = 0;
+let contextMenuEmail = $state<Email | null>(null);
 let lastMailboxForSelection: string | null = null;
 $effect(() => {
   const addr = selectedEmail || '';
@@ -1979,23 +2305,114 @@ $effect(() => {
     lastMailboxForSelection = addr;
     deselectAll();
     contextMenuOpen = false;
+    contextMenuEmail = null;
     longPressEmail = null;
   }
 });
 let marqueeDidSelect = false;
 let selectedEmailIds = $state<Set<string>>(new Set());
+
+// The selection's ONE source of truth is `selectedEmailIds`; `active` and `count`
+// are the same fact, so they are derived from it rather than assigned beside it.
+// They used to be written at eleven sites, and the invariant
+// `active ⇔ count > 0 ⇔ size > 0` held only by hand - which it did not: an avatar
+// click had to force `active = true` BEFORE toggling (so removing the last id left
+// the shell's bar up over an empty selection), and the four drop-on-tab guards had
+// to re-check both `!active` and `size === 0` because the two could disagree.
+// Derived, they cannot: every site now writes only the set.
+let selectionCount = $derived(selectedEmailIds.size);
+let selectionActive = $derived(selectedEmailIds.size > 0);
 let lastScrollTop = 0;
 
-let tagDialogEmailId = $state<string | null>(null);
-let tagDialogInput = $state('');
-let emailTagDialogOpen = $state(false);
-let tagDialogMultiIds = $state<string[] | null>(null);
+let labelDialogEmailId = $state<string | null>(null);
+let labelDialogInput = $state('');
+let emailLabelDialogOpen = $state(false);
+let labelDialogMultiIds = $state<string[] | null>(null);
+let labelDialogColor = $state('#6750a4');
+/** False until the user edits the picker, so it can track the first new label. */
+let labelDialogColorTouched = $state(false);
+
+/** Labels typed in the dialog that are not yet in the catalog (drive the color picker). */
+let dialogNewLabels = $derived.by(() => {
+  if (!emailLabelDialogOpen) return [] as string[];
+  const known = new Set(labelCatalog.map((d) => d.name.toLowerCase()));
+  return Array.from(
+    new Set(
+      labelDialogInput
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean)
+    )
+  ).filter((name) => !known.has(name.toLowerCase()));
+});
+
+// Default the picker to the first new label's hash color until the user
+// chooses their own, so new labels are distinct without any extra clicks.
+$effect(() => {
+  const firstNew = dialogNewLabels[0];
+  if (firstNew && !labelDialogColorTouched) {
+    labelDialogColor = hashLabelColor(firstNew);
+  }
+});
 
 let listSentinelEl = $state<HTMLElement | null>(null);
+let virtualScrollTop = $state(0);
+let virtualViewportHeight = $state(0);
+let virtualRowHeights = $state<Map<number, number>>(new Map());
+let keyboardFocusQueue = Promise.resolve();
+
+function moveMailboxCursor(delta: -1 | 1): Promise<void> {
+  keyboardFocusQueue = keyboardFocusQueue
+    .then(async () => {
+      const container = listRootEl;
+      if (!container) return;
+      const active = document.activeElement;
+      if (!container.contains(active) && !active?.closest('[data-selection-strip]')) return;
+      const current = focusedRowId(container);
+      const previousFocus = document.activeElement;
+      const index = displayedEmails.findIndex((email) => email.id === current);
+      const nextIndex = Math.max(
+        0,
+        Math.min(
+          displayedEmails.length - 1,
+          index < 0 ? (delta === 1 ? 0 : displayedEmails.length - 1) : index + delta
+        )
+      );
+      const nextId = displayedEmails[nextIndex]?.id;
+      if (!nextId) return;
+      if (!isVirtualized && nextIndex >= renderLimit) renderLimit = nextIndex + 1;
+      await tick();
+      if (!container.isConnected || listRootEl !== container) return;
+      const selector = `[data-selectable-row="${CSS.escape(nextId)}"]`;
+      if (!container.querySelector(selector) && isVirtualized) {
+        const virtualIndex = emailsWithGaps.findIndex(
+          (row) => row.kind === 'email' && row.email.id === nextId
+        );
+        if (virtualIndex < 0) return;
+        let offset = 0;
+        for (let i = 0; i < virtualIndex; i++) offset += estimateVirtualRowHeight(i);
+        container.scrollTop = offset;
+        virtualScrollTop = offset;
+        await tick();
+      }
+      // Do not take focus back from a dialog opened while rendering the window.
+      if (
+        !container.contains(document.activeElement) &&
+        (previousFocus?.isConnected || document.activeElement !== document.body)
+      )
+        return;
+      const nextRow = container.querySelector<HTMLElement>(selector);
+      (nextRow?.querySelector<HTMLElement>('[data-row-primary]') ?? nextRow)?.focus();
+    })
+    .catch((error) => {
+      logError('Failed to move mailbox keyboard cursor', error);
+    });
+  return keyboardFocusQueue;
+}
 
 function expandRenderWindow() {
-  if (renderLimit >= displayedEmails.length) return;
-  renderLimit = Math.min(displayedEmails.length, renderLimit + 50);
+  if (renderLimit >= displayedEmailTotal) return;
+  renderLimit = Math.min(displayedEmailTotal, renderLimit + 50);
 }
 
 $effect(() => {
@@ -2009,6 +2426,121 @@ $effect(() => {
   );
   io.observe(el);
   return () => io.disconnect();
+});
+
+// Keep the virtual window aligned with the actual scroll container, including
+// side-panel resizing and the popup's initial layout pass.
+$effect(() => {
+  const el = listRootEl;
+  if (!el) return;
+  const updateViewport = () => {
+    virtualScrollTop = el.scrollTop;
+    virtualViewportHeight = el.clientHeight;
+  };
+  updateViewport();
+  if (typeof ResizeObserver === 'undefined') return;
+  return observeResizeOnFrame(el, () => updateViewport());
+});
+
+// Observe complete virtual rows. The wrapper includes a thread header when one
+// is present, so measured heights cover all variable-height content rather than
+// measuring only the email body row.
+$effect(() => {
+  const el = listRootEl;
+  if (!el || !isVirtualized || typeof ResizeObserver === 'undefined') return;
+  void virtualWindow.start;
+  void virtualWindow.end;
+  const ro = createResizeObserverOnFrame((entries) => {
+    let next: Map<number, number> | null = null;
+    for (const entry of entries) {
+      const index = Number((entry.target as HTMLElement).dataset.virtualRowIndex);
+      const height = Math.ceil(entry.contentRect.height);
+      if (!Number.isInteger(index) || height < 1) continue;
+      if ((next || virtualRowHeights).get(index) === height) continue;
+      if (!next) next = new Map(virtualRowHeights);
+      next.set(index, height);
+    }
+    if (next) virtualRowHeights = next;
+  });
+  if (!ro) return;
+  for (const row of el.querySelectorAll<HTMLElement>('[data-virtual-row-index]')) {
+    ro.observe(row);
+  }
+  return () => ro.disconnect();
+});
+
+// Return to the top when the logical mailbox list changes, rather than leaving
+// the user at a stale virtual offset after a filter, tab, or mailbox switch.
+let lastVirtualListKey = '';
+$effect(() => {
+  const key = `${selectedEmail}|${emailListTab}|${activeLabelFilter || ''}|${searchQuery || ''}|${sortBy || ''}|${showStarredOnly ? 'starred' : ''}|${threadGrouping ? 'threads' : ''}`;
+  if (lastVirtualListKey && lastVirtualListKey !== key) {
+    virtualScrollTop = 0;
+    virtualRowHeights = new Map();
+    if (listRootEl) listRootEl.scrollTop = 0;
+  }
+  lastVirtualListKey = key;
+});
+
+// A new message or an expanded thread can shift row indexes without changing
+// the user's filter. Clear only the measurements in that case; preserve the
+// user's scroll position while the visible rows are measured again.
+let lastVirtualMeasurementKey = '';
+$effect(() => {
+  const firstId = allDisplayedEmails[0]?.id || '';
+  const lastId = allDisplayedEmails[allDisplayedEmails.length - 1]?.id || '';
+  const expandedKey = threadGrouping ? Array.from(expandedThreadIds).sort().join(',') : '';
+  const key = `${allDisplayedEmails.length}|${firstId}|${lastId}|${expandedKey}|${connectivityEvents.length}`;
+  if (lastVirtualMeasurementKey && lastVirtualMeasurementKey !== key) {
+    virtualRowHeights = new Map();
+  }
+  lastVirtualMeasurementKey = key;
+});
+
+// The prefix-sum cache keys measurements by the height source's identity.
+// Snapshot the inputs into a new source whenever measurements or rows change;
+// a permanently stable function reading live maps leaves cached offsets stale.
+const estimateVirtualRowHeight = $derived.by(() => {
+  const heights = virtualRowHeights;
+  const rows = emailsWithGaps;
+  const threadHeights = threadHeightByLatestId;
+  return (index: number): number => {
+    const measured = heights.get(index);
+    if (measured) return measured;
+    const row = rows[index];
+    if (!row) return MAILBOX_DEFAULT_ROW_HEIGHT;
+    if (row.kind === 'offlineGap') return MAILBOX_OFFLINE_GAP_HEIGHT;
+    return threadHeights.get(String(row.email.id)) || MAILBOX_DEFAULT_ROW_HEIGHT;
+  };
+});
+
+const virtualMeasurementCache = createVirtualListMeasurementCache();
+let previousVirtualRowCount = 0;
+
+// Measurement-cache invalidation is a committed-state side effect, so keep it
+// out of the lazy virtual-window derivation.
+$effect(() => {
+  const rowCount = emailsWithGaps.length;
+  if (rowCount < previousVirtualRowCount) {
+    invalidateVirtualListMeasurements(virtualMeasurementCache, rowCount);
+  }
+  previousVirtualRowCount = rowCount;
+});
+
+let virtualWindow = $derived.by(() => {
+  const rowCount = emailsWithGaps.length;
+  const window = getVirtualListWindow(
+    rowCount,
+    virtualScrollTop,
+    virtualViewportHeight || 480,
+    estimateVirtualRowHeight,
+    MAILBOX_VIRTUAL_OVERSCAN,
+    virtualMeasurementCache
+  );
+  return {
+    ...window,
+    rows: emailsWithGaps.slice(window.start, window.end),
+  };
 });
 
 // Reset window when underlying list shrinks or filter changes
@@ -2035,10 +2567,7 @@ function onMarqueePointerDown(e: PointerEvent) {
     marqueeRect = normalizeMarquee(marqueeStart, { x: ev.clientX, y: ev.clientY });
     if (listRootEl) {
       const ids = collectIntersectingIds(listRootEl, '[data-marquee-id]', marqueeRect);
-      emailSelection.mode = ids.length > 0;
-      emailSelection.count = ids.length;
       selectedEmailIds = new Set(ids);
-      emitSelectionChange();
     }
   };
   const onUp = () => {
@@ -2048,7 +2577,7 @@ function onMarqueePointerDown(e: PointerEvent) {
     window.removeEventListener('blur', onUp);
     if (marqueeActive) {
       marqueeDidSelect = true;
-      suppressClickUntil = Date.now() + 500;
+      holdCtrl.armSuppression();
     }
     marqueeStart = null;
     marqueeActive = false;
@@ -2058,7 +2587,7 @@ function onMarqueePointerDown(e: PointerEvent) {
   window.addEventListener('pointerup', onUp);
   window.addEventListener('pointercancel', onUp);
   // If the pointer leaves the window / the window loses focus (e.g. alt-tab),
-  // pointerup may never fire — release the drag state so the UI never sticks.
+  // pointerup may never fire - release the drag state so the UI never sticks.
   window.addEventListener('blur', onUp);
 }
 
@@ -2141,42 +2670,20 @@ function performSwipeAction(direction: 'left' | 'right', email: Email) {
 
 function handleLongPressStart(email: Email, e: TouchEvent | MouseEvent) {
   if (!gesturesEnabled) return;
-  if (longPressTimer) clearTimeout(longPressTimer);
-  longPressTimer = setTimeout(() => {
+  holdCtrl.start('row', () => {
     longPressEmail = email;
-    emailSelection.mode = true;
     const next = new Set(selectedEmailIds);
     next.add(email.id);
     selectedEmailIds = next;
-    emailSelection.count = next.size;
-    suppressClickUntil = Date.now() + 500;
-    if (!externalSelectionBar) {
-      contextMenuOpen = true;
-      const touch = 'touches' in e ? e.touches[0] : e;
-      contextMenuPosition = { x: touch.clientX, y: touch.clientY };
-    } else {
-      contextMenuOpen = false;
-    }
-    emitSelectionChange();
-  }, 500);
+    const touch = 'touches' in e ? e.touches[0] : e;
+    contextMenuPosition = clampContextMenuPosition(touch.clientX, touch.clientY);
+    contextMenuOpen = true;
+    contextMenuEmail = email;
+  });
 }
 
 function handleLongPressEnd() {
-  if (longPressTimer) {
-    clearTimeout(longPressTimer);
-    longPressTimer = null;
-  }
-}
-
-function emitSelectionChange() {
-  const count = selectedEmailIds.size;
-  onSelectionChange({
-    mode: emailSelection.mode && count > 0,
-    count,
-    canArchive: emailListTab === 'inbox' || emailListTab === 'all',
-    canDelete: emailListTab !== 'deleted',
-    canRestore: emailListTab === 'archived' || emailListTab === 'deleted',
-  });
+  holdCtrl.cancel('row');
 }
 
 function toggleEmailSelection(id: string) {
@@ -2184,64 +2691,106 @@ function toggleEmailSelection(id: string) {
   if (next.has(id)) next.delete(id);
   else next.add(id);
   selectedEmailIds = next;
-  emailSelection.count = next.size;
+  // Nothing to publish: emptying the set closes the shell's bar on its own, so
+  // only the row context menu (which has no derived state) is dismissed here.
   if (next.size === 0) {
-    emailSelection.mode = false;
     contextMenuOpen = false;
+    contextMenuEmail = null;
   }
-  emitSelectionChange();
 }
 
-function filterByLabel(tag: string) {
-  activeLabelFilter = tag;
+function filterByLabel(label: string) {
+  activeLabelFilter = label;
 }
 
-let allEmailTags = $derived.by(() => {
+let allEmailLabels = $derived.by(() => {
   const set = new Set<string>();
-  for (const tags of Object.values(emailTagsMap)) {
-    if (!Array.isArray(tags)) continue;
-    for (const t of tags) set.add(t);
+  for (const labels of Object.values(emailLabelsMap)) {
+    if (!Array.isArray(labels)) continue;
+    for (const t of labels) set.add(t);
   }
   return Array.from(set).sort();
 });
 
-function openEmailTagDialog(emailId: string) {
-  tagDialogEmailId = emailId;
-  tagDialogMultiIds = null;
-  const tags = emailTagsMap[emailId];
-  tagDialogInput = (Array.isArray(tags) ? tags : []).join(', ');
-  emailTagDialogOpen = true;
+function openEmailLabelDialog(emailId: string) {
+  const email =
+    resolveSelectedEmails().find((item) => item.id === emailId) ||
+    (emails || []).find((item) => item.id === emailId);
+  labelDialogEmailId = email
+    ? emailLabelKeyForEmail(email, selectedEmail)
+    : emailLabelKey(emailId, selectedEmail);
+  labelDialogMultiIds = null;
+  const labels = emailLabelsMap[labelDialogEmailId];
+  labelDialogInput = (Array.isArray(labels) ? labels : []).join(', ');
+  labelDialogColor = '#6750a4';
+  labelDialogColorTouched = false;
+  emailLabelDialogOpen = true;
 }
 
-function closeEmailTagDialog() {
-  emailTagDialogOpen = false;
-  tagDialogEmailId = null;
-  tagDialogMultiIds = null;
-  tagDialogInput = '';
+function closeEmailLabelDialog() {
+  emailLabelDialogOpen = false;
+  labelDialogEmailId = null;
+  labelDialogMultiIds = null;
+  labelDialogInput = '';
+  labelDialogColor = '#6750a4';
+  labelDialogColorTouched = false;
 }
 
 function selectAllVisible() {
-  emailSelection.mode = true;
-  const ids = new Set<string>((tabFilteredEmails || []).map((m: Email) => m.id));
-  selectedEmailIds = ids;
-  emailSelection.count = ids.size;
-  emitSelectionChange();
+  // Only the set is written. An empty universe is now a no-op rather than a
+  // selection bar over zero rows, which is how it could disagree before.
+  const emailsToSelect = crossMailboxSearchActive
+    ? crossMailboxGroups.flatMap((group) => group.emails)
+    : tabFilteredEmails || [];
+  selectedEmailIds = new Set<string>(emailsToSelect.map(emailSelectionKey));
 }
 
 /** How many emails match the current tab + filters (the selection universe). */
-let selectionMatchingTotal = $derived((tabFilteredEmails || []).length);
-// During cross-mailbox search the rendered universe spans multiple mailboxes,
-// so tabFilteredEmails isn't the right total — fall back to the plain label.
-let selectionUniverseCounted = $derived(!crossMailboxSearchActive);
-let selectionAllMatched = $derived(
-  selectionUniverseCounted &&
-    selectionMatchingTotal > 0 &&
-    emailSelection.count >= selectionMatchingTotal
+let selectionMatchingTotal = $derived(
+  crossMailboxSearchActive
+    ? crossMailboxGroups.reduce((total, group) => total + group.emails.length, 0)
+    : (tabFilteredEmails || []).length
+);
+let selectionUniverseCounted = $derived(true);
+let selectionAllMatched = $derived.by(() => {
+  if (!selectionUniverseCounted || selectionMatchingTotal === 0) return false;
+  const universe = crossMailboxSearchActive
+    ? crossMailboxGroups.flatMap((group) => group.emails)
+    : tabFilteredEmails;
+  return universe.every((email) => selectedEmailIds.has(emailSelectionKey(email)));
+});
+
+// The facts the shell's strip renders from, and which actions the strip may
+// offer. This view shows archive but not restore in the inbox (and the reverse
+// in Archived), and the select-all button names the matching universe - all of
+// which only this view knows. Published (rather than bound down as props) so it
+// works through ANY rendering of this view, and unregisters on unmount.
+const selectionState = $derived.by<ListSelectionState>(() => ({
+  active: selectionActive,
+  count: selectionCount,
+  actions: mailboxSelectionActions(emailListTab),
+  allMatched: selectionAllMatched,
+  matchingTotal: selectionMatchingTotal,
+  universeCounted: selectionUniverseCounted,
+}));
+
+/** The bulk actions a folder offers: the inbox archives, Archived restores. */
+function mailboxSelectionActions(tab: EmailListTab): SelectionActionId[] {
+  const actions: SelectionActionId[] = [];
+  if (tab === 'archived' || tab === 'deleted') actions.push('restore');
+  else actions.push('archive');
+  actions.push('star', 'tag');
+  if (tab !== 'deleted') actions.push('delete');
+  return actions;
+}
+
+$effect(() =>
+  publishSelectionSurface({ surface: 'mailbox', state: selectionState, api: selectionApi })
 );
 
 // ── No-results recovery ─────────────────────────────────────────────────────
 // When a query with pills (is:otp / has:attachment / !from:… / from:…) matches
-// nothing, offer "did you mean" — drop the last pill and show the resulting
+// nothing, offer "did you mean" - drop the last pill and show the resulting
 // count. Pills are first-class tokens, so this is pure derived computation.
 let queryPills = $derived(
   (searchQuery || '')
@@ -2262,7 +2811,7 @@ let noResultsRecovery = $derived.by(() => {
   if (!withoutLast) return null;
   // The 'after removing the pill' criteria: every query-driven field comes from
   // the REMAINING query (the current props still carry the dropped pill's
-  // value — passing them would re-apply the filter we're suggesting to drop).
+  // value - passing them would re-apply the filter we're suggesting to drop).
   // Booleans reset to false once their pill is gone (mirrors FilterList's
   // removePill chip-flip). Non-query filters (multi-sender picker, date range,
   // sort, tags) keep their current values.
@@ -2270,6 +2819,7 @@ let noResultsRecovery = $derived.by(() => {
   const count = filterEmails(emails || [], {
     searchQuery: p.searchQuery,
     otpOnly: p.otpOnlySet ? p.otpOnly : false,
+    unreadOnly: p.unreadOnlySet ? p.unreadOnly : false,
     hasAttachment: p.hasAttachmentSet ? p.hasAttachment : false,
     senderDomain: p.senderDomain,
     senderEmail: p.senderEmail,
@@ -2283,24 +2833,44 @@ let noResultsRecovery = $derived.by(() => {
     dateFrom,
     dateTo,
     sortBy,
-    emailTagsById: emailTagsMap,
+    emailLabelsById: emailLabelsMap,
   }).length;
   // A genuinely empty account (or a query whose remaining terms still match
-  // nothing) isn't a recovery opportunity — hide the hint.
+  // nothing) isn't a recovery opportunity - hide the hint.
   if (count === 0) return null;
   return { lastPill, withoutLast, count };
 });
 
 function deselectAll() {
   selectedEmailIds = new Set();
-  emailSelection.mode = false;
-  emailSelection.count = 0;
   contextMenuOpen = false;
+  contextMenuEmail = null;
   longPressEmail = null;
-  emitSelectionChange();
 }
 
+// Escape tier: an active multi-select is a transient surface - Escape drops it
+// rather than navigating the mailbox away from rows the user just ticked.
+$effect(() => {
+  if (!selectionActive) return;
+  return registerEscapeTier('mailbox.selection', deselectAll);
+});
+
+// Escape tier: the per-email context menu is a transient surface too, and it
+// registers while OPEN - i.e. after the selection tier above - so Escape closes
+// the menu first and the selection second. It has to live here rather than on
+// the click-away: under the backdrop contract that element is aria-hidden and
+// never focusable, which is exactly why the old `onkeydown` on it could not fire.
+$effect(() => {
+  if (!contextMenuOpen) return;
+  return registerEscapeTier('mailbox.contextMenu', closeContextMenu);
+});
+
 function resolveSelectedEmails(): Email[] {
+  if (crossMailboxSearchActive) {
+    return crossMailboxGroups
+      .flatMap((group) => group.emails)
+      .filter((email) => selectedEmailIds.has(emailSelectionKey(email)));
+  }
   const fromTab = (tabFilteredEmails || []).filter((e: Email) => selectedEmailIds.has(e.id));
   if (fromTab.length > 0) return fromTab;
   return (emails || []).filter((e: Email) => selectedEmailIds.has(e.id));
@@ -2313,46 +2883,59 @@ function performArchive() {
   deselectAll();
 }
 
-/** Snapshot the tags of the given ids, apply `next`, and offer an undo toast. */
-async function commitTagsWithUndo(next: Record<string, string[]>, affectedIds: Iterable<string>) {
+/** Snapshot the labels of the given ids, apply `next`, and offer an undo toast. */
+async function commitLabelsWithUndo(next: Record<string, string[]>, affectedIds: Iterable<string>) {
   const snapshot: Record<string, string[]> = {};
   for (const id of affectedIds) {
-    snapshot[id] = Array.isArray(emailTagsMap[id]) ? [...emailTagsMap[id]] : [];
+    snapshot[id] = Array.isArray(emailLabelsMap[id]) ? [...emailLabelsMap[id]] : [];
   }
-  emailTagsMap = next;
+  const previous = emailLabelsMap;
+  emailLabelsMap = next;
   try {
-    await emailTagsStore.replaceMap(next);
-    showToast($t('toasts.tagsUpdated'), 'tag', () => {
-      void undoTagChange(snapshot);
+    await emailLabelsStore.replaceMap(next);
+    showToast($t('toasts.labelsUpdated'), 'tag', () => {
+      void undoLabelChange(snapshot);
     });
-  } catch {
-    /* ignore */
+  } catch (e) {
+    // Persist failed - roll the optimistic UI back so it matches storage, and
+    // tell the user instead of silently swallowing the failure.
+    emailLabelsMap = previous;
+    logError('commitLabelsWithUndo failed to persist labels', undefined, e as Error);
+    showToast($t('toasts.labelsUpdateFailed'), 'error');
   }
 }
 
-/** Restore a tag snapshot (undo), merging into whatever tags changed meanwhile. */
-async function undoTagChange(snapshot: Record<string, string[]>) {
-  const next: Record<string, string[]> = { ...emailTagsStore.getSnapshot() };
-  for (const [id, tags] of Object.entries(snapshot)) {
-    if (tags.length === 0) delete next[id];
-    else next[id] = tags;
+/** Restore a label snapshot (undo), merging into whatever labels changed meanwhile. */
+async function undoLabelChange(snapshot: Record<string, string[]>) {
+  const next: Record<string, string[]> = { ...emailLabelsStore.getSnapshot() };
+  for (const [id, labels] of Object.entries(snapshot)) {
+    if (labels.length === 0) delete next[id];
+    else next[id] = labels;
   }
-  emailTagsMap = next;
-  await emailTagsStore.replaceMap(next);
-  showToast($t('toasts.tagsUndone'), 'tag');
+  const previous = emailLabelsMap;
+  emailLabelsMap = next;
+  try {
+    await emailLabelsStore.replaceMap(next);
+    showToast($t('toasts.labelsUndone'), 'tag');
+  } catch (e) {
+    emailLabelsMap = previous;
+    logError('undoLabelChange failed to persist labels', undefined, e as Error);
+    showToast($t('toasts.labelsUpdateFailed'), 'error');
+  }
 }
 
 async function applyLabelToSelected(lab: string) {
   const targets = resolveSelectedEmails();
   if (targets.length === 0 || !lab) return;
-  const next: Record<string, string[]> = { ...emailTagsMap };
+  const next: Record<string, string[]> = { ...emailLabelsMap };
   for (const mail of targets) {
-    const existing = Array.isArray(next[mail.id]) ? next[mail.id] : [];
-    next[mail.id] = [...new Set([...existing, lab])];
+    const key = emailLabelKeyForEmail(mail, selectedEmail);
+    const existing = Array.isArray(next[key]) ? next[key] : [];
+    next[key] = [...new Set([...existing, lab])];
   }
-  await commitTagsWithUndo(
+  await commitLabelsWithUndo(
     next,
-    targets.map((m) => m.id)
+    targets.map((mail) => emailLabelKeyForEmail(mail, selectedEmail))
   );
 }
 
@@ -2371,88 +2954,185 @@ function performRestore() {
 }
 
 async function performStarSelected() {
-  const targets = tabFilteredEmails.filter((e: Email) => selectedEmailIds.has(e.id));
+  const targets = resolveSelectedEmails();
   if (targets.length === 0) return;
   const anyUnstarred = targets.some((e: Email) => !isStarredMail(e));
-  const updated = new Set(starredEmailIds);
-  for (const e of targets) {
-    const addr = e.original_inbox || selectedEmail;
-    const key = starKeyForEmail(e, addr);
-    updated.delete(e.id);
-    if (anyUnstarred) updated.add(key);
-    else updated.delete(key);
+  try {
+    // Serialized RMW: base the batch on the last landed write, not on the
+    // component's snapshot - a concurrent star change survives the bulk edit.
+    // The updater returns the ARRAY stored shape (parse is array-shaped).
+    const updated = new Set(
+      await updateStoredObject<string[]>(
+        'starredEmails',
+        (current) => {
+          const next = new Set(current);
+          for (const e of targets) {
+            const addr = e.original_inbox || selectedEmail;
+            const key = starKeyForEmail(e, addr);
+            next.delete(e.id);
+            if (anyUnstarred) next.add(key);
+            else next.delete(key);
+          }
+          return Array.from(next);
+        },
+        parseStringList
+      )
+    );
+    starredEmailIds = updated;
+  } catch (e) {
+    // Persist failed (e.g. quota) - keep the previous stars and tell the user
+    // (same treatment as toggleStar; UI state was never optimistically moved).
+    logError('performStarSelected failed to persist starredEmails', undefined, e as Error);
+    showToast($t('toasts.starUpdateFailed'), 'error');
   }
-  starredEmailIds = updated;
-  await browser.storage.local.set({ starredEmails: Array.from(updated) });
-  emitSelectionChange();
 }
 
 function closeContextMenuOnly() {
   contextMenuOpen = false;
+  contextMenuEmail = null;
   longPressEmail = null;
 }
 
-function wireSelectionApi() {
-  const syncApi = {
-    cancel: () => deselectAll(),
-    archive: () => performArchive(),
-    delete: () => performDelete(),
-    restore: () => performRestore(),
-    star: () => void performStarSelected(),
-    label: () => openTagDialogForSelected(),
-    selectAll: () => selectAllVisible(),
-    deselectAll: () => deselectAll(),
-    applyLabel: (lab: string) => applyLabelToSelected(lab),
+/** Open the per-email context menu at the pointer position (also selects the email). */
+function clampContextMenuPosition(x: number, y: number): { x: number; y: number } {
+  const menuW = 220;
+  const menuH = 120;
+  return {
+    x: Math.min(x, Math.max(8, window.innerWidth - menuW)),
+    y: Math.min(y, Math.max(8, window.innerHeight - menuH)),
   };
-  Object.assign(emailSelectionApi, syncApi);
-  Object.assign(selectionApi, syncApi);
 }
 
-function openTagDialogForSelected() {
-  const ids = Array.from(selectedEmailIds);
+function openContextMenu(email: Email, x: number, y: number) {
+  const next = new Set(selectedEmailIds);
+  next.add(emailSelectionKey(email));
+  selectedEmailIds = next;
+  holdCtrl.armSuppression();
+  // Clamp so the menu never renders off-screen.
+  contextMenuPosition = clampContextMenuPosition(x, y);
+  contextMenuEmail = email;
+  contextMenuOpen = true;
+}
+
+function closeContextMenu() {
+  contextMenuOpen = false;
+  contextMenuEmail = null;
+}
+
+function createRuleFromContextMenu() {
+  const sender = contextMenuEmail?.from || '';
+  closeContextMenu();
+  // Keep the email selected in the background; navigation happens in AppLayout.
+  onCreateRuleFromEmail(sender);
+}
+
+/**
+ * What the shell's selection strip and the sidebar's drops can do to this list.
+ * A literal object, closured over the functions below - no in-place wiring, so
+ * there is nothing to keep in sync at mount time.
+ */
+const selectionApi: SelectionApi = {
+  cancel: () => deselectAll(),
+  selectAll: () => selectAllVisible(),
+  deselectAll: () => deselectAll(),
+  run: (action) => {
+    switch (action) {
+      case 'archive':
+        return performArchive();
+      case 'delete':
+        return performDelete();
+      case 'restore':
+        return performRestore();
+      case 'star':
+        return performStarSelected();
+      case 'tag':
+        return openLabelDialogForSelected();
+      default:
+        // The mailbox advertises only the actions handled above (see the publish
+        // effect); an unknown one is inert rather than an exception.
+        return;
+    }
+  },
+  applyTag: (tag: string) => applyLabelToSelected(tag),
+  // Keyboard: the cursor is DOM focus on the row (`data-selectable-row`), so the
+  // mailbox owns no second copy of "which message am I on" beside the focus.
+  moveFocus: moveMailboxCursor,
+  hasFocusedRow: () => focusedRowId(listRootEl) !== null,
+  focusedIsSelected: () => {
+    const id = focusedRowId(listRootEl);
+    return id !== null && selectedEmailIds.has(id);
+  },
+  setFocusedSelected: (selected) => {
+    const id = focusedRowId(listRootEl);
+    if (id === null || selected === selectedEmailIds.has(id)) return;
+    toggleEmailSelection(id);
+  },
+};
+
+function openLabelDialogForSelected() {
+  const ids = [
+    ...new Set(resolveSelectedEmails().map((email) => emailLabelKeyForEmail(email, selectedEmail))),
+  ];
   if (ids.length === 0) return;
-  tagDialogEmailId = ids[0] ?? null;
-  tagDialogMultiIds = [...ids];
-  tagDialogInput = '';
-  emailTagDialogOpen = true;
+  labelDialogEmailId = ids[0] ?? null;
+  labelDialogMultiIds = [...ids];
+  labelDialogInput = '';
+  labelDialogColor = '#6750a4';
+  labelDialogColorTouched = false;
+  emailLabelDialogOpen = true;
 }
 
-async function saveEmailTags() {
-  const tags = Array.from(
+async function saveEmailLabels() {
+  const labels = Array.from(
     new Set(
-      tagDialogInput
+      labelDialogInput
         .split(',')
         .map((t) => t.trim())
         .filter(Boolean)
     )
   );
-  const ids = tagDialogMultiIds?.length
-    ? [...tagDialogMultiIds]
-    : tagDialogEmailId
-      ? [tagDialogEmailId]
+  const ids = labelDialogMultiIds?.length
+    ? [...labelDialogMultiIds]
+    : labelDialogEmailId
+      ? [labelDialogEmailId]
       : [];
   if (ids.length === 0) return;
-  const next: Record<string, string[]> = { ...emailTagsMap };
+  const next: Record<string, string[]> = { ...emailLabelsMap };
   for (const id of ids) {
-    if (tags.length === 0) {
+    if (labels.length === 0) {
       delete next[id];
-    } else if (tagDialogMultiIds?.length) {
+    } else if (labelDialogMultiIds?.length) {
       const existing = Array.isArray(next[id]) ? next[id] : [];
-      next[id] = [...new Set([...existing, ...tags])];
+      next[id] = [...new Set([...existing, ...labels])];
     } else {
-      next[id] = tags;
+      next[id] = labels;
     }
   }
-  await commitTagsWithUndo(next, ids);
-  closeEmailTagDialog();
-  if (emailSelection.mode) closeContextMenuOnly();
+  // Register any brand-new labels, using the color picked in the dialog.
+  if (labels.length > 0) {
+    const defs = mergeLabelsIntoCatalog(labelCatalog, labels);
+    if (defs.length !== labelCatalog.length) {
+      const known = new Set(labelCatalog.map((d) => d.name.toLowerCase()));
+      const withColor = defs.map((d) =>
+        known.has(d.name.toLowerCase()) ? d : { ...d, color: labelDialogColor }
+      );
+      labelCatalog = withColor;
+      try {
+        await setEmailLabelCatalog(withColor);
+      } catch {
+        /* storage write failure is non-fatal for the label itself */
+      }
+    }
+  }
+  await commitLabelsWithUndo(next, ids);
+  closeEmailLabelDialog();
+  if (selectionActive) closeContextMenuOnly();
 }
 
 let motionMqCleanup: (() => void) | null = null;
 let scrollRaf = 0;
 
 onMount(() => {
-  wireSelectionApi();
   loadStarredEmails();
   void loadConnectivityLog();
   void isMarqueeSelectionEnabled().then((v) => {
@@ -2495,17 +3175,21 @@ onMount(() => {
 });
 
 onDestroy(() => {
+  verificationRequestId += 1;
   if (hoverTimer) clearTimeout(hoverTimer);
-  if (longPressTimer) clearTimeout(longPressTimer);
+  holdCtrl.cancelAll();
   if (scrollRaf) cancelAnimationFrame(scrollRaf);
+  // The selection bar is rendered by the shell, so a selection that outlives the
+  // view would leave it on screen over the next page. Reset both published
+  // objects to inert on the way out.
 });
 </script>
 
 <svelte:window bind:innerWidth={windowWidth} bind:innerHeight={windowHeight} />
 
-<div class="relative flex flex-col flex-1 min-h-0 h-full w-full" style="--strips-reserve: {stripReservePx}px;">
+<div class="scroll-frame relative flex flex-col flex-1 min-h-0 h-full w-full" style="--strips-reserve: {stripReservePx}px;">
 <div
-  class="account-selector-container relative shrink-0 {containerBgClass} rounded-2xl {buttonText === 'Show' || buttonText === 'Always Show' ? 'rounded-ee-none' : ''} p-2 mt-[7.5px] mb-[7.5px] overflow-visible"
+  class="account-selector-container relative shrink-0 {containerBgClass} rounded-2xl p-2 mt-[7.5px] mb-[7.5px] transition-[max-height,opacity,margin,padding] duration-200 ease-out {addressBarCollapsed ? 'max-h-0 overflow-hidden opacity-0 pointer-events-none p-0 mt-0 mb-0' : 'max-h-screen overflow-visible opacity-100'}"
   role="none"
 >
 <div
@@ -2513,187 +3197,160 @@ onDestroy(() => {
   onmouseenter={() => { accountSelectorHovered = true; }}
   onmouseleave={() => { accountSelectorHovered = false; }}
 >
-<AccountSelector
+<AddressSelector
   {selectedEmail}
   bind:displayedEmail
   {accounts}
   {defaultDomain}
-  {allAccounts}
+  {allAddresses}
   {dropdownOpen}
   {onDropdownOpenChange}
-  onSelectAccount={onSelectAccount}
-  onEditAccount={onEditAccount}
+  onSelectAddress={onSelectAddress}
+  onEditAddress={onEditAddress}
+  onManageTags={onManageTags}
   onToggleAutoExtend={onToggleAutoExtend}
-  onArchiveAccount={onArchiveAccount}
-  onUnarchiveAccount={onUnarchiveAccount}
-  onRemoveAccount={onRemoveAccount}
-  onRestoreAccount={onRestoreAccount}
-  onCreateInbox={onCreateInbox}
+  onArchiveAddress={onArchiveAddress}
+  onUnarchiveAddress={onUnarchiveAddress}
+  onRemoveAddress={onRemoveAddress}
+  onRestoreAddress={onRestoreAddress}
+  onCreateAddress={onCreateAddress}
   onNavigateToManage={onNavigateToManage}
-  onReloadAccounts={onReloadAccounts}
-  onNavigateToSettings={onNavigateToSettings}
-  onCreateInboxWithProvider={onCreateInboxWithProvider}
+  onReloadAddresses={onReloadAddresses}
   onMarkAllRead={async (account) => {
     try {
-      const { readEmails = {}, storedEmails = {} } = (await browser.storage.local.get([
-        'readEmails',
-        'storedEmails',
-      ])) as { readEmails?: Record<string, boolean>; storedEmails?: Record<string, Email[]> };
-      const bag = storedEmails[account.address] || [];
-      for (const e of bag) {
-        readEmails[`${account.address}_${e.id}`] = true;
-        readEmails[e.id] = true;
-      }
-      await browser.storage.local.set({ readEmails });
+      const bag = await getStoredEmailsForAddress(account.id, account.address);
+      // Queue + flush (not a bare get→set): a queued single-read flush for an
+      // overlapping open would otherwise clobber this write, or vice versa.
+      queueEmailReadStates(
+        bag.map((e) => ({
+          emailId: e.id,
+          casings: [account.address, e.original_inbox],
+          read: true,
+        }))
+      );
+      await flushQueuedEmailReadState();
       showToast($t('addressView.markAllRead'));
-      await onReloadAccounts();
+      await onReloadAddresses();
     } catch {
-      /* ignore */
+      showToast($t('toasts.operationFailed'), 'error');
     }
   }}
   onMarkAllUnread={async (account) => {
     try {
-      const { readEmails = {}, storedEmails = {} } = (await browser.storage.local.get([
-        'readEmails',
-        'storedEmails',
-      ])) as { readEmails?: Record<string, boolean>; storedEmails?: Record<string, Email[]> };
-      const bag = storedEmails[account.address] || [];
-      for (const e of bag) {
-        delete readEmails[`${account.address}_${e.id}`];
-        delete readEmails[e.id];
-      }
-      await browser.storage.local.set({ readEmails });
+      const bag = await getStoredEmailsForAddress(account.id, account.address);
+      queueEmailReadStates(
+        bag.map((e) => ({
+          emailId: e.id,
+          casings: [account.address, e.original_inbox],
+          read: false,
+        }))
+      );
+      await flushQueuedEmailReadState();
       showToast($t('addressView.markAllUnread'));
-      await onReloadAccounts();
+      await onReloadAddresses();
     } catch {
-      /* ignore */
+      showToast($t('toasts.operationFailed'), 'error');
     }
   }}
   {showToast}
-  {selectedProviderInstance}
   notificationsEnabled={notificationsEnabled}
   onToggleNotifications={onToggleNotifications}
   gesturesEnabled={gesturesEnabled}
 />
 </div>
 
-<!-- Action row: Copy Email, QR, New Address, Refresh, Notifications -->
-{#if !searchBarFocused && !emailSelection.mode && (!actionRowCollapsed || accountSelectorHovered || actionRowHovered)}
-<div
-  class="mailbox-action-row w-full flex items-center justify-between gap-1.5 pt-2 pb-2 transition-all duration-300 ease-in-out"
-  style="opacity: {actionRowCollapsed && !accountSelectorHovered && !actionRowHovered ? '0' : '1'}; transform: {actionRowCollapsed && !accountSelectorHovered && !actionRowHovered ? 'translateY(-10px)' : 'translateY(0)'}; --action-btn-font: {actionBtnFontPx}px;"
-  bind:this={actionRowEl}
+<!-- Primary address actions use S; keep their 40px targets and 12px baseline gap. -->
+{#if !searchBarFocused && !selectionActive && (!actionRowCollapsed || accountSelectorHovered || actionRowHovered)}
+<ButtonGroup
+  class="mailbox-action-row pt-2 pb-2 transition-all duration-300 ease-in-out"
+  style="opacity: {actionRowCollapsed && !accountSelectorHovered && !actionRowHovered ? '0' : '1'}; transform: {actionRowCollapsed && !accountSelectorHovered && !actionRowHovered ? 'translateY(-10px)' : 'translateY(0)'};"
   onmouseenter={() => { actionRowHovered = true; }}
   onmouseleave={() => { actionRowHovered = false; }}
   role="none"
 >
   <!-- Copy Email -->
-  <button
+  <Btn
     id="button-copy-email"
-    class="btn-primary {actionBtnEqualWidth ? 'flex-1' : 'flex-auto'} flex items-center justify-center gap-1.5 px-2.5 h-8.5 rounded-xl font-bold tracking-wide transition-colors shadow-sm min-w-0"
-    style="font-size: var(--action-btn-font, 0.75rem);"
+    variant="primary"
+    icon="contentCopy"
+    label={$t('common.copy')}
     aria-label={$t('inbox.copyEmailAria')}
     title={$t('inbox.copyEmailAria')}
     onclick={(e) => { e.stopPropagation(); onCopyEmail(); }}
-  >
-    <span class="btn-icon flex items-center justify-center w-5 h-5 rounded-full shrink-0">
-      <Icon name="copy" class="w-3.5 h-3.5" />
-    </span>
-    <span class="leading-tight self-center whitespace-nowrap overflow-visible">{$t('common.copy')}</span>
-  </button>
+  />
 
   <!-- QR Code -->
-  <button
+  <Btn
     id="button-qr-code"
-    class="btn-secondary {actionBtnEqualWidth ? 'flex-1' : 'flex-auto'} flex items-center justify-center gap-1.5 px-2.5 h-8.5 rounded-xl font-bold tracking-wide transition-colors shadow-sm min-w-0"
-    style="font-size: var(--action-btn-font, 0.75rem);"
+    variant="secondary"
+    icon="qrCode2"
+    label="QR"
     aria-label={$t('inbox.showQrAria')}
     title={$t('inbox.showQrAria')}
     onclick={(e) => { e.stopPropagation(); onOpenQrDialog(); }}
-  >
-    <span class="btn-icon flex items-center justify-center w-5 h-5 rounded-full shrink-0">
-      <Icon name="qr" class="w-3.5 h-3.5" />
-    </span>
-    <span class="leading-tight self-center whitespace-nowrap overflow-visible">QR</span>
-  </button>
+  />
 
   <!-- Archive/Unarchive -->
-  {#if currentAccount}
-    {#if currentAccount.accountStatus === 'archived'}
-      <button
+  {#if currentAddress}
+    {#if currentAddress.accountStatus === 'archived'}
+      <Btn
         id="button-unarchive"
-        class="btn-tertiary {actionBtnEqualWidth ? 'flex-1' : 'flex-auto'} flex items-center justify-center gap-1.5 px-2.5 h-8.5 rounded-xl font-bold tracking-wide transition-colors shadow-sm min-w-0 disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none"
-        style="font-size: var(--action-btn-font, 0.75rem);"
+        variant="tertiary"
+        icon="unarchive"
+        label={$t('common.unarchive')}
         aria-label={$t('inbox.unarchiveEmailAria')}
         title={canUnarchiveCurrent
           ? $t('inbox.unarchiveEmailAria')
-          : $t('account.unarchiveNotAvailable')}
+          : $t('address.unarchiveNotAvailable')}
         disabled={!canUnarchiveCurrent}
         aria-disabled={!canUnarchiveCurrent}
         onclick={(e) => {
           e.stopPropagation();
-          if (!canUnarchiveCurrent || !currentAccount) return;
-          onUnarchiveAccount(currentAccount);
+          if (!canUnarchiveCurrent || !currentAddress) return;
+          onUnarchiveAddress(currentAddress);
         }}
-      >
-        <span class="btn-icon flex items-center justify-center w-5 h-5 rounded-full shrink-0">
-          <Icon name="archive" class="w-3.5 h-3.5" />
-        </span>
-        <span class="leading-tight self-center whitespace-nowrap overflow-visible">{$t('common.unarchive')}</span>
-      </button>
+      />
     {:else}
-      <button
+      <Btn
         id="button-archive"
-        class="btn-tertiary {actionBtnEqualWidth ? 'flex-1' : 'flex-auto'} flex items-center justify-center gap-1.5 px-2.5 h-8.5 rounded-xl font-bold tracking-wide transition-colors shadow-sm min-w-0"
-        style="font-size: var(--action-btn-font, 0.75rem);"
+        variant="tertiary"
+        icon="archive"
+        label={$t('common.archive')}
         aria-label={$t('inbox.archiveEmailAria')}
         title={$t('inbox.archiveEmailAria')}
-        onclick={(e) => { e.stopPropagation(); onArchiveAccount(currentAccount); }}
-      >
-        <span class="btn-icon flex items-center justify-center w-5 h-5 rounded-full shrink-0">
-          <Icon name="archive" class="w-3.5 h-3.5" />
-        </span>
-        <span class="leading-tight self-center whitespace-nowrap overflow-visible">{$t('common.archive')}</span>
-      </button>
+        onclick={(e) => { e.stopPropagation(); onArchiveAddress(currentAddress); }}
+      />
     {/if}
 
     <!-- Forget Me / Restore -->
-    {#if currentAccount.accountStatus === 'deleted'}
-      <button
+    {#if currentAddress.accountStatus === 'deleted'}
+      <Btn
         id="button-restore"
-        class="btn-error {actionBtnEqualWidth ? 'flex-1' : 'flex-auto'} flex items-center justify-center gap-1.5 px-2.5 h-8.5 rounded-xl font-bold tracking-wide transition-colors shadow-sm min-w-0"
-        style="font-size: var(--action-btn-font, 0.75rem);"
+        variant="danger"
+        icon="back"
+        label={$t('common.restore')}
         aria-label={$t('inbox.restoreEmailAria')}
         title={$t('inbox.restoreEmailAria')}
-        onclick={(e) => { e.stopPropagation(); onRestoreAccount(currentAccount.address); }}
-      >
-        <span class="btn-icon flex items-center justify-center w-5 h-5 rounded-full shrink-0">
-          <Icon name="back" class="w-3.5 h-3.5" />
-        </span>
-        <span class="leading-tight self-center whitespace-nowrap overflow-visible">{$t('common.restore')}</span>
-      </button>
+        onclick={(e) => { e.stopPropagation(); onRestoreAddress(currentAddress.address); }}
+      />
     {:else}
-      <button
+      <Btn
         id="button-delete"
-        class="btn-error {actionBtnEqualWidth ? 'flex-1' : 'flex-auto'} flex items-center justify-center gap-1.5 px-2.5 h-8.5 rounded-xl font-bold tracking-wide transition-colors shadow-sm min-w-0"
-        style="font-size: var(--action-btn-font, 0.75rem);"
+        variant="danger"
+        icon="delete"
+        label={$t('common.delete')}
         aria-label={$t('inbox.deleteEmailAria')}
         title={$t('inbox.deleteEmailAria')}
-        onclick={(e) => { e.stopPropagation(); onRemoveAccount(currentAccount.address); }}
-      >
-        <span class="btn-icon flex items-center justify-center w-5 h-5 rounded-full shrink-0">
-          <Icon name="trash" class="w-3.5 h-3.5" />
-        </span>
-        <span class="leading-tight self-center whitespace-nowrap overflow-visible">{$t('common.delete')}</span>
-      </button>
+        onclick={(e) => { e.stopPropagation(); onRemoveAddress(currentAddress.address); }}
+      />
     {/if}
   {/if}
 
-</div>
+</ButtonGroup>
 {/if}
 
     <!-- Collapsible action row (auto-renew toggle + tag pill) -->
-    {#if currentAccount && !searchBarFocused && !emailSelection.mode && (!actionRowCollapsed || accountSelectorHovered || actionRowHovered)}
+    {#if currentAddress && !searchBarFocused && !selectionActive && (!actionRowCollapsed || accountSelectorHovered || actionRowHovered)}
       <div
         class="transition-all duration-300 ease-in-out"
         style="opacity: {actionRowCollapsed && !accountSelectorHovered && !actionRowHovered ? '0' : '1'}; transform: {actionRowCollapsed && !accountSelectorHovered && !actionRowHovered ? 'translateY(-10px)' : 'translateY(0)'};"
@@ -2701,96 +3358,162 @@ onDestroy(() => {
         onmouseleave={() => { actionRowHovered = false; }}
         role="none"
       >
-        <div class="flex items-center gap-2">
-          <!-- Auto-renew pill toggle (hidden for archived mailboxes) -->
-          {#if supportsAutoRenew && currentAccount.expiresAt && !isCurrentAccountArchived}
-            <AutoRenewToggle
-              autoRenew={currentAccount.autoExtend || false}
-              onToggle={() => onToggleAutoExtend(currentAccount)}
-            />
+        <div class="flex w-full min-w-0 items-center gap-2 pe-8">
+          <!-- Archived inboxes can explicitly resume supported renewal through the shared prompt. -->
+          {#if supportsAutoRenew && currentAddress.accountStatus !== 'deleted'}
+            <div class="shrink-0">
+              <AutoRenewToggle
+                autoRenew={currentAddress.autoExtend || false}
+                showStateText={false}
+                label={loadProviderConfig(currentAddress.provider).expiry?.renewalLabel === 'autoExtend' ? $t('activity.autoExtend') : $t('address.autoRenew')}
+                onToggle={() => onToggleAutoExtend(currentAddress)}
+              />
+            </div>
           {/if}
 
-          <!-- Tag pill -->
-          <TagPill
-            tag={currentAccount.tag}
-            tagColor={currentAccount.tagColor}
+          <ResponsiveMailboxTags
+            account={currentAddress}
+            {tagColors}
+            tagAddresses={tagAddressUsage}
             onClick={openTagDialog}
-            showIcon={true}
           />
         </div>
       </div>
     {/if}
 
-    <!-- Hide / Always Show: pill, flush bottom-end of account container (no chevron) -->
-    {#if !actionRowCollapsed || accountSelectorHovered || actionRowHovered}
+    <!-- Pin / Unpin: icon-only, inset bottom-end of account container - respects rounded-2xl -->
+    {#if !searchBarFocused && !selectionActive && (!actionRowCollapsed || accountSelectorHovered || actionRowHovered)}
     <button
       id="button-collapse-toggle"
       type="button"
-      class="reveal-toggle absolute end-0 bottom-0 z-10 m-0 px-3 py-0.5 cursor-pointer rounded-ss-full rounded-ee-none rounded-se-none rounded-es-none text-xs font-bold tracking-wide leading-none h-5 min-w-[3.5rem] border border-md-outline-variant/50 shadow-sm transition-colors
-        {actionRowCollapsed
-          ? 'bg-md-primary text-md-on-primary hover:bg-md-primary/90'
-          : 'bg-md-secondary-container text-md-on-secondary-container hover:brightness-95'}"
-      style="margin: 0; inset-inline-end: 0; bottom: 0;"
+      class="reveal-toggle absolute end-0 bottom-0 z-10 m-0 w-7 h-7 flex items-center justify-center cursor-pointer rounded-full border border-md-outline-variant/60 {ELEVATION.level1} transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-md-primary focus-visible:ring-offset-2 focus-visible:ring-offset-md-surface {actionRowCollapsed ? 'bg-md-primary text-md-on-primary hover:bg-md-primary/90 active:bg-md-primary/80' : 'bg-md-surface-container-high text-md-on-surface hover:bg-md-surface-container-highest active:bg-md-surface-variant'}"
+      style="margin: 0; inset-inline-end: 6px; bottom: 6px;"
       onclick={(e) => { e.stopPropagation(); handleActionRowToggle(); }}
       onmouseenter={() => { actionRowHovered = true; }}
       onmouseleave={() => { actionRowHovered = false; }}
       aria-label={!actionRowCollapsed ? $t('inbox.hideActionRow') : $t('inbox.alwaysShowActionRow')}
-      title={!actionRowCollapsed ? $t('inbox.hideActionRow') : $t('inbox.alwaysShowActionRow')}
+      data-tooltip={!actionRowCollapsed ? $t('inbox.hideActionRow') : $t('inbox.alwaysShowActionRow')}
+      aria-pressed={!actionRowCollapsed}
     >
-      {#if !actionRowCollapsed}
-        {$t('inbox.hideActionRow')}
-      {:else}
-        {$t('inbox.alwaysShowActionRow')}
-      {/if}
+      <Icon name={actionRowCollapsed ? 'keep' : 'keepOff'} class="w-4 h-4" />
     </button>
     {/if}
 </div>
 
 {#if hideHintDialogOpen}
-  <div
-    bind:this={hideHintOverlayEl}
-    class="fixed inset-0 z-[10000] flex items-center justify-center p-4"
-    data-portal-layer="dialog"
-    role="dialog"
-    aria-modal="true"
+  <ModalDialog
+    open={true}
+    title={$t('inbox.hideActionRowTitle')}
+    maxWidth="xs"
+    onClose={() => void dismissHideHint(false)}
   >
-    <button type="button" class="absolute inset-0 bg-md-scrim/40" aria-label={$t('common.close')} onclick={() => void dismissHideHint(false)}></button>
-    <div class="relative z-10 w-full max-w-[300px] rounded-2xl bg-md-surface border border-md-outline-variant/40 shadow-2xl p-4 space-y-3 animate-in">
-      <h3 class="text-sm font-bold text-md-on-surface">{$t('inbox.hideActionRowTitle')}</h3>
-      <p class="text-xs text-md-on-surface/70 leading-relaxed">{$t('inbox.hideActionRowBody')}</p>
-      <label class="flex items-center gap-2 text-label-sm text-md-on-surface/70 cursor-pointer select-none">
+    <div class="space-y-3">
+      <p class="text-sm text-md-on-surface-variant leading-relaxed">{$t('inbox.hideActionRowBody')}</p>
+      <label class="flex items-center gap-2 text-sm text-md-on-surface-variant cursor-pointer select-none">
         <Checkbox bind:checked={hideHintDontShow} />
         {$t('inbox.dontShowAgain')}
       </label>
       <button
         type="button"
-        class="w-full py-2 rounded-xl text-xs font-semibold bg-md-primary text-md-on-primary"
+        class="w-full h-10 rounded-xl text-sm font-semibold bg-md-primary text-md-on-primary"
         onclick={() => void dismissHideHint(hideHintDontShow)}
       >{$t('common.confirm')}</button>
     </div>
-  </div>
+  </ModalDialog>
 {/if}
 
 
 <!-- Search + Filter row -->
-<div class="shrink-0" data-tour="search-filter">
+<div class="scroll-edge shrink-0" data-tour="search-filter">
+<FilterList
+  searchQuery={searchQuery}
+  sortBy={sortBy}
+  otpOnly={otpOnly}
+  unreadOnly={unreadOnly}
+  hasAttachment={hasAttachment}
+  senderDomain={senderDomain}
+  senderEmail={senderEmail}
+  recipient={recipient}
+  subject={subject}
+  notSenderDomain={notSenderDomain}
+  notSenderEmail={notSenderEmail}
+  notRecipient={notRecipient}
+  notSubject={notSubject}
+  selectedSenders={selectedSenders}
+  emails={emails}
+  dateFrom={dateFrom}
+  dateTo={dateTo}
+  savedSearchFilters={savedSearchFilters}
+  onSearchChange={(value: string) => onSearchChange(value)}
+  onSortChange={(value: string) => { handleSortChange(value); }}
+  onOtpOnlyChange={(value: boolean) => { onOtpOnlyChange(value); }}
+  onUnreadOnlyChange={(value: boolean) => { onUnreadOnlyChange(value); }}
+  onHasAttachmentChange={(value: boolean) => { onHasAttachmentChange(value); }}
+  onSenderDomainChange={(value: string) => { onSenderDomainChange(value); }}
+  onSelectedSendersChange={(value: string[]) => { onSelectedSendersChange(value); }}
+  onDateFromChange={(value: string) => { onDateFromChange(value); }}
+  onDateToChange={(value: string) => { onDateToChange(value); }}
+  onClearFilters={onClearFilters}
+  onSaveFilter={async (name: string, sq: string, otp: boolean, att: boolean, sd: string, df: string, dt: string, senders: string[], sort: string, rec: string, subj: string, unread: boolean) => {
+    await onSaveFilter(name, sq, otp, att, sd, df, dt, senders, sort, rec, subj, unread);
+  }}
+  onLoadFilter={onLoadFilter}
+  onRenameFilter={onRenameFilter}
+  onDeleteFilter={onDeleteFilter}
+  onSearchFocus={() => {
+    searchBarFocused = true;
+    searchFocusEmailBaseline = emails.length;
+    searchFocusNewMailCount = 0;
+  }}
+  onSearchBlur={() => {
+    searchBarFocused = false;
+    searchFocusNewMailCount = 0;
+  }}
+  onFilterClick={() => { /* filter menu only - do not focus search */ }}
+  onRefreshMailbox={onRefreshMailbox}
+  emailsLoading={loading}
+  onToggleNotifications={onToggleNotifications}
+  notificationsEnabled={notificationsEnabled}
+  currentAddress={currentAddress?.address || selectedEmail || ''}
+>
 {#snippet layoutMenu()}
+    <IconButton
+      icon="description"
+      size="sm"
+      ariaLabel={$t('attachmentLibrary.title')}
+      title={$t('attachmentLibrary.title')}
+      aria-haspopup="dialog"
+      onclick={() => { attachmentLibraryOpen = true; }}
+    />
     <div class="relative shrink-0">
       <button
         type="button"
+        bind:this={viewMenuBtnEl}
         id="button-tab-view"
         aria-haspopup="menu"
         aria-expanded={viewDropdownOpen}
         aria-label={$t('inbox.layoutMenu')}
         title={$t('inbox.layoutMenu')}
-        class="w-8 h-8 flex items-center justify-center rounded-xl transition-colors mt-0 {viewDropdownOpen || threadGrouping || showStarredOnly ? 'bg-md-primary/15 text-md-primary' : 'bg-md-surface hover:bg-md-surface-variant text-md-on-surface/50'}"
+        class="w-8 h-8 flex items-center justify-center rounded-full bg-md-surface text-md-on-surface/50 active:brightness-95 transition-colors mt-0 {controlSurface(
+          viewDropdownOpen || threadGrouping || showStarredOnly
+        )}"
         onclick={(e) => {
           e.stopPropagation();
+          if (!viewDropdownOpen && viewMenuBtnEl) {
+            const rect = viewMenuBtnEl.getBoundingClientRect();
+            const menuW = 220;
+            let left = rect.right - menuW;
+            let top = rect.bottom + 4;
+            if (left < 8) left = 8;
+            if (left + menuW > window.innerWidth - 8) left = window.innerWidth - menuW - 8;
+            if (top + 420 > window.innerHeight - 16) top = Math.max(8, rect.top - 420 - 4);
+            viewMenuPos = { top, left };
+          }
           viewDropdownOpen = !viewDropdownOpen;
           labelOverflowOpen = false;
         }}
       >
-        <Icon name="grid" class="w-4 h-4" />
+        <Icon name="gridView" class="w-4 h-4" />
       </button>
       {#if viewDropdownOpen}
         <button
@@ -2804,10 +3527,11 @@ onDestroy(() => {
           }}
         ></button>
         <div
-          class="menu-list absolute top-full end-0 mt-1 bg-md-surface-container-low border border-md-outline-variant/50 rounded-xl shadow-xl {PORTAL_Z_CLASS.accountMenu} overflow-visible min-w-[210px]"
+          use:anchoredFlyout={{ anchor: () => viewMenuBtnEl, placement: 'bottom-end', onClose: () => { viewDropdownOpen = false; viewSortSubOpen = false; viewShowSubOpen = false; } }}
+          class="menu-list fixed bg-md-surface-container-low border border-md-outline-variant/50 rounded-xl {ELEVATION.level2} {PORTAL_Z_CLASS.dialog} overflow-visible min-w-[210px] max-h-[70vh] overflow-y-auto"
+          style="top: {viewMenuPos.top}px; left: {viewMenuPos.left}px;"
           role="menu"
           tabindex="-1"
-          onmouseleave={() => { viewSortSubOpen = false; viewShowSubOpen = false; }}
         >
           <div
             class="w-full flex items-center gap-3 px-3 min-h-12 text-sm text-md-on-surface"
@@ -2862,7 +3586,7 @@ onDestroy(() => {
               onChange={(v) => {
                 threadGrouping = v;
                 expandedThreadIds = new Set();
-                void browser.storage.local.set({ threadGrouping });
+                void writeWithRetry({ threadGrouping });
               }}
             />
           </div>
@@ -2880,15 +3604,15 @@ onDestroy(() => {
           <div class="border-t border-md-outline-variant/40 my-1"></div>
           <div class="px-3 py-1 text-xs font-bold text-md-on-surface/40">{$t('inbox.viewOptions.stripsSection')}</div>
           <div class="w-full flex items-center gap-3 px-3 min-h-12 text-sm text-md-on-surface" data-menu-item>
-            <Icon name="lock" class="w-3.5 h-3.5 shrink-0 text-md-on-surface-variant" />
-            <span class="flex-1">{$t('inbox.viewOptions.showOtpStrip')}</span>
+            <Icon name="shield" class="w-3.5 h-3.5 shrink-0 text-md-on-surface-variant" />
+            <span class="flex-1">{$t('inbox.viewOptions.showVerificationStrip')}</span>
             <Toggle
               size="sm"
-              checked={!preferHideOtpStrip}
-              ariaLabel={$t('inbox.viewOptions.showOtpStrip')}
+              checked={!preferHideVerificationStrip}
+              ariaLabel={$t('inbox.viewOptions.showVerificationStrip')}
               onChange={(v) => {
-                preferHideOtpStrip = !v;
-                void browser.storage.local.set({ preferHideOtpStrip });
+                preferHideVerificationStrip = !v;
+                void writeWithRetry({ preferHideVerificationStrip });
               }}
             />
           </div>
@@ -2901,35 +3625,20 @@ onDestroy(() => {
               ariaLabel={$t('inbox.viewOptions.showAutofillStrip')}
               onChange={(v) => {
                 preferHideAutofillStrip = !v;
-                void browser.storage.local.set({ preferHideAutofillStrip });
+                void writeWithRetry({ preferHideAutofillStrip });
               }}
             />
           </div>
-          <div class="w-full flex items-center gap-3 px-3 min-h-12 text-sm text-md-on-surface" data-menu-item>
-            <Icon name="globe" class="w-3.5 h-3.5 shrink-0 text-md-on-surface-variant" />
-            <span class="flex-1">{$t('inbox.viewOptions.showMagicLinkStrip')}</span>
-            <Toggle
-              size="sm"
-              checked={!preferHideMagicStrip}
-              ariaLabel={$t('inbox.viewOptions.showMagicLinkStrip')}
-              onChange={(v) => {
-                preferHideMagicStrip = !v;
-                void browser.storage.local.set({ preferHideMagicStrip });
-              }}
-            />
-          </div>
-
           <div class="border-t border-md-outline-variant/40 my-1"></div>
 
           <div
             class="relative"
             role="none"
-            onmouseenter={() => { viewShowSubOpen = true; viewSortSubOpen = false; }}
-            onmouseleave={() => { viewShowSubOpen = false; }}
+            onmouseenter={(e) => { if (hasInlineFlyoutSpace(e.currentTarget, 140)) { viewShowSubOpen = true; viewSortSubOpen = false; } }}
           >
             <button
               type="button"
-              class="w-full flex items-center gap-2 px-3 min-h-12 text-sm text-start hover:bg-md-surface-variant transition-colors text-md-on-surface"
+              class="w-full flex items-center gap-2 px-3 min-h-12 text-sm text-start hover:bg-md-surface-variant active:brightness-95 transition-colors text-md-on-surface"
               onclick={() => { viewShowSubOpen = !viewShowSubOpen; viewSortSubOpen = false; }}
             >
               <Icon name="chevronLeft" class="w-3.5 h-3.5 shrink-0 opacity-50 rtl-flip" />
@@ -2939,13 +3648,15 @@ onDestroy(() => {
             </button>
             {#if viewShowSubOpen}
               <div
-                class="absolute top-0 end-full me-1 bg-md-surface-container border border-md-outline-variant rounded-xl shadow-lg {PORTAL_Z_CLASS.accountMenu} min-w-[140px] overflow-hidden"
+                use:anchoredFlyout={{ placement: 'inline-start', onClose: () => { viewShowSubOpen = false; } }}
+                class="absolute top-0 end-full me-1 bg-md-surface-container border border-md-outline-variant rounded-xl {ELEVATION.level2} {PORTAL_Z_CLASS.accountMenu} min-w-[140px] overflow-hidden"
                 role="menu"
               >
+                <button type="button" class="md-action w-full text-start p-2 text-sm text-md-primary" onclick={() => { viewShowSubOpen = false; }}><Icon name="back" class="inline w-4 h-4 rtl-flip" /> {$t('common.back')}</button>
                 {#each PAGE_SIZE_OPTIONS as n (n)}
                   <button
                     type="button"
-                    class="w-full flex items-center gap-2 px-3 min-h-12 text-sm text-start hover:bg-md-surface-variant {pageSize === n ? 'text-md-primary font-medium' : 'text-md-on-surface'}"
+                    class="w-full flex items-center gap-2 px-3 min-h-12 text-sm text-start hover:bg-md-surface-variant active:brightness-95 {pageSize === n ? 'text-md-primary font-medium' : 'text-md-on-surface'}"
                     onclick={() => { void setPageSize(n); viewDropdownOpen = false; viewShowSubOpen = false; }}
                   >
                     <span class="flex-1">{$t('inbox.pageSizeOption', { values: { n } })}</span>
@@ -2959,70 +3670,71 @@ onDestroy(() => {
           <div
             class="relative"
             role="none"
-            onmouseenter={() => { viewSortSubOpen = true; viewShowSubOpen = false; }}
-            onmouseleave={() => { viewSortSubOpen = false; }}
+            onmouseenter={(e) => { if (hasInlineFlyoutSpace(e.currentTarget, 240)) { viewSortSubOpen = true; viewShowSubOpen = false; } }}
           >
             <button
               type="button"
-              class="w-full flex items-center gap-2 px-3 min-h-12 text-sm text-start hover:bg-md-surface-variant transition-colors text-md-on-surface"
+              class="w-full flex items-center gap-2 px-3 min-h-12 text-sm text-start hover:bg-md-surface-variant active:brightness-95 transition-colors text-md-on-surface"
               onclick={() => { viewSortSubOpen = !viewSortSubOpen; viewShowSubOpen = false; }}
             >
               <Icon name="chevronLeft" class="w-3.5 h-3.5 shrink-0 opacity-50 rtl-flip" />
-              <Icon name="clock" class="w-3.5 h-3.5 shrink-0" />
+              <Icon name="schedule" class="w-3.5 h-3.5 shrink-0" />
               <span class="flex-1">{$t('inbox.viewOptions.sortSection')}</span>
             </button>
             {#if viewSortSubOpen}
               <div
-                class="absolute top-0 end-full me-1 bg-md-surface-container border border-md-outline-variant rounded-xl shadow-lg {PORTAL_Z_CLASS.accountMenu} min-w-[240px] overflow-hidden p-1.5 space-y-1"
+                use:anchoredFlyout={{ placement: 'inline-start', onClose: () => { viewSortSubOpen = false; } }}
+                class="absolute top-0 end-full me-1 bg-md-surface-container border border-md-outline-variant rounded-xl {ELEVATION.level2} {PORTAL_Z_CLASS.accountMenu} min-w-[240px] overflow-hidden p-1.5 space-y-1"
                 role="menu"
               >
+                <button type="button" class="md-action w-full text-start p-2 text-sm text-md-primary" onclick={() => { viewSortSubOpen = false; }}><Icon name="back" class="inline w-4 h-4 rtl-flip" /> {$t('common.back')}</button>
                 <div class="flex items-center gap-2 px-1.5 py-1 rounded-lg">
-                  <Icon name="clock" class="w-3.5 h-3.5 shrink-0 text-md-on-surface/50" />
+                  <Icon name="schedule" class="w-3.5 h-3.5 shrink-0 text-md-on-surface/50" />
                   <span class="flex-1 min-w-0 text-xs font-semibold text-md-on-surface truncate">{$t('inbox.viewOptions.sortByDate')}</span>
                   <div class="flex items-stretch rounded-md border border-md-outline-variant/50 overflow-hidden shrink-0">
                     <button
                       type="button"
-                      class="px-2 py-1 text-label-sm font-bold transition-colors {sortBy === 'newest' ? 'bg-md-primary text-md-on-primary' : 'bg-md-surface text-md-on-surface hover:bg-md-surface-variant'}"
+                      class="px-2 py-1 text-xs font-bold transition-colors {sortBy === 'newest' ? 'bg-md-primary text-md-on-primary' : 'bg-md-surface text-md-on-surface hover:bg-md-surface-variant active:brightness-95'}"
                       onclick={() => { handleSortChange('newest'); viewDropdownOpen = false; viewSortSubOpen = false; }}
                     >{$t('inbox.viewOptions.sortNewestShort')}</button>
                     <span class="w-px bg-md-outline-variant/60 shrink-0" aria-hidden="true"></span>
                     <button
                       type="button"
-                      class="px-2 py-1 text-label-sm font-bold transition-colors {sortBy === 'oldest' ? 'bg-md-primary text-md-on-primary' : 'bg-md-surface text-md-on-surface hover:bg-md-surface-variant'}"
+                      class="px-2 py-1 text-xs font-bold transition-colors {sortBy === 'oldest' ? 'bg-md-primary text-md-on-primary' : 'bg-md-surface text-md-on-surface hover:bg-md-surface-variant active:brightness-95'}"
                       onclick={() => { handleSortChange('oldest'); viewDropdownOpen = false; viewSortSubOpen = false; }}
                     >{$t('inbox.viewOptions.sortOldestShort')}</button>
                   </div>
                 </div>
                 <div class="flex items-center gap-2 px-1.5 py-1 rounded-lg">
-                  <Icon name="user" class="w-3.5 h-3.5 shrink-0 text-md-on-surface/50" />
+                  <Icon name="person" class="w-3.5 h-3.5 shrink-0 text-md-on-surface/50" />
                   <span class="flex-1 min-w-0 text-xs font-semibold text-md-on-surface truncate">{$t('inbox.viewOptions.sortBySenderName')}</span>
                   <div class="flex items-stretch rounded-md border border-md-outline-variant/50 overflow-hidden shrink-0">
                     <button
                       type="button"
-                      class="px-2 py-1 text-label-sm font-bold transition-colors {sortBy === 'senderNameAsc' ? 'bg-md-primary text-md-on-primary' : 'bg-md-surface text-md-on-surface hover:bg-md-surface-variant'}"
+                      class="px-2 py-1 text-xs font-bold transition-colors {sortBy === 'senderNameAsc' ? 'bg-md-primary text-md-on-primary' : 'bg-md-surface text-md-on-surface hover:bg-md-surface-variant active:brightness-95'}"
                       onclick={() => { handleSortChange('senderNameAsc'); viewDropdownOpen = false; viewSortSubOpen = false; }}
                     >{$t('inbox.viewOptions.sortAscShort')}</button>
                     <span class="w-px bg-md-outline-variant/60 shrink-0" aria-hidden="true"></span>
                     <button
                       type="button"
-                      class="px-2 py-1 text-label-sm font-bold transition-colors {sortBy === 'senderNameDesc' ? 'bg-md-primary text-md-on-primary' : 'bg-md-surface text-md-on-surface hover:bg-md-surface-variant'}"
+                      class="px-2 py-1 text-xs font-bold transition-colors {sortBy === 'senderNameDesc' ? 'bg-md-primary text-md-on-primary' : 'bg-md-surface text-md-on-surface hover:bg-md-surface-variant active:brightness-95'}"
                       onclick={() => { handleSortChange('senderNameDesc'); viewDropdownOpen = false; viewSortSubOpen = false; }}
                     >{$t('inbox.viewOptions.sortDescShort')}</button>
                   </div>
                 </div>
                 <div class="flex items-center gap-2 px-1.5 py-1 rounded-lg">
-                  <Icon name="envelope" class="w-3.5 h-3.5 shrink-0 text-md-on-surface/50" />
+                  <Icon name="mail" class="w-3.5 h-3.5 shrink-0 text-md-on-surface/50" />
                   <span class="flex-1 min-w-0 text-xs font-semibold text-md-on-surface truncate">{$t('inbox.viewOptions.sortBySenderEmail')}</span>
                   <div class="flex items-stretch rounded-md border border-md-outline-variant/50 overflow-hidden shrink-0">
                     <button
                       type="button"
-                      class="px-2 py-1 text-label-sm font-bold transition-colors {sortBy === 'senderEmailAsc' ? 'bg-md-primary text-md-on-primary' : 'bg-md-surface text-md-on-surface hover:bg-md-surface-variant'}"
+                      class="px-2 py-1 text-xs font-bold transition-colors {sortBy === 'senderEmailAsc' ? 'bg-md-primary text-md-on-primary' : 'bg-md-surface text-md-on-surface hover:bg-md-surface-variant active:brightness-95'}"
                       onclick={() => { handleSortChange('senderEmailAsc'); viewDropdownOpen = false; viewSortSubOpen = false; }}
                     >{$t('inbox.viewOptions.sortAscShort')}</button>
                     <span class="w-px bg-md-outline-variant/60 shrink-0" aria-hidden="true"></span>
                     <button
                       type="button"
-                      class="px-2 py-1 text-label-sm font-bold transition-colors {sortBy === 'senderEmailDesc' ? 'bg-md-primary text-md-on-primary' : 'bg-md-surface text-md-on-surface hover:bg-md-surface-variant'}"
+                      class="px-2 py-1 text-xs font-bold transition-colors {sortBy === 'senderEmailDesc' ? 'bg-md-primary text-md-on-primary' : 'bg-md-surface text-md-on-surface hover:bg-md-surface-variant active:brightness-95'}"
                       onclick={() => { handleSortChange('senderEmailDesc'); viewDropdownOpen = false; viewSortSubOpen = false; }}
                     >{$t('inbox.viewOptions.sortDescShort')}</button>
                   </div>
@@ -3033,13 +3745,13 @@ onDestroy(() => {
                   <div class="flex items-stretch rounded-md border border-md-outline-variant/50 overflow-hidden shrink-0">
                     <button
                       type="button"
-                      class="px-2 py-1 text-label-sm font-bold transition-colors {sortBy === 'subjectAsc' ? 'bg-md-primary text-md-on-primary' : 'bg-md-surface text-md-on-surface hover:bg-md-surface-variant'}"
+                      class="px-2 py-1 text-xs font-bold transition-colors {sortBy === 'subjectAsc' ? 'bg-md-primary text-md-on-primary' : 'bg-md-surface text-md-on-surface hover:bg-md-surface-variant active:brightness-95'}"
                       onclick={() => { handleSortChange('subjectAsc'); viewDropdownOpen = false; viewSortSubOpen = false; }}
                     >{$t('inbox.viewOptions.sortAscShort')}</button>
                     <span class="w-px bg-md-outline-variant/60 shrink-0" aria-hidden="true"></span>
                     <button
                       type="button"
-                      class="px-2 py-1 text-label-sm font-bold transition-colors {sortBy === 'subjectDesc' ? 'bg-md-primary text-md-on-primary' : 'bg-md-surface text-md-on-surface hover:bg-md-surface-variant'}"
+                      class="px-2 py-1 text-xs font-bold transition-colors {sortBy === 'subjectDesc' ? 'bg-md-primary text-md-on-primary' : 'bg-md-surface text-md-on-surface hover:bg-md-surface-variant active:brightness-95'}"
                       onclick={() => { handleSortChange('subjectDesc'); viewDropdownOpen = false; viewSortSubOpen = false; }}
                     >{$t('inbox.viewOptions.sortDescShort')}</button>
                   </div>
@@ -3047,65 +3759,25 @@ onDestroy(() => {
               </div>
             {/if}
           </div>
+          <div class="border-t border-md-outline-variant/40 my-1"></div>
+          <button
+            type="button"
+            class="w-full flex items-center gap-2 px-3 min-h-12 text-sm text-start text-md-error hover:bg-md-error/10 active:bg-md-error/30 rounded-b-xl"
+            onclick={() => resetLayoutSettings()}
+          >
+            <Icon name="refresh" class="w-3.5 h-3.5" />
+            {$t('common.reset')}
+          </button>
         </div>
       {/if}
     </div>
 {/snippet}
-<FilterList
-  searchQuery={searchQuery}
-  sortBy={sortBy}
-  otpOnly={otpOnly}
-  hasAttachment={hasAttachment}
-  senderDomain={senderDomain}
-  senderEmail={senderEmail}
-  recipient={recipient}
-  subject={subject}
-  notSenderDomain={notSenderDomain}
-  notSenderEmail={notSenderEmail}
-  notRecipient={notRecipient}
-  notSubject={notSubject}
-  selectedSenders={selectedSenders}
-  emails={emails}
-  dateFrom={dateFrom}
-  dateTo={dateTo}
-  savedSearchFilters={savedSearchFilters}
-  onSearchChange={(value: string) => onSearchChange(value)}
-  onSortChange={(value: string) => { handleSortChange(value); }}
-  onOtpOnlyChange={(value: boolean) => { onOtpOnlyChange(value); }}
-  onHasAttachmentChange={(value: boolean) => { onHasAttachmentChange(value); }}
-  onSenderDomainChange={(value: string) => { onSenderDomainChange(value); }}
-  onSelectedSendersChange={(value: string[]) => { onSelectedSendersChange(value); }}
-  onDateFromChange={(value: string) => { onDateFromChange(value); }}
-  onDateToChange={(value: string) => { onDateToChange(value); }}
-  onClearFilters={onClearFilters}
-  onSaveFilter={async (name: string, sq: string, otp: boolean, att: boolean, sd: string, df: string, dt: string, senders: string[], sort: string, rec: string, subj: string) => {
-    await onSaveFilter(name, sq, otp, att, sd, df, dt, senders, sort, rec, subj);
-  }}
-  onLoadFilter={onLoadFilter}
-  onRenameFilter={onRenameFilter}
-  onDeleteFilter={onDeleteFilter}
-  onSearchFocus={() => {
-    searchBarFocused = true;
-    searchFocusEmailBaseline = emails.length;
-    searchFocusNewMailCount = 0;
-  }}
-  onSearchBlur={() => {
-    searchBarFocused = false;
-    searchFocusNewMailCount = 0;
-  }}
-  onFilterClick={() => { /* filter menu only — do not focus search */ }}
-  onRefreshInbox={onRefreshInbox}
-  emailsLoading={loading}
-  onToggleNotifications={onToggleNotifications}
-  notificationsEnabled={notificationsEnabled}
-  currentAddress={currentAccount?.address || selectedEmail || ''}
-  {layoutMenu}
-/>
+</FilterList>
 </div>
 
 <!-- Status tabs + labels: hidden when sidebar owns them (except during search) -->
-{#if !hideListTabsUnlessSearch || !!(searchQuery && searchQuery.trim())}
-<div class="shrink-0 px-0 py-1" data-tour="email-list-tabs">
+{#if !$sidebarTabsVisible}
+<div class="scroll-edge shrink-0 px-0 py-1" data-tour="email-list-tabs">
   {#if true}
     {@const chip =
       'text-xs px-2.5 py-1 rounded-full whitespace-nowrap shrink-0 transition-colors'}
@@ -3126,7 +3798,7 @@ onDestroy(() => {
         ondragover={(e) => { e.preventDefault(); if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'; }}
         ondrop={(e) => {
           e.preventDefault();
-          if (!emailSelection.mode && selectedEmailIds.size === 0) return;
+          if (!selectionActive) return;
           emailListTab = 'all';
           activeLabelFilter = null;
         }}
@@ -3143,7 +3815,7 @@ onDestroy(() => {
         ondragover={(e) => { e.preventDefault(); if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'; }}
         ondrop={(e) => {
           e.preventDefault();
-          if (!emailSelection.mode && selectedEmailIds.size === 0) return;
+          if (!selectionActive) return;
           if (emailListTab === 'archived' || emailListTab === 'deleted') performRestore();
           emailListTab = 'inbox';
           activeLabelFilter = null;
@@ -3161,7 +3833,7 @@ onDestroy(() => {
         ondragover={(e) => { e.preventDefault(); if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'; }}
         ondrop={(e) => {
           e.preventDefault();
-          if (!emailSelection.mode && selectedEmailIds.size === 0) return;
+          if (!selectionActive) return;
           if (emailListTab !== 'archived') performArchive();
           emailListTab = 'archived';
           activeLabelFilter = null;
@@ -3179,7 +3851,7 @@ onDestroy(() => {
         ondragover={(e) => { e.preventDefault(); if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'; }}
         ondrop={(e) => {
           e.preventDefault();
-          if (!emailSelection.mode && selectedEmailIds.size === 0) return;
+          if (!selectionActive) return;
           if (emailListTab !== 'deleted') performDelete();
           emailListTab = 'deleted';
           activeLabelFilter = null;
@@ -3215,7 +3887,7 @@ onDestroy(() => {
             void applyLabelToSelected(lab);
             activeLabelFilter = lab;
           }}
-        >{lab} ({labCount})</button>
+        ><span class="inline-block w-2 h-2 rounded-full me-1 align-middle shrink-0" style="background-color: {labelColor(lab)};"></span>{lab} ({labCount})</button>
       {/each}
 
       {#if overflowLabels.length > 0}
@@ -3237,12 +3909,13 @@ onDestroy(() => {
               aria-label={$t('common.close')}
               onclick={() => (labelOverflowOpen = false)}
             ></button>
-            <div class="absolute start-0 top-full mt-1 {PORTAL_Z_CLASS.accountMenu} min-w-[120px] max-h-48 overflow-y-auto rounded-xl border border-md-outline-variant bg-md-surface shadow-xl p-1">
+            <div use:anchoredFlyout={{ onClose: () => { labelOverflowOpen = false; } }} class="absolute start-0 top-full mt-1 {PORTAL_Z_CLASS.accountMenu} min-w-[120px] max-h-48 overflow-y-auto rounded-xl border border-md-outline-variant bg-md-surface {ELEVATION.level2} p-1">
               {#each overflowLabels as lab (lab)}
                 {@const labCount = labelCountInStatusTab(lab)}
                 <button
                   type="button"
-                  class="w-full text-start px-2.5 py-1.5 text-label-sm rounded-lg truncate {activeLabelFilter === lab ? 'bg-md-tertiary/15 text-md-tertiary font-semibold' : 'text-md-on-surface hover:bg-md-surface-variant'}"
+                  class="w-full text-start px-2.5 py-1.5 text-sm rounded-lg truncate {rowSurface({ active: activeLabelFilter === lab })}
+                    {activeLabelFilter === lab ? 'text-md-tertiary font-semibold' : 'text-md-on-surface'}"
                   title={`${lab} (${labCount})`}
                   onclick={() => {
                     activeLabelFilter = activeLabelFilter === lab ? null : lab;
@@ -3277,15 +3950,17 @@ onDestroy(() => {
 </div>
 {/if}
 
-<!-- Email list: flex-1, full height — strips and nav float over it. End-of-list spacer inside EmailList handles clearance. -->
+<!-- Email list: flex-1, full height - strips and nav float over it. End-of-list spacer inside EmailList handles clearance. -->
 <div class="flex-1 min-h-0 h-full w-full flex flex-col relative">
 {#if crossMailboxSearchActive}
-  <div class="flex-1 min-h-0 overflow-y-auto px-0.5 space-y-2 pb-2">
+  <div class="scroll-body scroll-body-framed flex-1 min-h-0 overflow-y-auto space-y-2 pb-2">
     {#each crossMailboxGroups as group (group.address)}
+      {@const visibleKey = group.address.toLowerCase()}
+      {@const visibleCount = crossMailboxVisibleCounts[visibleKey] || CROSS_MAILBOX_INITIAL_ROWS}
       <div class="rounded-xl border border-md-outline-variant/40 overflow-hidden bg-md-surface-container-low">
         <button
           type="button"
-          class="w-full flex items-center gap-2 px-3 py-2 text-start hover:bg-md-surface-variant/50 transition-colors"
+          class="w-full flex items-center gap-2 px-3 py-2 text-start hover:bg-md-surface-variant/50 active:bg-md-surface-variant/70 transition-colors"
           onclick={() => {
             const key = group.address.toLowerCase();
             const next = new Set(collapsedCrossMailboxes);
@@ -3310,52 +3985,105 @@ onDestroy(() => {
           {#if group.emails.length === 0}
             <p class="px-3 pb-2.5 text-xs text-md-on-surface/50">{$t('inbox.noMatchingResultsMailbox')}</p>
           {:else}
-            <div class="max-h-[40vh] overflow-y-auto border-t border-md-outline-variant/30">
+            <div class="scroll-body max-h-[40vh] overflow-y-auto border-t border-md-outline-variant/30">
               <div class="space-y-1 p-1">
-                {#each group.emails.slice(0, 50) as mail, i (mail.id)}
+                {#each group.emails.slice(0, visibleCount) as mail, i (mail.id)}
+                  {@const selectionKey = emailSelectionKey(mail)}
+                  {@const isSelected = selectedEmailIds.has(selectionKey)}
                   <div
-                    data-marquee-id={mail.id}
-                    class="mailbox-row-enter flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-md-surface-variant/40 cursor-pointer transition-colors {selectedEmailIds.has(mail.id) ? 'ring-2 ring-md-secondary bg-md-primary/10' : ''}"
+                    data-marquee-id={selectionKey}
+                    data-selected={isSelected ? 'true' : 'false'}
+                    class="mailbox-row-enter flex items-center gap-3 px-3 py-2 rounded-lg cursor-pointer {mailRowSurfaceClass({ selected: isSelected, active: false, highlighted: false, unread: false })}"
                     style="animation-delay: {Math.min(i * 15, 300)}ms"
                     role="button"
                     tabindex="0"
                     onclick={(e) => {
-                      if (emailSelection.mode) {
+                      // Star presses must not open the message - same guard as the main row.
+                      if ((e.target as HTMLElement)?.closest?.('[data-star-btn]')) return;
+                      if (selectionActive) {
                         e.stopPropagation();
-                        toggleEmailSelection(mail.id);
+                        toggleEmailSelection(selectionKey);
                       } else {
                         onOpenMessageDetail([mail]);
                       }
                     }}
                     oncontextmenu={(e) => {
                       e.preventDefault();
-                      emailSelection.mode = true;
-                      const next = new Set(selectedEmailIds);
-                      next.add(mail.id);
-                      selectedEmailIds = next;
-                      emailSelection.count = next.size;
-                      emitSelectionChange();
+                      e.stopPropagation();
+                      openContextMenu(mail, e.clientX, e.clientY);
                     }}
                     onkeydown={(e) => {
                       if (e.key === 'Enter' || e.key === ' ') {
                         e.preventDefault();
-                        if (emailSelection.mode) toggleEmailSelection(mail.id);
+                        if (selectionActive) toggleEmailSelection(selectionKey);
                         else onOpenMessageDetail([mail]);
                       }
                     }}
-                  >
-                    <div class="w-7 h-7 rounded-full flex items-center justify-center font-bold text-sm shrink-0 {avatarColor(mail.from_name || mail.from || '')}">
-                      {(mail.from_name || mail.from || '?')[0]?.toUpperCase()}
-                    </div>
+                  >                      <button
+                        type="button"
+                        class="{AVATAR_BOX.row} rounded-full [perspective:600px] bg-transparent border-0 p-0 cursor-pointer focus:outline-none focus:ring-2 focus:ring-md-primary/30 shrink-0"
+                      aria-label={$t('inbox.emailActions.selectAll')}
+                      aria-pressed={selectedEmailIds.has(selectionKey)}
+                      onclick={(e) => {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        toggleEmailSelection(selectionKey);
+                      }}
+                    >
+                      <div
+                        class="flip-card w-full h-full relative transition-transform duration-300 [transform-style:preserve-3d] {selectedEmailIds.has(selectionKey)
+                          ? '[transform:rotateY(180deg)]'
+                          : ''}"
+                      >
+                        <!-- Front Face: letter avatar - single Avatar source -->
+                        <div
+                          class="absolute inset-0 [backface-visibility:hidden] rounded-full overflow-hidden"
+                        >
+                          <Avatar size="row" letter={avatarInitial(mail.from_name || mail.from, '?')} email={mail.from || mail.from_name || ''} />
+                        </div>
+                        <!-- Back Face: tick checkmark -->
+                        <div
+                          class="absolute inset-0 [backface-visibility:hidden] [transform:rotateY(180deg)] rounded-full bg-md-secondary text-md-on-secondary flex items-center justify-center"
+                        >
+                          <Icon name="check" class="{AVATAR_INK.row} text-md-on-secondary" />
+                        </div>
+                      </div>
+                    </button>
                     <div class="flex-1 min-w-0">
                       <div class="flex items-center justify-between gap-2">
-                        <span class="text-xs font-bold text-md-on-surface truncate">{@html highlightMatches(getDisplayName(mail.from || '', mail.from_name), highlightTerms)}</span>
-                        <span class="text-xs text-md-on-surface/50 shrink-0">{mail.time}</span>
+                        <span class="text-xs font-bold {isSelected ? SELECTED_ROW_INK.subject : 'text-md-on-surface'} truncate">{@html highlightMatches(mail.subject || $t('addressView.noSubject'), highlightTerms)}</span>
+                        <span class="text-xs {isSelected ? SELECTED_ROW_INK.meta : 'text-md-on-surface/50'} shrink-0">{mail.time}</span>
                       </div>
-                      <p class="text-xs text-md-on-surface/60 truncate leading-tight mt-0.5">{@html highlightMatches(mail.subject || '(no subject)', highlightTerms)}</p>
+                      <p class="text-xs {isSelected ? SELECTED_ROW_INK.sender : 'text-md-on-surface/60'} truncate leading-tight mt-0.5">{@html highlightMatches(getDisplayName(mail.from || '', mail.from_name), highlightTerms)}</p>
                     </div>
+                    <!-- Star button: identical geometry to the main row star -
+                         20px glyph + p-0.5 = 24px box; spacing comes from the row gap. -->
+                    <button
+                      type="button"
+                      data-star-btn
+                      class="flex flex-shrink-0 self-center items-center justify-center p-0.5 rounded-full transition-colors hover:bg-md-surface-variant/40 active:bg-md-surface-variant/60 cursor-pointer border-0 bg-transparent {mailRowStarClass({ selected: isSelected, starred: isStarredMail(mail) })} {starPopId === mail.id ? 'star-pop' : ''}"
+                      onclick={(e) => {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        void toggleStar(mail);
+                      }}
+                      aria-pressed={isStarredMail(mail)}
+                      aria-label={$t('inbox.emailActions.star')}
+                      title={$t('inbox.emailActions.star')}
+                    >
+                      <Icon name="star" class="w-5 h-5 transition-colors duration-150 pointer-events-none" filled={isStarredMail(mail)} />
+                    </button>
                   </div>
                 {/each}
+                {#if group.emails.length > visibleCount}
+                  <button
+                    type="button"
+                    class="w-full min-h-9 rounded-lg text-xs font-semibold text-md-primary hover:bg-md-surface-variant/50 active:bg-md-surface-variant/70"
+                    onclick={() => loadMoreCrossMailbox(group.address)}
+                  >
+                    {$t('emailList.loadMore')} ({group.emails.length - visibleCount})
+                  </button>
+                {/if}
               </div>
             </div>
           {/if}
@@ -3366,7 +4094,7 @@ onDestroy(() => {
     {/each}
     <div
       class="w-full shrink-0 transition-[height] duration-200 ease-in-out pointer-events-none"
-      style="height: calc(var(--bottom-safe-area, 0px) + {totalBottomSpacerHeightPx}px + 12px);"
+      style="height: calc(var(--bottom-safe-area, 0px) + var(--selection-bar-offset, 0px) + {totalBottomSpacerHeightPx}px + 12px);"
       aria-hidden="true"
     ></div>
   </div>
@@ -3390,100 +4118,46 @@ onDestroy(() => {
         </span>
         <span class="text-xs font-semibold ms-2 {ready ? 'text-md-success' : 'text-md-primary'}">
           {pullRefreshing
-            ? ($t('common.loading') || 'Refreshing…')
+            ? ($t('common.loading'))
             : ready
-              ? ($t('emailList.releaseToRefresh') || 'Release to refresh')
-              : ($t('emailList.pullToRefresh') || 'Pull to refresh')}
+              ? ($t('emailList.releaseToRefresh'))
+              : ($t('emailList.pullToRefresh'))}
         </span>
       </div>
     {/if}
 
-    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
     <div
       bind:this={listRootEl}
-      class="flex-1 min-h-0 h-full w-full px-0 border-t border-md-outline-variant/30 relative flex flex-col {displayedEmails.length === 0 && !loading ? 'overflow-hidden' : 'overflow-y-auto'}"
+      class="scroll-body scroll-body-framed flex-1 min-h-0 h-full w-full px-0 border-t border-md-outline-variant/30 relative flex flex-col {displayedEmails.length === 0 && !loading ? 'overflow-hidden' : 'overflow-y-auto'}"
       onpointerdown={onMarqueePointerDown}
       role="region"
       aria-label={$t('common.emailList')}
-      ontouchstart={(e) => {
-        startY = e.touches[0].clientY;
-        isPulling = true;
-        pullDistance = 0;
-      }}
-      ontouchmove={(e) => {
-        if (!isPulling || pullRefreshing) return;
-        const container = e.currentTarget as HTMLElement | null;
-        if (!container || container.scrollTop > 0) return;
-        const currentY = e.touches[0].clientY;
-        const raw = Math.max(0, currentY - startY);
-        const dist = Math.min(raw * 0.55, 88);
-        if (dist > 0) {
-          pullDistance = dist;
-          pullToRefresh = pullDistance > 60;
-          e.preventDefault();
-        }
-      }}
-      ontouchend={async (e) => {
-        const container = e.currentTarget as HTMLElement | null;
-        const atTop = !container || container.scrollTop === 0;
-        if (pullToRefresh && atTop) {
+      use:pullToRefresh={{
+        isRefreshing: () => pullRefreshing,
+        onProgress: (distance) => {
+          pullDistance = distance;
+        },
+        onRefresh: async () => {
           pullRefreshing = true;
           try {
-            await onRefreshInbox();
+            await onRefreshMailbox();
           } finally {
             pullRefreshing = false;
           }
-        }
-        pullToRefresh = false;
-        pullDistance = 0;
-        isPulling = false;
-        startY = 0;
-      }}
-      onmousedown={(e) => {
-        startY = e.clientY;
-        isPulling = true;
-        pullDistance = 0;
-      }}
-      onmousemove={(e) => {
-        if (!isPulling || e.buttons !== 1 || pullRefreshing) return;
-        const container = e.currentTarget as HTMLElement | null;
-        if (!container || container.scrollTop > 0) return;
-        const raw = Math.max(0, e.clientY - startY);
-        const dist = Math.min(raw * 0.55, 88);
-        if (dist > 12) {
-          pullDistance = dist;
-          pullToRefresh = pullDistance > 60;
-          e.preventDefault();
-        }
-      }}
-      onmouseup={async (e) => {
-        const container = e.currentTarget as HTMLElement | null;
-        const atTop = !container || container.scrollTop === 0;
-        if (pullToRefresh && atTop) {
-          pullRefreshing = true;
-          try {
-            await onRefreshInbox();
-          } finally {
-            pullRefreshing = false;
-          }
-        }
-        pullToRefresh = false;
-        pullDistance = 0;
-        isPulling = false;
-        startY = 0;
-      }}
-      onmouseleave={() => {
-        if (pullRefreshing) return;
-        pullToRefresh = false;
-        pullDistance = 0;
-        isPulling = false;
-        startY = 0;
+        },
+        onReset: () => {
+          pullDistance = 0;
+        },
       }}
       onscroll={(e) => {
+        handleMouseLeave();
         const container = e.currentTarget as HTMLElement | null;
         if (!container) return;
         const scrollBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
-        if (scrollBottom < 100 && displayedEmailCount < tabFilteredEmails.length) {
+        if (isVirtualized) {
+          virtualScrollTop = container.scrollTop;
+          virtualViewportHeight = container.clientHeight;
+        } else if (scrollBottom < 100 && displayedEmailCount < tabFilteredEmails.length) {
           loadMoreEmails();
         }
         if (scrollRaf) cancelAnimationFrame(scrollRaf);
@@ -3492,8 +4166,8 @@ onDestroy(() => {
           const delta = top - lastScrollTop;
           if (Math.abs(delta) > 8) {
             const dir = delta > 0 && top > 24 ? 'down' : 'up';
-            fabHidden = dir === 'down';
-            onScrollDirection(dir);
+            handleAddressBarScroll(dir, top);
+            onScrollDirection(dir, top <= 24);
             lastScrollTop = top;
           }
         });
@@ -3501,7 +4175,7 @@ onDestroy(() => {
     >
       {#if loading && displayedEmails.length === 0}
         <div class="py-2 space-y-2">
-          {#each [1, 2, 3] as _}
+          {#each Array(mailSkeletonCount) as _, i (i)}
             <div class="py-2 border-b border-md-outline-variant/30 px-3">
               <div class="flex justify-between mb-1">
                 <Skeleton width="6rem" height="0.75rem" />
@@ -3521,7 +4195,7 @@ onDestroy(() => {
             </span>
             <button
               type="button"
-              class="inline-flex items-center gap-1 px-2 py-1 rounded-lg font-semibold bg-md-error/15 text-md-error hover:bg-md-error/25 transition-colors shrink-0"
+              class="inline-flex items-center gap-1 px-2 py-1 rounded-lg font-semibold bg-md-error/15 text-md-error hover:bg-md-error/25 active:bg-md-error/45 transition-colors shrink-0"
               onclick={() => {
                 // Keep chips in lockstep with the pill we're dropping (same
                 // rule as FilterList.removePill) so the filter actually clears.
@@ -3532,21 +4206,32 @@ onDestroy(() => {
                 onSearchChange(noResultsRecovery.withoutLast);
               }}
             >
-              <Icon name="x" class="w-3 h-3" />
+              <Icon name="close" class="w-3 h-3" />
               {$t('inbox.noResultsRemovePill', { values: { pill: noResultsRecovery.lastPill } })}
             </button>
           </div>
         {/if}
         <EmptyState
           fillParent
-          iconName={emailListTab === 'archived' ? 'archive' : emailListTab === 'deleted' ? 'trash' : 'mail'}
+          icon={emailListTab === 'archived' ? 'archive' : emailListTab === 'deleted' ? 'delete' : 'mail'}
           title={emailListTab === 'archived' ? $t('emailList.noArchived') : emailListTab === 'deleted' ? $t('emailList.noDeleted') : emailListTab === 'inbox' ? $t('emailList.inboxEmpty') : $t('emailList.noEmailsFound')}
           description={emailListTab === 'archived' ? $t('emailList.swipeArchiveHint') : emailListTab === 'deleted' ? $t('emailList.swipeDeleteHint') : searchQuery || otpOnly || hasAttachment ? $t('emailList.adjustFiltersHint') : emailListTab === 'inbox' ? $t('emailList.emptyInboxHint') : $t('emailList.emptyInboxAllHint')}
-          actionLabel={(emailListTab === 'inbox' || emailListTab === 'all') && (searchQuery || otpOnly || hasAttachment) ? $t('emailList.clearFilters') : ''}
+          actionLabel={(emailListTab === 'inbox' || emailListTab === 'all') && (searchQuery || otpOnly || hasAttachment) ? $t('emailList.clearFilters') : undefined}
           onAction={(emailListTab === 'inbox' || emailListTab === 'all') && (searchQuery || otpOnly || hasAttachment) ? onClearFilters : undefined}
         />
       {:else}
-        {#each emailsWithGaps as row, index (row.kind === 'email' ? row.email.id : `gap-${index}`)}
+        {#if isVirtualized && virtualWindow.paddingBefore > 0}
+          <div
+            class="shrink-0"
+            style="height: {virtualWindow.paddingBefore}px;"
+            aria-hidden="true"
+          ></div>
+        {/if}
+        {#each (isVirtualized ? virtualWindow.rows : emailsWithGaps) as row, index (row.kind === 'email' ? row.email.id : `gap-${isVirtualized ? virtualWindow.start + index : index}`)}
+          <div
+            data-virtual-row-index={isVirtualized ? virtualWindow.start + index : index}
+            class="shrink-0"
+          >
           {#if row.kind === 'offlineGap'}
             <div
               class="shrink-0 flex items-center justify-center gap-2 px-2 py-1.5 text-label-sm text-md-on-surface-variant/70 bg-md-surface-variant/30 border-b border-md-outline-variant/30"
@@ -3562,12 +4247,19 @@ onDestroy(() => {
             </div>
           {:else}
           {@const mail = row.email}
+          {@const isSelected = selectedEmailIds.has(mail.id)}
+          {@const rowInk = {
+            subject: isSelected ? SELECTED_ROW_INK.subject : mail.unread ? 'text-md-on-surface' : 'text-md-on-surface/70',
+            sender: isSelected ? SELECTED_ROW_INK.sender : mail.unread ? 'text-md-on-surface' : 'text-md-on-surface/50',
+            preview: isSelected ? SELECTED_ROW_INK.preview : 'text-md-on-surface/60',
+            meta: isSelected ? SELECTED_ROW_INK.meta : mail.unread ? 'text-md-on-surface/60' : 'text-md-on-surface/40',
+          }}
           {#if threadGrouping}
-            {@const thread = emailThreads.find((t: EmailThread) => t.latestEmail.id === mail.id)}
+            {@const thread = emailThreadIndexes.byLatestEmailId.get(mail.id)}
             {#if thread && thread.emails.length > 1}
               <div class="flex items-center justify-between px-2 py-1 bg-md-secondary-container/40 border-b border-md-outline-variant/30">
                 <span class="text-xs font-semibold text-md-primary/80 truncate max-w-[65%]">
-                  {thread.normalizedSubject || '(no subject)'}
+                  {thread.normalizedSubject || $t('addressView.noSubject')}
                 </span>
                 <button
                   class="flex items-center gap-1 text-xs text-md-on-surface/60 hover:text-md-primary transition-colors flex-shrink-0"
@@ -3585,8 +4277,10 @@ onDestroy(() => {
             {/if}
           {/if}
           <div
-            class="relative shrink-0 min-h-[60px] overflow-hidden border-b border-md-outline-variant/50 density-row {exitingEmailIds.has(row.email.id) ? 'email-row-exit' : ''} {threadGrouping && emailThreads.find((t: EmailThread) => t.latestEmail.id !== row.email.id && t.emails.some((e: Email) => e.id === row.email.id)) ? 'ps-3 bg-md-surface-variant/20' : ''}"
+            class="relative shrink-0 min-h-[60px] overflow-hidden border-b border-md-outline-variant/50 density-row {exitingEmailIds.has(row.email.id) ? 'email-row-exit' : ''} {threadGrouping && emailThreadIndexes.byNestedEmailId.has(row.email.id) ? 'ps-3 bg-md-surface-variant/20' : ''} {emailPreviewMode === 'expanded' ? 'email-row-expandable' : ''}"
             id="email-item-{row.email.id}"
+            data-selectable-row={row.email.id}
+            tabindex="-1"
           >
             {#if swipingEmail === mail && swipeDirection}
               {@const isRestoreTab = emailListTab === 'archived' || emailListTab === 'deleted'}
@@ -3599,24 +4293,26 @@ onDestroy(() => {
               >
                 {#if isRestoreTab}
                   <Icon name="refresh" class="w-6 h-6 text-white" />
-                  <span class="text-white font-medium text-sm">{$t('inbox.emailActions.restore')}</span>
+                  <span class="text-white font-medium text-sm">{$t('common.restore')}</span>
                 {:else if isDeleteSwipe}
-                  <Icon name="trash" class="w-6 h-6 text-white" />
-                  <span class="text-white font-medium text-sm">{$t('inbox.emailActions.delete')}</span>
+                  <Icon name="delete" class="w-6 h-6 text-white" />
+                  <span class="text-white font-medium text-sm">{$t('common.delete')}</span>
                 {:else}
                   <Icon name="archive" class="w-6 h-6 text-white" />
-                  <span class="text-white font-medium text-sm">{$t('inbox.emailActions.archive')}</span>
+                  <span class="text-white font-medium text-sm">{$t('common.archive')}</span>
                 {/if}
               </div>
             {/if}
 
             <div
               id="email-button-{mail.id}"
+              data-row-primary
               data-marquee-id={mail.id}
               role="button"
               tabindex="0"
               aria-label={$t('common.emailFromSubject', { values: { from: mail.from, subject: mail.subject } })}
-              class="w-full shrink-0 min-h-[60px] text-start border-0 focus:outline-none hover:bg-md-surface-variant/40 duration-150 {mail.id === activeThreadMessageId ? 'bg-md-secondary-container/60 font-semibold text-md-on-secondary-container shadow-sm' : mail.id === highlightedEmailId ? 'bg-md-primary/5' : mail.unread ? 'bg-md-primary/5' : 'bg-transparent'} py-2 px-2.5 flex items-center gap-2 {selectedEmailIds.has(mail.id) ? 'ring-2 ring-md-secondary rounded-lg' : ''}"
+              class="w-full shrink-0 min-h-[60px] text-start border-0 focus:outline-none duration-150 {mailRowSurfaceClass({ selected: isSelected, active: mail.id === activeThreadMessageId && (mail.original_inbox || selectedEmail).toLowerCase() === (activeThreadInbox || selectedEmail).toLowerCase(), highlighted: mail.id === highlightedEmailId, unread: !!mail.unread })} {isSelected ? 'rounded-lg' : 'rounded-none'} py-2 px-2.5 flex items-center gap-2"
+              data-selected={isSelected ? 'true' : 'false'}
               style="transform: translateX({swipingEmail === mail ? swipeDistance : 0}px); transition: {swipeActionTriggered ? 'transform 0.3s' : 'none'}; user-select: none;"
               onmouseenter={(e) => handleMouseEnter(mail, e)}
               onmouseleave={() => {
@@ -3630,15 +4326,13 @@ onDestroy(() => {
                   marqueeDidSelect = false;
                   return;
                 }
-                if (Date.now() < suppressClickUntil) return;
+                if (holdCtrl.isSuppressingClick()) return;
                 e.stopPropagation();
                 if (Math.abs(swipeDistance) > 5) return;
-                if (emailSelection.mode) {
+                if (selectionActive) {
                   toggleEmailSelection(mail.id);
                 } else {
-                  const thread = threadGrouping
-                    ? emailThreads.find((t: EmailThread) => t.emails.some((em: Email) => em.id === mail.id))
-                    : null;
+                  const thread = threadGrouping ? emailThreadIndexes.byEmailId.get(mail.id) : null;
                   onOpenMessageDetail(thread ? thread.emails : [mail]);
                 }
               }}
@@ -3669,10 +4363,12 @@ onDestroy(() => {
               draggable={true}
               ondragstart={(e) => {
                 if (!selectedEmailIds.has(mail.id)) {
-                  selectedEmailIds = new Set([mail.id]);
-                  emailSelection.mode = true;
-                  emailSelection.count = 1;
-                  emitSelectionChange();
+                  // A drag from outside the current selection adds that row to
+                  // the live selection; folder/label drops then apply to the
+                  // selected group plus the row the user actually dragged.
+                  const next = new Set(selectedEmailIds);
+                  next.add(mail.id);
+                  selectedEmailIds = next;
                 }
                 if (e.dataTransfer) {
                   e.dataTransfer.effectAllowed = 'copyMove';
@@ -3685,7 +4381,12 @@ onDestroy(() => {
                     const label = extra > 0 ? `${firstSubject} +${extra}` : firstSubject;
                     const preview = document.createElement('div');
                     preview.className = 'drag-mail-preview';
-                    preview.style.cssText = 'position:fixed;top:-9999px;left:-9999px;max-width:220px;padding:6px 10px;border-radius:10px;background:var(--md-surface-container-high,#2b2930);color:var(--md-on-surface,#e6e1e5);font:12px/1.3 system-ui,sans-serif;font-weight:600;box-shadow:0 6px 16px rgba(0,0,0,.25);pointer-events:none;z-index:99999;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+                    // No z-index: this node is only ever the drag IMAGE - it is
+                    // appended to document.body (outside the app shell), parked
+                    // off-screen and removed on the next tick, so it competes with
+                    // nothing. An invented number here is invisible to the z scale
+                    // (see scripts/audit-z-layers.ts) and can only ever be wrong.
+                    preview.style.cssText = 'position:fixed;top:-9999px;left:-9999px;max-width:220px;padding:6px 10px;border-radius:10px;background:var(--md-surface-container-high,#2b2930);color:var(--md-on-surface,#e6e1e5);font:12px/1.3 system-ui,sans-serif;font-weight:600;box-shadow:var(--md-elevation-2);pointer-events:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
                     preview.textContent = label;
                     document.body.appendChild(preview);
                     e.dataTransfer.setDragImage(preview, 16, 12);
@@ -3695,129 +4396,132 @@ onDestroy(() => {
               }}
               oncontextmenu={(e) => {
                 e.preventDefault();
-                emailSelection.mode = true;
                 const next = new Set(selectedEmailIds);
                 next.add(mail.id);
                 selectedEmailIds = next;
-                emailSelection.count = next.size;
-                emitSelectionChange();
               }}
               onkeydown={(e) => {
+                if (e.target !== e.currentTarget) return;
                 if (e.key === 'Enter' || e.key === ' ') {
                   e.preventDefault();
-                  if (emailSelection.mode) toggleEmailSelection(mail.id);
+                  if (selectionActive) toggleEmailSelection(mail.id);
                   else {
                     const thread = threadGrouping
-                      ? emailThreads.find((t: EmailThread) => t.emails.some((em: Email) => em.id === mail.id))
+                      ? emailThreadIndexes.byEmailId.get(mail.id)
                       : null;
                     onOpenMessageDetail(thread ? thread.emails : [mail]);
                   }
-                } else if (e.key === 'ArrowDown') {
-                  e.preventDefault();
-                  (e.currentTarget.nextElementSibling as HTMLElement)?.focus();
-                } else if (e.key === 'ArrowUp') {
-                  e.preventDefault();
-                  (e.currentTarget.previousElementSibling as HTMLElement)?.focus();
                 }
               }}
             >
               <div class="flex items-center gap-2 px-0 py-0.5 flex-1 min-w-0">
                 {#if mail.from}
-                  {@const isSelected = selectedEmailIds.has(mail.id)}
-                  {@const letter = (mail.from_name || mail.from || '?').trim().charAt(0).toUpperCase() || '?'}
+                  {@const letter = avatarInitial(mail.from_name || mail.from, '?')}
                   {@const letterBg = mail.unread ? avatarColor(mail.from) : AVATAR_MUTED}
-                  <div class="flex-shrink-0 w-[35px] h-[35px] rounded-full {isSelected ? 'ring-2 ring-md-primary' : ''} {letterBg} overflow-hidden flex items-center justify-center relative">
-                    {#if showFavicons || isSelected}
-                      <!-- FaviconImage renders the letter itself until the favicon
-                           loads; once loaded, it swaps in the icon (same z-index,
-                           same rounded-full radius). No duplicate letter layer. -->
-                      <FaviconImage
-                        email={mail.from}
-                        size={32}
-                        enabled={showFavicons || isSelected}
-                        class="absolute inset-0 w-full h-full"
-                        fallbackLetter={letter}
-                        fallbackColor={letterBg}
-                      />
-                    {:else}
-                      <span class="absolute inset-0 flex items-center justify-center text-base font-bold text-white select-none pointer-events-none">{letter}</span>
-                    {/if}
-                    {#if isSelected}
-                      <span class="absolute bottom-0 end-0 z-[3] w-3.5 h-3.5 rounded-full bg-md-primary text-md-on-primary flex items-center justify-center">
-                        <Icon name="check" class="w-2.5 h-2.5" />
-                      </span>
-                    {/if}
-                  </div>
+                  <button
+                    type="button"
+                    class="flex-shrink-0 {AVATAR_BOX.row} rounded-full [perspective:600px] bg-transparent border-0 p-0 cursor-pointer focus:outline-none focus:ring-2 focus:ring-md-primary/30 shrink-0"
+                    aria-label={$t('inbox.emailActions.selectAll')}
+                    aria-pressed={isSelected}
+                    onclick={(e) => {
+                      e.stopPropagation();
+                      e.preventDefault();
+                      toggleEmailSelection(mail.id);
+                    }}
+                  >
+                    <div
+                      class="flip-card w-full h-full relative transition-transform duration-300 [transform-style:preserve-3d] {isSelected
+                        ? '[transform:rotateY(180deg)]'
+                        : ''}"
+                    >
+                      <!-- Front Face: sender letter / favicon avatar -->
+                      <div
+                        class="absolute inset-0 [backface-visibility:hidden] rounded-full overflow-hidden {showFavicons ? '' : letterBg}"
+                      >
+                        {#if showFavicons}
+                          <!-- FaviconImage owns the fallback letter/bg - outer bg removed to avoid double paint.
+                               Both the row and this favicon take AVATAR_BOX.row, so the box
+                               and the painted size cannot disagree. -->
+                          <FaviconImage
+                            email={mail.from}
+                            size="row"
+                            enabled={showFavicons}
+                            class="pointer-events-none"
+                            fallbackLetter={letter}
+                            fallbackColor={letterBg}
+                          />
+                        {:else}
+                          <Avatar size="row" letter={letter} email={mail.from} color={letterBg} class="pointer-events-none" />
+                        {/if}
+                      </div>
+                      <!-- Back Face: tick checkmark -->
+                      <div
+                        class="absolute inset-0 [backface-visibility:hidden] [transform:rotateY(180deg)] rounded-full bg-md-secondary text-md-on-secondary flex items-center justify-center"
+                      >
+                        <Icon name="check" class="{AVATAR_INK.row} text-md-on-secondary" />
+                      </div>
+                    </div>
+                  </button>
                 {/if}
 
                 <div class="flex-1 min-w-0">
                   <div class="flex items-center justify-between gap-1 mb-0.5">
-                    <span class="text-sm font-bold {mail.unread ? 'text-md-on-surface' : 'text-md-on-surface/70'} truncate leading-tight">
-                      {@html highlightMatches(getDisplayName(mail.from || '', mail.from_name), highlightTerms)}
+                    <span class="text-sm font-bold {rowInk.subject} truncate leading-tight">
+                      {@html highlightMatches(mail.subject || $t('addressView.noSubject'), highlightTerms)}
                     </span>
                     <span
-                      class="text-xs font-medium cursor-help {mail.unread ? 'text-md-on-surface/60' : 'text-md-on-surface/40'} flex-shrink-0"
+                      class="text-xs font-medium cursor-help {rowInk.meta} flex-shrink-0"
                       title={formatFullDateTime(mail.received_at)}
                     >
                       {mail.time || timeAgo(mail.received_at ? toMs(mail.received_at) : Date.now())}
                     </span>
                   </div>
-                  <p class="text-xs {mail.unread ? 'font-semibold text-md-on-surface' : 'text-md-on-surface/50'} truncate leading-tight">
-                    {@html highlightMatches(mail.subject || '(no subject)', highlightTerms)}
+                  <p class="text-xs {mail.unread ? 'font-semibold ' : ''}{rowInk.sender} truncate leading-tight">
+                    {@html highlightMatches(getDisplayName(mail.from || '', mail.from_name), highlightTerms)}
                   </p>
                   {#if true}
-                    {@const bodyPreview = (mail.body_plain || (mail.body_html || mail.body || '').replace(/<[^>]*>/g, '') || '').replace(/\s+/g, ' ').trim()}
-                    {@const showOtpPill = !hideOtpLabels && mail.isOtp && !!mail.otp}
+                    {@const bodyPreview = emailBodyPreview(mail)}
+                    {@const showOtpPill = !hideOtpLabels && !!(mail.otp || mail.otpCandidate)}
                     {@const showAttachmentPill =
                       !hideAttachmentBadges &&
                       ((Array.isArray(mail.attachments) && mail.attachments.length > 0) ||
                         mail.hasAttachment)}
                     {@const showMagicPill = !!(mail.hasMagicLink || (mail.magicLinks && mail.magicLinks.length > 0))}
                     {@const showLocalPill = !!mail.local_only}
-                    {@const tagList = !hideLabels ? (emailTagsMap[mail.id] || []) : []}
+                    {@const labelList = !hideLabels ? (emailLabelsMap[emailLabelKeyForEmail(mail, selectedEmail)] || []) : []}
                     {@const maxRowTags = 1}
-                    {@const visibleTags = tagList.slice(0, maxRowTags)}
-                    {@const overflowTags = tagList.slice(maxRowTags)}
-                    {@const hasPills =
-                      showOtpPill || showMagicPill || showLocalPill || showAttachmentPill || tagList.length > 0}
-                    {#if bodyPreview || hasPills}
+                    {@const visibleLabels = labelList.slice(0, maxRowTags)}
+                    {@const overflowLabels = labelList.slice(maxRowTags)}
+                    {@const hasBadgeRow =
+                      showOtpPill || mail.couponCode || mail.isReminder || mail.isDeal || showMagicPill || showAttachmentPill || labelList.length > 0}
+                    {#if bodyPreview || showLocalPill}
                       <div class="flex items-center gap-1 mt-0.5 min-w-0 w-full">
                         {#if bodyPreview}
-                          <p class="text-xs text-md-on-surface/60 truncate leading-tight min-w-0 flex-1">{bodyPreview}</p>
+                          <p class="email-body-preview text-xs {rowInk.preview} truncate leading-tight min-w-0 flex-1">{bodyPreview}</p>
                         {/if}
-                        {#if hasPills}
-                          <div class="flex items-center gap-0.5 shrink-0 max-w-[48%] min-w-0">
-                            {#if showLocalPill}
-                              {@const deletedWhen = (() => {
-                                const ts =
-                                  (mail as Email & { local_only_since?: number }).local_only_since ||
-                                  mail.local_deleted_at ||
-                                  mail.stored_at ||
-                                  toMs(mail.received_at);
-                                return ts ? timeAgo(ts) : '';
-                              })()}
-                              <span
-                                id="local-badge-{mail.id}"
-                                class="px-1.5 py-0 text-xs rounded-full bg-md-tertiary-container text-md-on-tertiary-container shrink-0 cursor-help"
-                                title={deletedWhen
-                                  ? $t('inbox.deletedFromServerAgo', { values: { when: deletedWhen } })
-                                  : $t('inbox.localOnlyTooltip')}
-                              >{$t('inbox.localOnlyBadge')}</span>
-                            {/if}
-                            {#if showOtpPill}
-                              <span
-                                id="otp-badge-{mail.id}"
-                                role="button"
-                                tabindex="0"
-                                class="px-2 py-0.5 text-xs rounded-full bg-md-primary/20 text-md-primary cursor-pointer hover:bg-md-primary/30 transition-colors shrink-0 max-w-[5.5rem] truncate min-h-[24px] inline-flex items-center"
-                                onmousedown={(e) => { e.stopPropagation(); e.preventDefault(); onCopyOtpFromMessage(mail.otp || ''); }}
-                                onmouseup={(e) => { e.stopPropagation(); }}
-                                onclick={(e) => { e.stopPropagation(); e.preventDefault(); onCopyOtpFromMessage(mail.otp || ''); }}
-                                onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); e.preventDefault(); onCopyOtpFromMessage(mail.otp || ''); } }}
-                                aria-label={$t('inbox.copyOtpAria')}
-                                title={$t('common.otpValue', { values: { otp: mail.otp } })}
-                              >OTP: {mail.otp}</span>
-                            {/if}
+                        {#if showLocalPill}
+                          {@const deletedWhen = (() => {
+                            const ts =
+                              (mail as Email & { local_only_since?: number }).local_only_since ||
+                              mail.local_deleted_at ||
+                              mail.stored_at ||
+                              toMs(mail.received_at);
+                            return ts ? timeAgo(ts) : '';
+                          })()}
+                          <span
+                            id="local-badge-{mail.id}"
+                            class="inline-flex items-center justify-center w-5 h-5 rounded-full bg-md-tertiary-container text-md-on-tertiary-container shrink-0 cursor-help"
+                            data-tooltip={deletedWhen
+                              ? $t('inbox.deletedFromServerAgo', { values: { when: deletedWhen } })
+                              : $t('inbox.localOnlyTooltip')}
+                            aria-label={$t('inbox.localOnlyBadge')}
+                          ><Icon name="cloudOff" class="w-3 h-3" /></span>
+                        {/if}
+                      </div>
+                    {/if}
+                    {#if hasBadgeRow}
+                      <div class="flex flex-wrap items-center gap-1 mt-1 min-w-0 w-full">
+                            <MessageCodeBadges id="otp-badge-{mail.id}" email={mail} hideOtp={hideOtpLabels} onCopyOtp={onCopyOtpFromMessage} />
                             {#if showAttachmentPill}
                               {@const attList = mail.attachments || []}
                               {@const attFirst = attList[0]}
@@ -3840,32 +4544,33 @@ onDestroy(() => {
                                 title={mail.magicLinks?.[0]?.host || mail.magicLinks?.[0]?.url || $t('inbox.magicLinkDetected')}
                               >{$t('inbox.magicLinkPill')}</span>
                             {/if}
-                            {#each visibleTags as tag (tag)}
+                            {#each visibleLabels as label (label)}
                               <span
                                 role="button"
                                 tabindex="0"
-                                class="px-1.5 py-0 text-xs rounded-full bg-md-primary/20 text-md-primary cursor-pointer hover:bg-md-primary/30 transition-colors shrink-0 max-w-[4rem] truncate"
+                                class="px-1.5 py-0 text-xs rounded-full cursor-pointer transition-opacity hover:opacity-80 shrink-0 max-w-[4rem] truncate"
+                                style="background-color: {hexToRgba(labelColor(label), 0.16)}; color: {labelColor(label)};"
                                 onmousedown={(e) => { e.stopPropagation(); e.preventDefault(); }}
-                                onclick={(e) => { e.stopPropagation(); filterByLabel(tag); }}
-                                title={$t('inbox.filterByLabel', { values: { label: tag } })}
-                                onkeydown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); filterByLabel(tag); } }}
-                                aria-label={$t('inbox.filterByLabel', { values: { label: tag } })}
-                              >{tag}</span>
+                                onclick={(e) => { e.stopPropagation(); filterByLabel(label); }}
+                                title={$t('inbox.filterByLabel', { values: { label } })}
+                                onkeydown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); filterByLabel(label); } }}
+                                aria-label={$t('inbox.filterByLabel', { values: { label } })}
+                              >{label}</span>
                             {/each}
-                            {#if overflowTags.length > 0}
+                            {#if overflowLabels.length > 0}
                               <div class="relative shrink-0">
                                 <button
                                   type="button"
-                                  class="px-1.5 py-0 text-xs rounded-full bg-md-surface-variant text-md-on-surface/70 font-semibold hover:bg-md-primary/15 hover:text-md-primary transition-colors"
-                                  aria-label={$t('inbox.moreLabels', { values: { n: overflowTags.length } })}
-                                  title={overflowTags.join(', ')}
+                                  class="px-1.5 py-0 text-xs rounded-full bg-md-surface-variant text-md-on-surface/70 font-semibold hover:bg-md-primary/15 active:bg-md-primary/35 hover:text-md-primary transition-colors"
+                                  aria-label={$t('inbox.moreLabels', { values: { n: overflowLabels.length } })}
+                                  title={overflowLabels.join(', ')}
                                   onmousedown={(e) => { e.stopPropagation(); e.preventDefault(); }}
                                   onclick={(e) => {
                                     e.stopPropagation();
                                     e.preventDefault();
                                     rowLabelMenuId = rowLabelMenuId === mail.id ? null : mail.id;
                                   }}
-                                >+{overflowTags.length}</button>
+                                >+{overflowLabels.length}</button>
                                 {#if rowLabelMenuId === mail.id}
                                   <button
                                     type="button"
@@ -3875,28 +4580,27 @@ onDestroy(() => {
                                     onclick={(e) => { e.stopPropagation(); rowLabelMenuId = null; }}
                                   ></button>
                                   <div
-                                    class="absolute end-0 top-full mt-1 {PORTAL_Z_CLASS.accountMenu} min-w-[100px] max-w-[160px] max-h-36 overflow-y-auto rounded-lg border border-md-outline-variant bg-md-surface shadow-xl p-1"
+                                    use:anchoredFlyout={{ placement: 'bottom-end', onClose: () => { rowLabelMenuId = null; } }}
+                                    class="absolute end-0 top-full mt-1 {PORTAL_Z_CLASS.accountMenu} min-w-[100px] max-w-[160px] max-h-36 overflow-y-auto rounded-lg border border-md-outline-variant bg-md-surface {ELEVATION.level2} p-1"
                                     role="menu"
                                   >
-                                    {#each overflowTags as tag (tag)}
+                                    {#each overflowLabels as label (label)}
                                       <button
                                         type="button"
                                         role="menuitem"
-                                        class="w-full text-start px-2 py-1 text-xs rounded-md truncate text-md-on-surface hover:bg-md-primary/10 hover:text-md-primary"
+                                        class="w-full text-start px-2 py-1 text-xs rounded-md truncate text-md-on-surface hover:bg-md-primary/10 active:bg-md-primary/30 hover:text-md-primary"
                                         onmousedown={(e) => e.stopPropagation()}
                                         onclick={(e) => {
                                           e.stopPropagation();
-                                          filterByLabel(tag);
+                                          filterByLabel(label);
                                           rowLabelMenuId = null;
                                         }}
-                                      >{tag}</button>
+                                      ><span class="inline-block w-2 h-2 rounded-full me-1.5 align-middle shrink-0" style="background-color: {labelColor(label)};"></span>{label}</button>
                                     {/each}
                                   </div>
                                 {/if}
                               </div>
                             {/if}
-                          </div>
-                        {/if}
                       </div>
                     {/if}
                   {/if}
@@ -3907,7 +4611,7 @@ onDestroy(() => {
                 type="button"
                 data-star-btn
                 id="star-button-{mail.id}"
-                class="flex-shrink-0 self-center p-1 me-0.5 rounded transition-colors hover:bg-md-surface-variant/40 cursor-pointer border-0 bg-transparent {isStarredMail(mail) ? 'text-md-tertiary' : 'text-md-on-surface/25'} {starPopId === mail.id ? 'star-pop' : ''}"
+                class="flex flex-shrink-0 self-center items-center justify-center p-0.5 rounded-full transition-colors hover:bg-md-surface-variant/40 active:bg-md-surface-variant/60 cursor-pointer border-0 bg-transparent {mailRowStarClass({ selected: isSelected, starred: isStarredMail(mail) })} {starPopId === mail.id ? 'star-pop' : ''}"
                 onclick={(e) => {
                   e.stopPropagation();
                   e.preventDefault();
@@ -3931,33 +4635,41 @@ onDestroy(() => {
             </div>
           </div>
           {/if}
+          </div>
         {/each}
-        {#if renderLimit < displayedEmails.length}
+        {#if isVirtualized && virtualWindow.paddingAfter > 0}
+          <div
+            class="shrink-0"
+            style="height: {virtualWindow.paddingAfter}px;"
+            aria-hidden="true"
+          ></div>
+        {/if}
+        {#if !isVirtualized && renderLimit < displayedEmails.length}
           <div bind:this={listSentinelEl} class="h-8" aria-hidden="true"></div>
           <div class="py-3 text-center">
             <button
               type="button"
-              class="px-4 py-1.5 bg-md-surface-variant text-md-on-surface-variant text-xs font-medium rounded-full hover:bg-md-primary hover:text-md-on-primary transition-colors shadow-sm"
+              class="px-4 py-1.5 bg-md-surface-variant text-md-on-surface-variant text-xs font-medium rounded-full hover:bg-md-primary active:brightness-95 hover:text-md-on-primary transition-colors {ELEVATION.level1}"
               onclick={() => expandRenderWindow()}
             >
-              {$t('emailList.loadMore') || 'Load more'} ({displayedEmails.length - renderLimit})
+              {$t('emailList.loadMore')} ({displayedEmails.length - renderLimit})
             </button>
           </div>
-        {:else if displayedEmailCount < tabFilteredEmails.length}
+        {:else if !isVirtualized && displayedEmailCount < tabFilteredEmails.length}
           <div class="py-3 text-center">
             <button
               type="button"
-              class="px-4 py-1.5 bg-md-surface-variant text-md-on-surface-variant text-xs font-medium rounded-full hover:bg-md-primary hover:text-md-on-primary transition-colors shadow-sm"
+              class="px-4 py-1.5 bg-md-surface-variant text-md-on-surface-variant text-xs font-medium rounded-full hover:bg-md-primary active:brightness-95 hover:text-md-on-primary transition-colors {ELEVATION.level1}"
               onclick={() => loadMoreEmails()}
             >
-              {$t('emailList.loadMore') || 'Load more'} ({tabFilteredEmails.length - displayedEmailCount})
+              {$t('emailList.loadMore')} ({tabFilteredEmails.length - displayedEmailCount})
             </button>
           </div>
         {/if}
         <!-- Dynamic End-of-List Spacer: allows content to flow behind floating nav & strips while ensuring the final item can scroll cleanly above controls -->
         <div
           class="w-full shrink-0 transition-[height] duration-200 ease-in-out pointer-events-none"
-          style="height: calc(var(--bottom-safe-area, 0px) + {totalBottomSpacerHeightPx}px + 12px);"
+          style="height: calc(var(--bottom-safe-area, 0px) + var(--selection-bar-offset, 0px) + {totalBottomSpacerHeightPx}px + 12px);"
           aria-hidden="true"
         ></div>
       {/if}
@@ -3967,7 +4679,7 @@ onDestroy(() => {
 
 {#if marqueeActive && marqueeRect}
   <div
-    class="fixed pointer-events-none z-[500] border border-md-primary/70 bg-md-primary/15 rounded-sm"
+    class="fixed pointer-events-none {PORTAL_Z_CLASS.marquee} border border-md-primary/70 bg-md-primary/15 rounded-sm"
     style="left:{marqueeRect.left}px;top:{marqueeRect.top}px;width:{marqueeRect.right - marqueeRect.left}px;height:{marqueeRect.bottom - marqueeRect.top}px;"
     aria-hidden="true"
   ></div>
@@ -3976,624 +4688,265 @@ onDestroy(() => {
 </div>
 
 <!-- Bottom strips stacked wrapper -->
-<!-- autofill is always first in DOM, OTP always second, renewal always third. -->
-<!-- CSS `order` swaps them visually: front strip gets order:2 (goes to bottom = screen bottom), -->
-<!-- back strip gets order:1 (goes to top = peeks above). Matches example's stacking exactly. -->
-<!-- When `has-renewal` is set, the renewal strip is locked to order:3 (always front). -->
 <!-- Selection strip replaces other strips while multi-select is active. -->
-{#if hasCollapsibleStrips && !emailSelection.mode}
-  <!--
-    Android-style edge handle on the LEFT of the strip stack.
-    Height matches visible strip stack. Drag right (toward center) → expand; drag left (away) → collapse.
-  -->
-  {@const handleH = stripsEdgeCollapsed
-    ? 40
-    : Math.max(36, Math.min(stripReservePx, 180))}
-  <button
-    type="button"
-    class="strips-edge-handle absolute z-30 touch-none"
-    style="
-      left: max(0px, calc(50% - min(175px, 50%) - 2px));
-      bottom: {stripsEdgeCollapsed
-        ? 'calc(var(--bottom-safe-area, 44px) + 8px)'
-        : 'var(--bottom-safe-area, 44px)'};
-      height: {handleH}px;
-    "
-    aria-label={stripsEdgeCollapsed ? $t('inbox.expandStrips') : $t('inbox.collapseStrips')}
-    aria-expanded={!stripsEdgeCollapsed}
-    onpointerdown={(e) => {
-      e.stopPropagation();
-      e.preventDefault();
-      const startX = e.clientX;
-      const startCollapsed = stripsEdgeCollapsed;
-      const pointerId = e.pointerId;
-      const target = e.currentTarget as HTMLButtonElement;
-      try {
-        target.setPointerCapture(pointerId);
-      } catch {
-        /* ignore */
-      }
-      let dragged = false;
-      const onMove = (ev: PointerEvent) => {
-        // Handle on LEFT edge: drag right (toward center) = expand; drag left (away) = collapse
-        const dx = ev.clientX - startX;
-        if (Math.abs(dx) > 6) dragged = true;
-        target.style.transform = `translateX(${Math.max(-12, Math.min(40, dx * 0.35))}px)`;
-        if (dx > 24 && startCollapsed) void setStripsEdgeCollapsed(false);
-        if (dx < -24 && !startCollapsed) void setStripsEdgeCollapsed(true);
-      };
-      const onUp = (ev: PointerEvent) => {
-        window.removeEventListener('pointermove', onMove);
-        window.removeEventListener('pointerup', onUp);
-        window.removeEventListener('pointercancel', onUp);
-        target.style.transform = '';
-        try {
-          target.releasePointerCapture(pointerId);
-        } catch {
-          /* ignore */
-        }
-        if (!dragged && Math.abs(startX - ev.clientX) < 8) {
-          void setStripsEdgeCollapsed(!startCollapsed);
-        }
-      };
-      window.addEventListener('pointermove', onMove, { passive: false });
-      window.addEventListener('pointerup', onUp);
-      window.addEventListener('pointercancel', onUp);
-    }}
-  >
-    <span
-      class="strips-edge-handle-pill"
-      style="height: {Math.max(24, handleH - 8)}px;"
-      aria-hidden="true"
-    ></span>
-  </button>
-{/if}
-
-{#if !stripsEdgeCollapsed || emailSelection.mode}
-<div bind:this={bottomStripsWrapperEl} class="bottom-strips-wrapper absolute z-20 front-{frontStrip}{showRenewalStrip ? ' has-renewal' : ''}{emailSelection.mode ? ' has-selection' : ''}" role="none">
-{#if emailSelection.mode}
-<div
-  id="button-selection-strip"
-  class="bottom-strip-item bottom-strip-selection rounded-xl selection-slide-up"
-  style="--i: 1; overflow: hidden;"
-  role="toolbar"
-  aria-label={$t('mailManagement.selectedCount', { values: { n: emailSelection.count } })}
->
-  <div class="flex items-center gap-1 px-2 py-2 bg-md-secondary-container rounded-xl w-full overflow-x-auto">
-    <button
-      type="button"
-      class="h-8 px-2.5 rounded-lg text-xs font-bold shrink-0 whitespace-nowrap {selectionAllMatched ? 'bg-md-primary/15 text-md-primary' : 'bg-md-surface/80 hover:bg-md-surface'}"
-      onclick={(e) => { e.stopPropagation(); selectAllVisible(); }}
-    >
-      {selectionAllMatched
-        ? $t('inbox.emailActions.allSelected', { values: { n: selectionMatchingTotal } })
-        : emailSelection.count > 0 && selectionUniverseCounted && selectionMatchingTotal > emailSelection.count
-          ? $t('inbox.emailActions.selectAllMatching', { values: { n: selectionMatchingTotal } })
-          : $t('inbox.emailActions.selectAll')}
-    </button>
-    <button
-      type="button"
-      class="h-8 px-2.5 rounded-lg text-xs font-bold bg-transparent hover:bg-md-surface-variant/60 shrink-0 tabular-nums whitespace-nowrap"
-      aria-label={$t('inbox.emailActions.deselectAll')}
-      onclick={(e) => { e.stopPropagation(); deselectAll(); }}
-    >{$t('inbox.emailActions.deselectAll')} ({emailSelection.count})</button>
-
-    <div class="w-px h-5 bg-md-outline-variant/40 shrink-0 mx-0.5"></div>
-
-    <button
-      type="button"
-      class="btn-secondary h-8 px-2.5 rounded-lg font-bold text-xs flex items-center gap-1 shrink-0 whitespace-nowrap"
-      title={$t('inbox.emailActions.starSelected')}
-      data-drop-action="star"
-      ondragover={(e) => { e.preventDefault(); e.stopPropagation(); if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'; }}
-      ondragenter={(e) => { e.preventDefault(); }}
-      ondrop={(e) => { e.preventDefault(); e.stopPropagation(); void performStarSelected(); }}
-      onclick={(e) => { e.stopPropagation(); e.preventDefault(); void performStarSelected(); }}
-    >
-      <Icon name="star" class="w-3.5 h-3.5" />
-      <span>{$t('inbox.emailActions.star')}</span>
-    </button>
-
-    <button
-      type="button"
-      class="btn-primary h-8 px-2.5 rounded-lg font-bold text-xs flex items-center gap-1 shrink-0 whitespace-nowrap"
-      title={$t('inbox.emailActions.labelSelected')}
-      data-drop-action="label"
-      ondragover={(e) => { e.preventDefault(); e.stopPropagation(); if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'; }}
-      ondragenter={(e) => { e.preventDefault(); }}
-      ondrop={(e) => { e.preventDefault(); e.stopPropagation(); openTagDialogForSelected(); }}
-      onclick={(e) => { e.stopPropagation(); e.preventDefault(); openTagDialogForSelected(); }}
-    >
-      <Icon name="tag" class="w-3.5 h-3.5" />
-      <span>{$t('inbox.emailActions.label')}</span>
-    </button>
-
-    {#if emailListTab === 'archived' || emailListTab === 'deleted'}
-      <button
-        type="button"
-        class="btn-tertiary h-8 px-2.5 rounded-lg font-bold text-xs flex items-center gap-1 shrink-0 whitespace-nowrap"
-        data-drop-action="restore"
-        ondragover={(e) => { e.preventDefault(); e.stopPropagation(); if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'; }}
-        ondragenter={(e) => { e.preventDefault(); }}
-        ondrop={(e) => { e.preventDefault(); e.stopPropagation(); performRestore(); }}
-        onclick={(e) => { e.stopPropagation(); performRestore(); }}
-      >
-        <Icon name="refresh" class="w-3.5 h-3.5" />
-        <span>{$t('inbox.emailActions.restore')}</span>
-      </button>
-    {/if}
-
-    {#if emailListTab === 'inbox' || emailListTab === 'all'}
-      <button
-        type="button"
-        class="btn-tertiary h-8 px-2.5 rounded-lg font-bold text-xs flex items-center gap-1 shrink-0 whitespace-nowrap"
-        data-drop-action="archive"
-        ondragover={(e) => { e.preventDefault(); e.stopPropagation(); if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'; }}
-        ondragenter={(e) => { e.preventDefault(); }}
-        ondrop={(e) => { e.preventDefault(); e.stopPropagation(); performArchive(); }}
-        onclick={(e) => { e.stopPropagation(); performArchive(); }}
-      >
-        <Icon name="archive" class="w-3.5 h-3.5" />
-        <span>{$t('inbox.emailActions.archive')}</span>
-      </button>
-    {/if}
-
-    {#if emailListTab !== 'deleted'}
-      <button
-        type="button"
-        class="btn-error h-8 px-2.5 rounded-lg font-bold text-xs flex items-center gap-1 shrink-0 whitespace-nowrap"
-        data-drop-action="delete"
-        ondragover={(e) => { e.preventDefault(); e.stopPropagation(); if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'; }}
-        ondragenter={(e) => { e.preventDefault(); }}
-        ondrop={(e) => { e.preventDefault(); e.stopPropagation(); performDelete(); }}
-        onclick={(e) => { e.stopPropagation(); performDelete(); }}
-      >
-        <Icon name="trash" class="w-3.5 h-3.5" />
-        <span>{$t('inbox.emailActions.delete')}</span>
+{#if hasCollapsibleStrips}
+<div bind:this={bottomStripsWrapperEl} class="bottom-strips-wrapper absolute z-20{scrollChromeHidden ? ' scroll-chrome-hidden' : ''}" style:width={NAV_FLOAT_CONTENT_WIDTH_CSS} role="none">
+<MailboxStripDock items={stripTabs} active={frontStrip} collapsed={stripsEdgeCollapsed} onSelect={selectStrip} onCollapse={(collapsed) => void setStripsEdgeCollapsed(collapsed)}>
+{#if frontStrip === 'health' && (showExpiredMailboxHealth || currentAddress?.mailboxRefreshFailure)}
+  {@const refreshFailure = currentAddress?.mailboxRefreshFailure}
+  <div class="flex items-center gap-2.5 p-3" role="status" aria-live="polite">
+    <Icon name={showExpiredMailboxHealth ? 'schedule' : 'warning'} class="size-4 shrink-0 text-md-warning" />
+    <p class="min-w-0 flex-1 text-sm text-md-on-surface-variant">
+      {#if showExpiredMailboxHealth}{$t('inbox.refreshHealth.expired')}
+      {:else if refreshFailure?.kind === 'network'}{$t('inbox.refreshHealth.network')}
+      {:else if refreshFailure?.kind === 'provider'}{$t('inbox.refreshHealth.provider')}
+      {:else}{$t('inbox.refreshHealth.unknown')}{/if}
+    </p>
+    {#if !showExpiredMailboxHealth}
+      <button type="button" class="md-action shrink-0 rounded-full px-3 py-2 text-sm font-medium bg-md-warning text-md-on-warning disabled:opacity-60" disabled={mailboxHealthRetrying || loading} onclick={(event) => { event.stopPropagation(); void retryMailboxRefresh(); }}>
+        {mailboxHealthRetrying ? $t('common.loading') : $t('inbox.refreshHealth.retry')}
       </button>
     {/if}
   </div>
-</div>
-{:else}
+{/if}
 <!-- Lifecycle intelligence hint.
      When high-value renew applies to the *current* expired inbox and the renewal strip is
      already showing, merge into renewal (no duplicate strip). Standalone high-value only
      for a *different* address. -->
-{#if !lifecycleHintDismissed && lifecycleHints.length > 0 && !emailSelection.mode}
+{#if frontStrip === 'suggestion' && lifecycleDockVisible}
   {@const hint = lifecycleHints[0]}
   {@const mergeHighValueIntoRenewal =
     hint.kind === 'renew_high_value' &&
-    !!currentAccount &&
-    currentAccount.id === hint.inboxId &&
+    !!currentAddress &&
+    currentAddress.id === hint.addressId &&
     showRenewalStrip}
   {#if !mergeHighValueIntoRenewal}
     <div class="h-[40px] flex items-center box-border px-3 bg-md-tertiary-container bottom-strip-item rounded-xl mb-1 motion-strip-up" style="--i: 0;">
       <div class="flex items-center gap-2 w-full min-w-0">
-        <Icon name="infoCircle" class="w-4 h-4 text-md-primary shrink-0" />
+        <Icon name="info" class="w-4 h-4 text-md-primary shrink-0" />
         <div class="min-w-0 flex-1">
           <div class="text-label-sm font-semibold text-md-on-surface truncate">
             {$t(hint.reasonKey, { values: { address: hint.address } })}
           </div>
         </div>
+        <div class="flex flex-nowrap items-center gap-2 min-w-0 max-w-[60%]" use:responsiveButtonLayout data-action-tier="XS">
         {#if hint.kind === 'renew_high_value'}
           <button
             type="button"
-            class="px-2 py-1 rounded-lg text-xs font-bold bg-md-primary text-md-on-primary shrink-0"
+            class="h-8 rounded-lg font-bold bg-md-primary text-md-on-primary"
             onclick={(e) => {
               e.stopPropagation();
-              const acc = (allAccounts || accounts).find((a) => a.id === hint.inboxId);
+              const acc = (allAddresses || accounts).find((a) => a.id === hint.addressId);
               if (acc) {
-                onSelectAccount?.(acc.address);
-                void onExtendAccount(acc);
+                onSelectAddress?.(acc.address);
+                void onExtendAddress(acc);
               }
             }}
           >{$t('intelligence.renewAction')}</button>
         {:else if hint.kind === 'archive_idle'}
           <button
             type="button"
-            class="px-2 py-1 rounded-lg text-xs font-bold bg-md-secondary-container text-md-on-surface shrink-0"
+            class="h-8 rounded-lg font-bold bg-md-secondary-container text-md-on-secondary-container"
             onclick={(e) => {
               e.stopPropagation();
-              const acc = (allAccounts || accounts).find((a) => a.id === hint.inboxId);
-              if (acc) onArchiveAccount(acc);
+              const acc = (allAddresses || accounts).find((a) => a.id === hint.addressId);
+              if (acc) onArchiveAddress(acc);
             }}
           >{$t('common.archive')}</button>
         {:else if hint.kind === 'create_fresh_for_risk'}
           <button
             type="button"
-            class="px-2 py-1 rounded-lg text-xs font-bold bg-md-primary text-md-on-primary shrink-0"
+            class="h-8 rounded-lg font-bold bg-md-primary text-md-on-primary"
             onclick={(e) => {
               e.stopPropagation();
-              onCreateInbox();
+              onCreateAddress();
             }}
-          >{$t('account.newMailAddress')}</button>
+          >{$t('address.newMailAddress')}</button>
         {/if}
-        <button
-          type="button"
-          class="w-5 h-5 flex items-center justify-center rounded-lg shrink-0"
-          aria-label={$t('common.close')}
+        <IconButton
+          icon="close"
+          size="sm"
+          ariaLabel={$t('common.close')}
           onclick={() => (lifecycleHintDismissed = true)}
-        ><Icon name="x" class="w-3 h-3" /></button>
+        />
+        </div>
       </div>
     </div>
   {/if}
 {/if}
 
 <!-- Filters applied strip -->
-{#if hasActiveListFilters && showFilterAppliedStrip}
-<div class="h-[40px] flex items-center box-border px-3 bg-md-tertiary-container bottom-strip-item bottom-strip-filter rounded-xl" style="--i: 0;">
+{#if frontStrip === 'filter' && hasActiveListFilters && showFilterAppliedStrip}
+<div class="flex flex-col gap-2 p-3 bottom-strip-item bottom-strip-filter">
   <div class="flex items-center gap-2 w-full min-w-0">
     <Icon name="filter" class="w-4 h-4 text-md-primary shrink-0" />
     <div class="min-w-0 flex-1">
       <div class="text-xs font-bold text-md-on-surface truncate">{$t('inbox.filtersApplied')}</div>
       <div class="text-xs text-md-on-surface/50 truncate">{$t('inbox.filtersAppliedHint')}</div>
     </div>
+  </div>
+    <div class="flex flex-nowrap items-center gap-2 min-w-0 w-full" use:responsiveButtonLayout data-action-tier="XS">
     {#if !filterQuickSaved}
-      <button type="button" class="px-2 py-1 rounded-lg text-xs font-bold bg-md-primary text-md-on-primary shrink-0" onclick={(e) => {
+      <button type="button" class="h-8 rounded-lg font-bold bg-md-primary text-md-on-primary" onclick={(e) => {
         e.stopPropagation();
         onSaveFilterQuick();
         filterQuickSaved = true;
-      }}>{$t('inbox.saveAsFilter')}</button>
+      }}>{$t('inbox.saveAsFilterLabel')}</button>
     {/if}
-    <button type="button" class="px-2 py-1 rounded-lg text-xs font-bold bg-md-surface-variant text-md-on-surface shrink-0" onclick={(e) => { e.stopPropagation(); void onClearFilters(); }}>{$t('inbox.removeFilters')}</button>
-    <button type="button" class="w-5 h-5 flex items-center justify-center rounded-lg shrink-0" aria-label={$t('common.close')} onclick={() => (showFilterAppliedStrip = false)}><Icon name="x" class="w-3 h-3" /></button>
-  </div>
-</div>
-{/if}
-
-<!-- Magic link strip -->
-{#if latestMagicLink && showMagicLinkStrip && !preferHideMagicStrip}
-<div class="h-[40px] flex items-center box-border px-3 bg-md-secondary-container bottom-strip-item bottom-strip-magic rounded-xl" style="--i: 0.5;">
-  <div class="flex items-center gap-2 w-full min-w-0">
-    <Icon name="globe" class="w-4 h-4 text-md-primary shrink-0" />
-    <div class="min-w-0 flex-1">
-      <div class="text-xs font-bold text-md-on-surface truncate">{$t('inbox.magicLinkDetected')}</div>
-      <div class="text-xs text-md-on-surface/50 truncate">
-        {latestMagicLink.host || latestMagicLink.url}
-        {#if stripMagicRemaining && stripMagicRemaining !== 'expired'}
-          · {$t('inbox.expiresIn', { values: { t: stripMagicRemaining } })}
-        {:else if stripMagicRemaining === 'expired'}
-          · {$t('inbox.expiredLabel')}
-        {/if}
-      </div>
+    <button type="button" class="h-8 rounded-lg font-bold bg-md-surface-variant text-md-on-surface" onclick={(e) => { e.stopPropagation(); void onClearFilters(); }}>{$t('inbox.removeFilters')}</button>
+    <IconButton
+      icon="close"
+      size="sm"
+      ariaLabel={$t('common.close')}
+      onclick={() => (showFilterAppliedStrip = false)}
+    />
     </div>
-    <button type="button" class="px-2.5 py-1 rounded-lg text-xs font-bold bg-md-primary text-md-on-primary shrink-0" onclick={(e) => { e.stopPropagation(); onOpenMagicLink(latestMagicLink!.url); }}>{$t('inbox.openMagicLink')}</button>
-    <button type="button" class="w-5 h-5 flex items-center justify-center rounded-lg shrink-0" aria-label={$t('common.close')} onclick={() => (showMagicLinkStrip = false)}><Icon name="x" class="w-3 h-3" /></button>
-  </div>
 </div>
 {/if}
 
 <!-- Saved login refill strip -->
-{#if matchingSavedLogin && showSavedLoginStrip && currentDomain}
-<div class="h-[40px] flex items-center box-border px-3 bg-md-primary-container bottom-strip-item bottom-strip-savedlogin rounded-xl" style="--i: 0.75;">
+{#if frontStrip === 'savedLogin' && matchingSavedLogin && showSavedLoginStrip && currentDomain}
+<div class="h-[40px] flex items-center box-border px-3 bg-md-surface-container-low border border-md-outline-variant/20 bottom-strip-item bottom-strip-savedlogin rounded-xl shadow-xs" style="--i: 0.75;">
   <div class="flex items-center gap-2 w-full min-w-0">
-    <FaviconImage domain={currentDomain} size={24} class="w-4 h-4 shrink-0" fallbackLetter={currentDomain[0]?.toUpperCase() || '?'} />
+    <FaviconImage domain={currentDomain} size="xs" class="shrink-0" fallbackLetter={avatarInitial(currentDomain, '?')} />
     <div class="min-w-0 flex-1">
       <div class="text-xs font-bold text-md-on-surface truncate">{$t('inbox.savedLoginRefill')}</div>
       <div class="text-xs text-md-on-surface/50 truncate" style="direction:ltr;unicode-bidi:isolate;">{matchingSavedLogin.email || matchingSavedLogin.username || currentDomain}</div>
     </div>
-    <button type="button" class="px-2.5 py-1 rounded-lg text-xs font-bold bg-md-primary text-md-on-primary shrink-0" onclick={(e) => { e.stopPropagation(); onRefillSavedLogin(matchingSavedLogin!); }}>{$t('inbox.refillAction')}</button>
-    <button type="button" class="w-5 h-5 flex items-center justify-center rounded-lg shrink-0" aria-label={$t('common.close')} onclick={() => (showSavedLoginStrip = false)}><Icon name="x" class="w-3 h-3" /></button>
+    <div class="flex flex-nowrap items-center gap-2 min-w-0 max-w-[60%]" use:responsiveButtonLayout data-action-tier="XS">
+    <button type="button" class="h-8 rounded-lg font-bold bg-md-primary text-md-on-primary" onclick={(e) => { e.stopPropagation(); onRefillSavedLogin(matchingSavedLogin!); }}>{$t('inbox.refillAction')}</button>
+    <IconButton
+      icon="close"
+      size="sm"
+      ariaLabel={$t('common.close')}
+      onclick={() => (showSavedLoginStrip = false)}
+    />
+    </div>
   </div>
 </div>
 {/if}
 
-{#if formDetected && showAutofillStrip && !preferHideAutofillStrip}
-<div class="h-[40px] flex items-center box-border px-3 bg-md-primary-container bottom-strip-item bottom-strip-autofill rounded-xl" style="--i: 1;">  
+{#if frontStrip === 'autofill' && formDetected && showAutofillStrip && !preferHideAutofillStrip}
+<div class="flex items-center box-border px-2 py-1 bg-md-surface-container-low border border-md-outline-variant/20 bottom-strip-item bottom-strip-autofill rounded-xl shadow-xs" style="--i: 1;">
   <div class="flex items-center gap-2 w-full">
     <!-- Favicon + Domain -->
-    <div class="flex items-center gap-2 min-w-0">
-      <div class="flex-shrink-0 w-7 h-7 rounded-lg bg-md-secondary-container flex items-center justify-center overflow-hidden">
+    <div class="flex items-center gap-1.5 min-w-0 shrink-0" title={`${currentDomain || $t('common.unknown')} · ${$t('inbox.detectedForm')}`}>
+      <div class="flex-shrink-0 {AVATAR_BOX.lg} rounded-full bg-md-surface-variant flex items-center justify-center overflow-hidden">
         {#if currentDomain}
-          <FaviconImage domain={currentDomain} size={24} class="w-4 h-4" fallbackLetter={currentDomain[0].toUpperCase()} />
+          <FaviconImage domain={currentDomain} size="lg" fallbackLetter={avatarInitial(currentDomain)} />
         {:else}
           <Icon name="globe" class="w-4 h-4 opacity-40" />
         {/if}
       </div>
-      <div class="min-w-0">
-        <div class="text-xs font-bold text-md-secondary leading-tight truncate max-w-[80px]">{currentDomain || $t('common.unknown')}</div>
-        <div class="text-xs font-semibold text-md-tertiary leading-tight">{$t('inbox.detectedForm')}</div>
-      </div>
+      <div class="text-xs font-medium text-md-on-surface-variant leading-tight truncate max-w-12">{currentDomain || $t('common.unknown')}</div>
     </div>
 
-    <!-- Divider -->
-    <div class="w-px h-6 bg-md-secondary-container flex-shrink-0 mx-1"></div>
-
-    <!-- Identity Selector -->
-    <div class="relative flex-1 min-w-0">
-      <div 
-        id="button-identity-selector"
-        class="flex items-center gap-1 bg-md-secondary-container/70 rounded-full px-2.5 py-1 cursor-pointer relative" 
-        role="button"
-        tabindex="0"
-        onclick={() => showIdentityDropdown = !showIdentityDropdown}
-        onkeydown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault();
-            showIdentityDropdown = !showIdentityDropdown;
-          }
-        }}
-      >
-        <Icon name="shield" class="w-3 h-3 text-md-secondary flex-shrink-0" />
-        <div class="flex-1 min-w-0 text-label-sm font-medium text-md-on-surface pe-2 truncate">
-          {identities.find(i => i.id === selectedIdentityId)?.name || $t('identities.select')}
-        </div>
-        <Icon name="chevronDown" class="w-2.5 h-2.5 text-md-on-surface/40 flex-shrink-0 transition-transform {showIdentityDropdown ? 'rotate-180' : ''}" />
-        
-        <!-- Dropup Menu -->
-        {#if showIdentityDropdown}
-          <div class="absolute bottom-full inset-x-0 mb-1 bg-md-primary-container border border-md-secondary-container rounded-xl shadow-lg z-50 max-h-48 overflow-y-auto">
-            {#each identities as identity}
-              <button
-                id="button-identity-{identity.id}"
-                class="w-full text-start px-3 py-2 text-label-sm font-medium text-md-on-surface hover:bg-md-secondary-container transition-colors first:rounded-t-xl last:rounded-b-xl"
-                onclick={(e) => { e.stopPropagation(); selectedIdentityId = identity.id; handleIdentityChange(); showIdentityDropdown = false; }}
-              >
-                {identity.name}
-              </button>
-            {/each}
-          </div>
-        {/if}
+    <!-- Connected primary action and identity chooser, with separate keyboard targets. -->
+    <div class="flex flex-1 min-w-0 items-stretch rounded-full bg-md-primary text-md-on-primary" role="group" aria-label={$t('inbox.autofillAction')} data-autofill-split>
+      <button type="button" id="button-autofill" class="md-action min-w-0 flex-1 rounded-s-full px-3 text-xs font-semibold text-start disabled:opacity-50" title={autofillActionLabel} disabled={identitySelectionSaving} onclick={onAutofillForm}>
+        <span class="block truncate">{autofillActionLabel}</span>
+      </button>
+      <div class="shrink-0 border-s border-md-on-primary/30">
+        <Dropdown
+          id="button-identity-selector"
+          size="button"
+          triggerLabel=""
+          ariaLabel={$t('identities.select')}
+          class="autofill-identity-menu"
+          value={selectedIdentityId ?? ''}
+          disabled={identitySelectionSaving}
+          options={[...identities.map((identity) => ({ value: identity.id, label: identity.name })), { value: '__create_identity__', label: $t('contentAutofill.createIdentity') }]}
+          onchange={(value) => {
+            if (value === '__create_identity__') { onCreateIdentity(); return; }
+            const previous = selectedIdentityId;
+            identitySelectionSaving = true;
+            selectedIdentityId = String(value);
+            void handleIdentityChange().catch((error) => {
+              selectedIdentityId = previous;
+              logError('Failed to select autofill identity', error);
+              showToast($t('toasts.operationFailed'), 'error');
+            }).finally(() => { identitySelectionSaving = false; });
+          }}
+        />
       </div>
     </div>
-
-    <!-- Autofill Button -->
-    <button id="button-autofill" class="px-3 py-1 rounded-full text-label-sm font-semibold rounded-lg bg-md-primary text-md-on-primary hover:bg-md-primary/90 flex-shrink-0 transition-colors" onclick={onAutofillForm}>
-      {$t('inbox.autofillAction')}
-    </button>
-
-    <!-- Close Button -->
-    <button id="button-close-autofill" class="w-5 h-5 flex items-center justify-center rounded-lg bg-transparent hover:bg-md-secondary-container flex-shrink-0 ms-0.5 transition-colors" onclick={() => showAutofillStrip = false} aria-label={$t('inbox.closeAutofillStrip')}>
-      <Icon name="x" class="w-3 h-3" />
+    <button type="button" id="button-close-autofill" class="md-action h-10 w-8 shrink-0 flex items-center justify-center rounded-full" onclick={() => showAutofillStrip = false} aria-label={$t('inbox.closeAutofillStrip')}>
+      <Icon name="close" class="w-4 h-4" />
     </button>
   </div>
 </div>
 {/if}
-{#if stripOtpCode !== '------' && latestLiveOtp && !preferHideOtpStrip}
-<div
-  id="button-otp-strip"
-  class="bottom-strip-item bottom-strip-otp rounded-xl cursor-pointer"
-  style="--i: 2; overflow: hidden;"
-  role="button"
-  tabindex="0"
-  aria-label={$t('inbox.openOtpMessage')}
-  onclick={() => { if (latestOtpEmail) { const thread = threadGrouping ? emailThreads.find((t: EmailThread) => t.emails.some((e: Email) => e.id === latestOtpEmail.id)) : null; onOpenMessageDetail(thread ? thread.emails : [latestOtpEmail]); } }}
-  onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { if (latestOtpEmail) { const thread = threadGrouping ? emailThreads.find((t: EmailThread) => t.emails.some((e: Email) => e.id === latestOtpEmail.id)) : null; onOpenMessageDetail(thread ? thread.emails : [latestOtpEmail]); } } }}
->  
-  {#if !otpCollapsed}
-  {#if otpDropupOpen}
-  <div class="border-b border-md-primary bg-md-secondary-container">
-
-    <!-- Clear all OTPs and Opt-in toggle -->
-    <div class="px-3 pt-3 pb-1.5 flex items-center justify-between border-b border-md-primary/10">
-      <div onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="presentation">
-        <label class="flex items-center gap-2 cursor-pointer select-none">
-          <Checkbox size="sm" checked={isOtpOptedIn} onchange={toggleOtpOptIn} />
-          <span class="text-xs font-semibold text-md-on-surface">{$t('inbox.allowOtpAutofill')}</span>
-        </label>
+{#if frontStrip === 'siteAccess' && currentDomain}
+<div class="bottom-strip-item bottom-strip-webmcp rounded-xl bg-md-surface-container border border-md-outline-variant/20 px-3 py-2" style="--i: 3;">
+  <div class="space-y-2">
+    <span class="min-w-0">
+      <span class="block text-xs font-semibold text-md-on-surface">{$t('inbox.allowWebmcpAccess')}</span>
+      <span class="block text-xs text-md-on-surface-variant">{$t('inbox.allowWebmcpAccessHelp')}</span>
+    </span>
+    <ButtonGroup tier="S">
+      <Btn size="sm" variant="tonal" class={controlSurface(siteAccessChoice === 'always')} aria-pressed={siteAccessChoice === 'always'} disabled={siteAccessBusy} onclick={() => void chooseWebmcpAccess('always')}>{$t('inbox.siteAllowAll')}</Btn>
+      <Btn size="sm" variant="tonal" class={controlSurface(siteAccessChoice === 'once')} aria-pressed={siteAccessChoice === 'once'} disabled={siteAccessBusy} onclick={() => void chooseWebmcpAccess('once')}>{$t('inbox.siteAllowOnce')}</Btn>
+      <Btn size="sm" variant="tonal" class={controlSurface(siteAccessChoice === 'never')} aria-pressed={siteAccessChoice === 'never'} disabled={siteAccessBusy} onclick={() => void chooseWebmcpAccess('never')}>{$t('inbox.siteNever')}</Btn>
+    </ButtonGroup>
+  </div>
+</div>
+{/if}
+{#if frontStrip === 'verification' && hasVerificationContent && !preferHideVerificationStrip}
+<div id="verification-strip" class="bottom-strip-item bottom-strip-verification bg-md-surface-container overflow-hidden" role="region" aria-label={$t('inbox.verificationTitle')}>
+  <div class="flex items-center gap-2 px-3 pt-2">
+    {#if selectedVerification}
+      <FaviconImage domain={selectedVerification.website || undefined} email={selectedVerification.email.from} size="sm" fallbackLetter={avatarInitial(selectedVerification.email.from_name || selectedVerification.website)} />
+      <div class="min-w-0 flex-1">
+        <button type="button" class="block max-w-full truncate text-start ui-label text-md-on-surface rounded {controlSurface(false)}" aria-label={$t('inbox.openOtpMessage')} onclick={() => { if (selectedVerification) void openVerificationMessage(selectedVerification.email); }}>{selectedVerification.website || selectedVerification.email.from_name || selectedVerification.email.from}</button>
+        <div class="truncate ui-support text-md-on-surface-variant" dir="auto" title={selectedVerification.address}>{selectedVerification.address}</div>
       </div>
-
-      <button
-        class="text-xs font-semibold text-md-error/70 hover:text-md-error transition-colors flex items-center gap-1"
-        onclick={(e) => { e.stopPropagation(); clearAllOtps(); }}
-        aria-label={$t('inbox.clearAllOtps')}
-      >
-        <Icon name="trashBox" class="w-3 h-3" />
-        {$t('inbox.clearAllOtps')}
-      </button>
-    </div>
-
-    <!-- Section: Current email address -->
-    <div class="px-3 pt-2.5 pb-1 flex items-center justify-between">
-      <span class="text-xs font-bold text-md-primary">{$t('inbox.currentEmail')}</span>
-      <Icon name="chevronDown" class="w-3.5 h-3.5 text-md-on-surface/40" />
-    </div>
-    <div class="overflow-y-auto max-h-[180px]">
-      {#if otpHistoryCurrent.length === 0}
-        <p class="text-xs text-md-on-surface/40 px-3 pb-2">{$t('inbox.noOtps')}</p>
+    {:else}<span class="min-w-0 flex-1 ui-support text-md-on-surface-variant">{$t('verification.noCurrentItems')}</span>{/if}
+    <IconButton icon={verificationExpanded ? 'chevronUp' : 'chevronDown'} size="sm" ariaLabel={verificationExpanded ? $t('inbox.collapseVerificationAria') : $t('inbox.expandVerificationAria')} onclick={toggleVerificationExpansion} />
+  </div>
+  <div class="flex items-center justify-between gap-1 px-2 py-1">
+    <IconButton icon="chevronLeft" class="rtl-flip" size="md" ariaLabel={$t('stripDock.previous')} disabled={verificationIndex <= 0} onclick={() => moveVerification(-1)} />
+    {#if selectedVerification}
+      {#if selectedVerification.kind === 'otp'}
+        <Btn id={selectedVerification.status === 'current' && selectedVerification.expiresAt > stripClockTick ? 'button-copy-current-otp' : 'button-copy-verification'} size="sm" variant="primary" class="tabular-nums" icon={copiedVerificationId === selectedVerification.id ? 'check' : 'contentCopy'} aria-label={copiedVerificationId === selectedVerification.id ? $t('common.copied') : $t('inbox.copyOtpAria')} onclick={() => void copySelectedVerification()}>{selectedVerification.value.replace(/\s/g, '')}</Btn>
       {:else}
-        {#each otpHistoryCurrent as item}
-          <div class="flex items-center gap-3 px-3 py-2 bg-md-surface-container rounded-xl mx-2 mb-2 shadow-sm">
-            <div class="w-9 h-9 rounded-lg overflow-hidden flex items-center justify-center flex-shrink-0 bg-md-secondary-container">
-              {#if item.from}
-                <img
-                  src={getSafeDomainFaviconUrl(item.from)}
-                  alt=""
-                  class="w-6 h-6 object-contain"
-                  loading="lazy"
-                  onerror={(e) => {
-                    const img = e.target as HTMLImageElement;
-                    const fb = getSafeRootDomainFaviconUrl(item.from);
-                    if (img.src !== fb) { img.src = fb; } else { img.style.display = 'none'; }
-                  }}
-                />
-              {/if}
-            </div>
-            <div class="flex-1 min-w-0">
-              <div class="flex items-center gap-1.5">
-                <span class="text-sm font-semibold text-md-on-surface truncate">{item.from_name || item.from}</span>
-                <span class="text-xs text-md-on-surface/40">·</span>
-                <span class="text-xs text-md-on-surface/40 flex-shrink-0 cursor-help" title={formatFullDateTime(item.received_at)}>{timeAgo(item.received_at)}</span>
-              </div>
-              <span class="font-bold text-md-primary text-sm tracking-[0.08em]">{item.otp}</span>
-            </div>
-            <button
-              id="button-copy-otp-current-{item.otp}"
-              class="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 bg-md-secondary-container"
-              aria-label={$t('common.copy')}
-              title={$t('common.copy')}
-              onclick={async (e) => {
-                e.stopPropagation();
-                try {
-                  await copyToClipboardAndSchedulePurge(item.otp, 30000);
-                } catch (e) {
-                  logError('Failed to copy OTP from current list', undefined, e instanceof Error ? e : new Error(String(e)));
-                }
-              }}
-            >
-              <Icon name="copy" class="w-3.5 h-3.5 text-md-primary" />
-            </button>
-          </div>
-        {/each}
+        <Btn size="sm" variant="tonal" icon="openInNew" onclick={() => { if (selectedVerification) onOpenMagicLink(selectedVerification.value, selectedVerification.address); }}>{$t('inbox.openMagicLink')}</Btn>
       {/if}
-    </div>
-
-    <!-- Section: Other email addresses -->
-    {#if otpHistoryOther.length > 0}
-    <div class="px-3 pt-1 pb-1 flex items-center justify-between border-t border-md-secondary-container">
-      <span class="text-xs font-bold text-md-primary">{$t('inbox.otherEmails')}</span>
-      <Icon name="chevronDown" class="w-3.5 h-3.5 text-md-on-surface/40" />
-    </div>
-    <div class="overflow-y-auto max-h-[180px]">
-      {#each otpHistoryOther as item}
-        <div class="flex items-center gap-3 px-3 py-2 bg-md-surface-container rounded-xl mx-2 mb-2 shadow-sm">
-          <div class="w-9 h-9 rounded-xl overflow-hidden flex items-center justify-center flex-shrink-0 bg-md-secondary-container">
-            {#if item.from}
-              <img
-                src={getSafeDomainFaviconUrl(item.from)}
-                alt=""
-                class="w-6 h-6 object-contain"
-                loading="lazy"
-                onerror={(e) => {
-                  const img = e.target as HTMLImageElement;
-                  const fb = getSafeRootDomainFaviconUrl(item.from);
-                  if (img.src !== fb) { img.src = fb; } else { img.style.display = 'none'; }
-                }}
-              />
-            {/if}
-          </div>
-          <div class="flex-1 min-w-0">
-            <div class="flex items-center gap-1.5">
-              <span class="text-sm font-semibold text-md-on-surface truncate">{item.from_name || item.from}</span>
-              <span class="text-xs text-md-on-surface/40">·</span>
-              <span class="text-xs text-md-on-surface/40 flex-shrink-0">{timeAgo(item.received_at)}</span>
-            </div>
-            <span class="font-bold text-md-primary text-sm tracking-[0.08em]">{item.otp}</span>
-          </div>
-          <button
-            id="button-copy-otp-other-{item.otp}"
-            class="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 bg-md-secondary-container"
-            aria-label={$t('common.copy')}
-            title={$t('common.copy')}
-            onclick={async (e) => {
-              e.stopPropagation();
-              try {
-                await copyToClipboardAndSchedulePurge(item.otp, 30000);
-              } catch (e) {
-                logError('Failed to copy OTP from other list', undefined, e instanceof Error ? e : new Error(String(e)));
-              }
-            }}
-          >
-            <Icon name="copy" class="w-3.5 h-3.5 text-md-primary" />
-          </button>
-        </div>
-      {/each}
-    </div>
     {/if}
-
+    <IconButton icon="chevronRight" class="rtl-flip" size="md" ariaLabel={$t('stripDock.next')} disabled={currentVerificationItems.length === 0 || verificationIndex >= currentVerificationItems.length - 1} onclick={() => moveVerification(1)} />
+    <button type="button" class="min-h-10 shrink-0 px-2 ui-support tabular-nums rounded-full text-md-on-surface {controlSurface(false)}" aria-label={$t('verification.history')} aria-expanded={verificationExpanded} onclick={toggleVerificationExpansion}>{verificationIndex >= 0 ? `${verificationIndex + 1}/${currentVerificationItems.length}` : $t('verification.history')}</button>
   </div>
+  {#if selectedVerification}
+    <div class="px-3 pb-2 ui-support {selectedVerification.expiresAt <= stripClockTick ? 'text-md-error' : 'text-md-on-surface-variant'}" data-verification-status={selectedVerification.expiresAt <= stripClockTick ? 'expired' : selectedVerification.status}>
+      {#if selectedVerification.expiresAt <= stripClockTick}{$t('verification.timeLimitReached')}
+      {:else if selectedVerification.status === 'earlier'}{$t('verification.earlier')}
+      {:else}{$t(selectedVerification.kind === 'otp' ? 'inbox.otpExpiresIn' : 'inbox.expiresIn', { values: { t: formatRemaining(selectedVerification.expiresAt, stripClockTick) } })}{/if}
+    </div>
   {/if}
-
-  <div
-    class="flex items-center gap-2 px-3 py-1.5 bg-md-secondary-container rounded-xl min-h-[48px]"
-    role="status"
-    aria-live="polite"
-    aria-atomic="true"
-  >
-
-    <!-- Favicon + Domain + Received OTP + expiry -->
-    <div class="flex items-center gap-2 min-w-0">
-      <div class="flex-shrink-0 w-7 h-7 rounded-lg bg-md-surface flex items-center justify-center overflow-hidden">
-        {#if otpSenderEmail}
-          <FaviconImage email={otpSenderEmail} size={24} class="w-4 h-4" fallbackLetter={(otpSenderEmail[0] || '?').toUpperCase()} />
-        {/if}
-      </div>
-      <div class="min-w-0">
-        <div class="text-xs font-bold text-md-on-surface leading-tight truncate max-w-[120px]">{latestOtpSenderName || otpSenderEmail?.split('@')[0] || $t('inbox.otpLabel')}</div>
-        <div class="text-xs font-semibold text-md-on-surface/50 leading-tight">
-          {$t('inbox.receivedOtp', { values: { when: otpContext.split(' | ').pop() || $t('activity.timeJustNow') } })}
+    {#if verificationExpanded}
+      <div class="max-h-[min(22rem,55vh)] overflow-y-auto border-b border-md-outline-variant/40 bg-md-surface-container-low scroll-body" data-verification-history>
+        <div class="px-3 py-2 flex items-center gap-2 border-b border-md-outline-variant/40">
+          <div class="flex flex-col gap-2">
+            <label class="flex items-center gap-2 cursor-pointer"><Checkbox size="sm" checked={isOtpOptedIn} onchange={toggleOtpOptIn} /><span class="ui-label">{$t('inbox.allowOtpAutofill')}</span></label>
+            <label class="flex items-center gap-2 cursor-pointer"><Checkbox size="sm" checked={isOtpAutoCopy} onchange={toggleOtpAutoCopy} /><span class="ui-label">{$t('inbox.allowOtpAutoCopy')}</span></label>
+          </div>
+          <IconButton icon="delete" size="sm" variant="danger" class="ms-auto" ariaLabel={$t('inbox.clearAllOtps')} onclick={() => void clearAllOtps()} />
         </div>
-        <div
-          class="text-xs font-semibold leading-tight
-            {stripOtpRemaining && stripOtpRemaining !== 'expired'
-              ? 'text-md-primary'
-              : stripOtpRemaining === 'expired'
-                ? 'text-md-error'
-                : 'text-md-on-surface/40'}"
-        >
-          {#if stripOtpRemaining && stripOtpRemaining !== 'expired'}
-            {$t('inbox.otpExpiresIn', { values: { t: stripOtpRemaining } })}
-          {:else if stripOtpRemaining === 'expired'}
-            {$t('inbox.expiredLabel')}
-          {:else}
-            {$t('inbox.otpExpiryUnknown')}
-          {/if}
-        </div>
+        <VerificationHistory items={historyVerificationItems} mode={verificationPreferences.value.grouping} currentAddress={currentAddress?.address || selectedEmail} now={stripClockTick} loading={verificationHistoryLoading} error={verificationHistoryError} saving={verificationPreferences.saving}
+          onMode={(grouping) => void verificationPreferences.save({ grouping })}
+          onChoose={(item) => { void chooseVerification(item).catch((error) => { logError('Failed to select verification item', error); showToast($t('toasts.operationFailed'), 'error'); }); }}
+          onOpenLink={onOpenMagicLink} onOpenMessage={(email) => void openVerificationMessage(email)} onToast={showToast} />
       </div>
-    </div>
-
-    <!-- Divider -->
-    <div class="w-px h-6 bg-md-secondary-container flex-shrink-0 mx-1"></div>
-
-    <!-- Current OTP with Copy -->
-    <div class="flex-1 flex items-center justify-center">
-      <button
-        id="button-copy-current-otp"
-        class="px-3 py-1 rounded-full text-label-sm font-semibold rounded-lg bg-md-primary text-md-on-primary hover:bg-md-primary/90 flex-shrink-0 flex items-center gap-1.5 transition-colors"
-        aria-label={$t('inbox.copyOtpAria')}
-        title={$t('inbox.copyOtpAria')}
-        onclick={(e) => { e.stopPropagation(); onCopyOtp(); }}
-      >
-        <span class="font-bold text-sm tracking-[0.05em]">{stripOtpCode.replace(/\s/g, '')}</span>
-        <Icon name="copy" class="w-3 h-3 text-white/80 flex-shrink-0" />
-      </button>
-    </div>
-
-    <!-- Up/Down Buttons -->
-    <div class="flex items-center gap-1 flex-shrink-0 ms-0.5">
-      <button
-        class="w-5 h-5 flex items-center justify-center rounded-lg bg-transparent hover:bg-md-secondary-container transition-colors"
-        aria-label={otpDropupOpen ? "Collapse OTP history" : "Expand OTP history"}
-        onclick={(e) => { e.stopPropagation(); toggleOtpDropup(); }}
-      >
-        {#if otpDropupOpen}
-          <Icon name="chevronUp" class="w-3 h-3" />
-        {:else}
-          <Icon name="chevronDown" class="w-3 h-3" />
-        {/if}
-      </button>
-      <button
-        class="w-5 h-5 flex items-center justify-center rounded-lg bg-transparent hover:bg-md-secondary-container transition-colors"
-        aria-label={$t('inbox.collapseOtpAria')}
-        title={$t('inbox.collapseOtpAria')}
-        onclick={(e) => { e.stopPropagation(); otpCollapsed = true; }}
-      >
-        <Icon name="chevronUp" class="w-3 h-3" />
-      </button>
-    </div>
-
-  </div>
-  {:else}
-  <button
-    class="w-full flex items-center justify-between px-3 py-1.5 text-xs font-medium text-md-primary/70 hover:text-md-primary transition-colors bg-md-secondary-container"
-    onclick={(e) => { e.stopPropagation(); otpCollapsed = false; }}
-    aria-label={$t('inbox.showOtpBar')}
-    title={$t('inbox.showOtpBar')}
-  >
-    <span>{$t('inbox.otpReady', { values: { code: stripOtpCode } })}</span>
-    <Icon name="chevronDown" class="w-3.5 h-3.5" />
-  </button>
-  {/if}
+    {/if}
 </div>
 {/if}
-{#if showRenewalStrip || (providerFailoverHint?.show && currentAccount?.autoExtend && isCurrentAccountExpired)}
+{#if frontStrip === 'renewal' && renewalDockVisible}
 <div
   id="button-renewal-strip"
   class="bottom-strip-item bottom-strip-renewal rounded-xl"
   style="--i: 3; overflow: hidden;"
 >
   {#if !renewalStripCollapsed}
-  <div class="flex flex-col gap-2 px-3 py-2.5 bg-md-primary-container border border-md-warning/40 rounded-xl">
+  <div class="flex flex-col gap-2 px-3 py-2.5 bg-md-surface-container-low border border-md-warning/40 rounded-xl {ELEVATION.level1}">
     <!-- Header: icon + title + dismiss -->
     <div class="flex items-center gap-2">
       <div class="flex-shrink-0 w-7 h-7 rounded-lg bg-md-warning/20 flex items-center justify-center">
@@ -4601,9 +4954,9 @@ onDestroy(() => {
       </div>
       <div class="flex-1 min-w-0">
         <div class="text-xs font-bold text-md-on-surface leading-tight">
-          {#if providerFailoverHint?.show && currentAccount?.autoExtend}
+          {#if providerFailoverHint?.show && currentAddress?.autoExtend}
             {$t('inbox.renewalStrip.retryTitle')}
-          {:else if lifecycleHints[0]?.kind === 'renew_high_value' && lifecycleHints[0]?.inboxId === currentAccount?.id}
+          {:else if lifecycleHints[0]?.kind === 'renew_high_value' && lifecycleHints[0]?.addressId === currentAddress?.id}
             {$t(lifecycleHints[0].reasonKey, { values: { address: lifecycleHints[0].address } })}
           {:else}
             {$t('inbox.renewalStrip.title')}
@@ -4612,7 +4965,7 @@ onDestroy(() => {
         <div class="text-xs text-md-on-surface/60 leading-tight truncate">
           {#if isRenewing}
             {$t('inbox.renewalStrip.renewing')}
-          {:else if providerFailoverHint?.show && currentAccount?.autoExtend}
+          {:else if providerFailoverHint?.show && currentAddress?.autoExtend}
             {$t('inbox.renewalStrip.retryIn', {
               values: {
                 min: Math.max(1, Math.ceil((providerFailoverHint.nextRetryAt - Date.now()) / 60000)),
@@ -4625,21 +4978,21 @@ onDestroy(() => {
       </div>
       <button
         id="button-renewal-dismiss"
-        class="w-5 h-5 flex items-center justify-center rounded-lg bg-transparent hover:bg-md-secondary-container flex-shrink-0 transition-colors disabled:opacity-40"
+        class="w-5 h-5 flex items-center justify-center rounded-full bg-transparent hover:bg-md-secondary-container active:bg-md-secondary-container-pressed flex-shrink-0 transition-colors disabled:opacity-40"
         aria-label={$t('inbox.renewalStrip.dismissAria')}
         aria-expanded={!renewalStripCollapsed}
         aria-controls="button-renewal-strip"
         disabled={isRenewing}
         onclick={(e) => { e.stopPropagation(); renewalStripDismissed = true; }}
       >
-        <Icon name="x" class="w-3 h-3" />
+        <Icon name="close" class="w-3 h-3" />
       </button>
     </div>
     <!-- Action row: renew options -->
-    <div class="flex items-center gap-1.5">
+    <div class="flex flex-nowrap gap-3 w-full" use:responsiveButtonLayout data-action-tier="S">
       <button
         id="button-renewal-always"
-        class="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 rounded-lg text-label-sm font-semibold bg-md-primary text-md-on-primary hover:bg-md-primary/90 transition-colors disabled:opacity-60"
+        class="flex-1 min-w-0 h-10 px-4 rounded-lg text-sm font-semibold bg-md-primary text-md-on-primary hover:bg-md-primary/90 active:brightness-95 transition-colors disabled:opacity-60 flex items-center justify-center"
         title={$t('inbox.renewalStrip.alwaysDescription')}
         disabled={isRenewing}
         onclick={(e) => {
@@ -4647,12 +5000,12 @@ onDestroy(() => {
           void handleRenewAlways();
         }}
       >
-        <Icon name="refresh" class="w-3 h-3 {isRenewing ? 'animate-spin' : ''}" />
-        {isRenewing ? $t('inbox.renewalStrip.renewing') : $t('inbox.renewalStrip.always')}
+        <Icon name="refresh" class="w-5 h-5 shrink-0 {isRenewing ? 'animate-spin' : ''}" />
+        <span class="btn-label">{isRenewing ? $t('inbox.renewalStrip.renewing') : $t('inbox.renewalStrip.always')}</span>
       </button>
       <button
         id="button-renewal-once"
-        class="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 rounded-lg text-label-sm font-semibold bg-md-secondary-container text-md-on-surface hover:bg-md-secondary-container/80 transition-colors disabled:opacity-60"
+        class="flex-1 min-w-0 h-10 px-4 rounded-lg text-sm font-semibold bg-md-secondary-container text-md-on-secondary-container hover:bg-md-secondary-container/80 active:bg-md-secondary-container/100 transition-colors disabled:opacity-60 flex items-center justify-center"
         title={$t('inbox.renewalStrip.onceDescription')}
         disabled={isRenewing}
         onclick={(e) => {
@@ -4660,15 +5013,15 @@ onDestroy(() => {
           void handleRenewOnce();
         }}
       >
-        {isRenewing ? $t('inbox.renewalStrip.renewing') : $t('inbox.renewalStrip.once')}
+        <span class="btn-label">{isRenewing ? $t('inbox.renewalStrip.renewing') : $t('inbox.renewalStrip.once')}</span>
       </button>
       <button
         id="button-renewal-no"
-        class="px-2.5 py-1.5 rounded-lg text-label-sm font-semibold bg-transparent text-md-on-surface/60 hover:bg-md-secondary-container hover:text-md-on-surface transition-colors disabled:opacity-40"
+        class="h-10 px-4 rounded-lg text-sm font-semibold bg-transparent text-md-on-surface/60 hover:bg-md-secondary-container active:bg-md-secondary-container-pressed hover:text-md-on-secondary-container transition-colors disabled:opacity-40"
         disabled={isRenewing}
         onclick={(e) => { e.stopPropagation(); renewalStripDismissed = true; }}
       >
-        {$t('inbox.renewalStrip.dismiss')}
+        <span class="btn-label">{$t('inbox.renewalStrip.dismiss')}</span>
       </button>
     </div>
     {#if providerFailoverHint?.show && providerFailoverHint.otherProvidersOk}
@@ -4677,7 +5030,7 @@ onDestroy(() => {
         class="w-full py-1.5 rounded-lg text-label-sm font-semibold bg-md-tertiary-container text-md-on-tertiary-container hover:opacity-90 transition-opacity"
         onclick={(e) => {
           e.stopPropagation();
-          onCreateInbox();
+          onCreateAddress();
         }}
       >
         {$t('toasts.createWithOtherProvider')}
@@ -4686,7 +5039,7 @@ onDestroy(() => {
   </div>
   {:else}
   <button
-    class="w-full flex items-center justify-between px-3 py-1.5 text-xs font-medium text-md-warning/70 hover:text-md-warning transition-colors bg-md-primary-container"
+    class="w-full flex items-center justify-between px-3 py-1.5 text-xs font-medium text-md-warning/70 hover:text-md-warning transition-colors bg-md-surface-container-low"
     onclick={(e) => { e.stopPropagation(); renewalStripCollapsed = false; }}
     aria-label={$t('inbox.showRenewalBar')}
     title={$t('inbox.showRenewalBar')}
@@ -4699,7 +5052,7 @@ onDestroy(() => {
   {/if}
 </div>
 {/if}
-{/if}
+</MailboxStripDock>
 </div>
 <!-- end bottom-strips-wrapper -->
 {/if}
@@ -4707,18 +5060,22 @@ onDestroy(() => {
 <!-- Tag Dialog -->
 <TagDialog
   open={tagDialogOpen}
-  currentTag={tagTargetAccount?.tag || null}
-  currentTagColor={tagTargetAccount?.tagColor || null}
+  currentTag={tagTargetAddress?.tag || null}
+  currentTagColor={tagTargetAddress?.tagColor || null}
+  currentTags={addressTagsList(tagTargetAddress)}
   existingTags={existingTags}
   tagColors={tagColors}
+  tagAddresses={tagAddressUsage}
   onClose={closeTagDialog}
-  onSave={saveTag}
+  onManageTags={onManageTags}
+  onSaveTags={saveTags}
 />
 
 <!-- Hover Preview Tooltip -->
-{#if hoveredEmail && emailPreviewEnabled}
+{#if hoveredEmail && emailPreviewMode === 'tooltip'}
+  {@const hoverPreview = emailHoverPreview(hoveredEmail)}
   <div
-    class="fixed z-[100000] w-72 bg-md-surface-container-high text-md-on-surface p-3 rounded-xl shadow-2xl border border-md-outline-variant/60 pointer-events-none transition-opacity duration-150"
+    class="fixed {PORTAL_Z_CLASS.tooltip} w-72 bg-md-surface-container-high text-md-on-surface p-3 rounded-xl {ELEVATION.level2} border border-md-outline-variant/60 pointer-events-none transition-opacity duration-150"
     style="top: {previewPosition.y}px; left: {previewPosition.x}px;"
   >
     <div class="flex items-center justify-between gap-2 mb-1 border-b border-md-outline-variant/30 pb-1.5">
@@ -4729,14 +5086,12 @@ onDestroy(() => {
     </div>
     {#if hoveredEmail.isOtp}
       <div class="mb-1 text-xs font-semibold text-md-tertiary">
-        OTP: {hoveredEmail.otp}
+        {$t('loginInfo.otp')}: {hoveredEmail.otp}
       </div>
     {/if}
     <div class="text-xs text-md-on-surface/80 line-clamp-6 leading-relaxed">
-      {#if hoveredEmail.body_plain}
-        {hoveredEmail.body_plain.trim().slice(0, 400)}
-      {:else if hoveredEmail.body_html}
-        {hoveredEmail.body_html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 400)}
+      {#if hoverPreview !== null}
+        {hoverPreview}
       {:else}
         <span class="italic text-md-on-surface/40">{$t('emailList.noPreview')}</span>
       {/if}
@@ -4744,221 +5099,224 @@ onDestroy(() => {
   </div>
 {/if}
 
-<!-- Email Tag / Label Modal Dialog Overlay -->
-{#if emailTagDialogOpen}
-  <div class="absolute inset-0 z-[9999] flex items-center justify-center p-4" role="dialog" aria-modal="true">
-    <div
-      class="absolute inset-0 bg-black/40 backdrop-blur-sm"
-      role="button"
-      tabindex="-1"
-      onclick={(e) => { e.stopPropagation(); closeEmailTagDialog(); }}
-      onkeydown={(e) => e.key === 'Escape' && closeEmailTagDialog()}
-    ></div>
-    <div class="relative bg-md-surface rounded-2xl shadow-2xl p-4 w-72 z-10 border border-md-outline-variant/30">
-      <div class="flex items-center justify-between mb-3">
-        <h3 class="text-sm font-bold text-md-on-surface">
-          {tagDialogMultiIds?.length
-            ? $t('inbox.emailActions.labelSelected')
-            : $t('inbox.emailActions.tag')}
-          {#if tagDialogMultiIds?.length}
-            <span class="text-md-on-surface/50 font-medium">({tagDialogMultiIds.length})</span>
-          {/if}
-        </h3>
-        <button
-          type="button"
-          class="w-7 h-7 flex items-center justify-center rounded-full hover:bg-md-surface-variant transition-colors"
-          onclick={(e) => { e.stopPropagation(); closeEmailTagDialog(); }}
-          aria-label={$t('common.close')}
-        >
-          <Icon name="x" class="w-4 h-4 text-md-on-surface/60" />
-        </button>
-      </div>
-      <p class="text-xs text-md-on-surface/60 mb-2">{$t('inbox.labelDialogHint')}</p>
-      <input
-        type="text"
-        class="w-full px-3 py-2 text-sm rounded-lg border border-md-outline-variant bg-md-surface-container-low focus:outline-none focus:border-md-primary focus:ring-1 focus:ring-md-primary"
-        placeholder={$t('inbox.labelDialogPlaceholder')}
-        bind:value={tagDialogInput}
-        onkeydown={(e) => { if (e.key === 'Enter') void saveEmailTags(); else if (e.key === 'Escape') closeEmailTagDialog(); }}
+<!-- Email Label Modal Dialog -->
+{#if emailLabelDialogOpen}
+  <ModalDialog
+    open={emailLabelDialogOpen}
+    onClose={closeEmailLabelDialog}
+    maxWidth="xs"
+    title={labelDialogMultiIds?.length
+      ? $t('inbox.emailActions.labelSelected')
+      : $t('inbox.emailActions.label')}
+    subtitle={labelDialogMultiIds?.length ? `(${labelDialogMultiIds.length})` : undefined}
+  >
+    {#snippet headerActions()}
+      <IconButton
+        icon="settings"
+        size="sm"
+        ariaLabel={$t('nav.labelManagement')}
+        title={$t('nav.labelManagement')}
+        onclick={() => {
+          closeEmailLabelDialog();
+          onManageLabels();
+        }}
       />
-      {#if allEmailTags.length > 0}
-        <div class="flex flex-wrap gap-1.5 mt-2">
-          {#each allEmailTags as existingTag (existingTag)}
-            <button
-              type="button"
-              class="px-2 py-0.5 text-xs rounded-full bg-md-primary/20 text-md-primary hover:bg-md-primary/30 transition-colors"
-              onclick={(e) => {
-                e.stopPropagation();
-                const parts = tagDialogInput.split(',').map((s) => s.trim()).filter(Boolean);
-                if (!parts.includes(existingTag)) {
-                  tagDialogInput = parts.length ? `${parts.join(', ')}, ${existingTag}` : existingTag;
-                }
-              }}
-            >{existingTag}</button>
-          {/each}
-        </div>
-      {/if}
-      <div class="flex gap-2 mt-3">
-        <button
-          type="button"
-          class="flex-1 py-1.5 text-sm rounded-xl bg-md-secondary-container text-md-on-secondary-container hover:bg-md-secondary-container/80 transition-colors"
-          onclick={(e) => { e.stopPropagation(); closeEmailTagDialog(); }}
-        >{$t('common.cancel')}</button>
-        <button
-          type="button"
-          class="flex-1 py-1.5 text-sm rounded-xl bg-md-primary text-md-on-primary hover:bg-md-primary/90 transition-colors"
-          onclick={(e) => { e.stopPropagation(); void saveEmailTags(); }}
-        >{$t('common.save')}</button>
+    {/snippet}
+    <p class="text-xs text-md-on-surface/60 mb-2">{$t('inbox.labelDialogHint')}</p>
+    <input
+      type="text"
+      class="w-full px-3 py-2 text-sm rounded-lg border border-md-outline-variant bg-md-surface-container-low focus:outline-none focus:border-md-primary focus:ring-1 focus:ring-md-primary"
+      placeholder={$t('inbox.labelDialogPlaceholder')}
+      bind:value={labelDialogInput}
+      onkeydown={(e) => {
+        if (e.key === 'Enter') void saveEmailLabels();
+      }}
+    />
+    {#if allEmailLabels.length > 0}
+      <div class="flex flex-wrap gap-1.5 mt-2">
+        {#each allEmailLabels as existingLabel (existingLabel)}
+          <button
+            type="button"
+            class="px-2 py-0.5 text-xs rounded-full transition-colors hover:opacity-80"
+            style="background-color: {hexToRgba(labelColor(existingLabel), 0.12)}; color: {labelColor(existingLabel)};"
+            onclick={(e) => {
+              e.stopPropagation();
+              const parts = labelDialogInput.split(',').map((s) => s.trim()).filter(Boolean);
+              if (!parts.includes(existingLabel)) {
+                labelDialogInput = parts.length ? `${parts.join(', ')}, ${existingLabel}` : existingLabel;
+              }
+            }}
+          >{existingLabel}</button>
+        {/each}
+      </div>
+    {/if}      {#if dialogNewLabels.length > 0}
+      <div class="flex items-center gap-2 mt-2">
+        <input
+          type="color"
+          class="w-7 h-7 rounded-lg cursor-pointer border-0 p-0.5 bg-transparent shrink-0"
+          bind:value={labelDialogColor}
+          oninput={() => {
+            labelDialogColorTouched = true;
+          }}
+          aria-label={$t('inbox.labelDialogNewColor')}
+          title={$t('inbox.labelDialogNewColor')}
+        />
+        <span class="text-sm text-md-on-surface-variant">{$t('inbox.labelDialogNewColor')}</span>
+      </div>
+    {/if}
+    {#snippet footer()}
+      <button
+        type="button"
+        class="flex-1 py-1.5 text-sm rounded-xl bg-md-secondary-container text-md-on-secondary-container hover:bg-md-secondary-container/80 active:bg-md-secondary-container/100 transition-colors"
+        onclick={closeEmailLabelDialog}
+      >{$t('common.cancel')}</button>
+      <button
+        type="button"
+        class="flex-1 py-1.5 text-sm rounded-xl bg-md-primary text-md-on-primary hover:bg-md-primary/90 active:brightness-95 transition-colors"
+        onclick={() => void saveEmailLabels()}
+      >{$t('common.save')}</button>
+    {/snippet}
+  </ModalDialog>
+{/if}
+
+{#if contextMenuOpen && contextMenuEmail}
+  <!-- Click-away backdrop (mouse-only dismiss; also closes on right-click).
+       It keeps its OWN layer class instead of the dialog shells' `-z-10`: it is
+       a SIBLING of the menu rather than a child of a z-indexed overlay, so a
+       negative z-index would drop it behind the app chrome and it would stop
+       catching the clicks it exists for. -->
+  <div
+    class="fixed inset-0 {PORTAL_Z_CLASS.dialog} cursor-default"
+    aria-hidden="true"
+    onclick={() => closeContextMenu()}
+    oncontextmenu={(e) => {
+      e.preventDefault();
+      closeContextMenu();
+    }}
+  ></div>
+  <div
+    use:anchoredFlyout={{ point: contextMenuPosition, onClose: closeContextMenu }}
+    class="fixed {PORTAL_Z_CLASS.dialog} w-56 rounded-xl bg-md-surface {ELEVATION.level2} border border-md-outline-variant/30 overflow-hidden text-md-on-surface"
+    style="left: {contextMenuPosition.x}px; top: {contextMenuPosition.y}px;"
+    role="menu"
+    tabindex="-1"
+    aria-label={$t('inbox.emailActions.createRuleFromEmail')}
+    oncontextmenu={(e) => e.preventDefault()}
+  >
+    <div class="px-3 py-2 border-b border-md-outline-variant/20">
+      <div class="text-xs font-bold truncate">
+        {getDisplayName(contextMenuEmail.from || '', contextMenuEmail.from_name)}
+      </div>
+      <div class="text-xs text-md-on-surface-variant truncate">
+        {contextMenuEmail.subject || $t('addressView.noSubject')}
       </div>
     </div>
+    <button
+      type="button"
+      role="menuitem"
+      class="w-full flex items-center gap-2 px-3 py-2.5 text-sm font-semibold text-start hover:bg-md-surface-variant/60 active:bg-md-surface-variant/80 transition-colors"
+      onclick={(e) => {
+        e.stopPropagation();
+        createRuleFromContextMenu();
+      }}
+    >
+      <Icon name="automation" class="w-4 h-4 text-md-primary shrink-0" />
+      {$t('inbox.emailActions.createRuleFromEmail')}
+    </button>
   </div>
 {/if}
 </div>
 
-<style>
-  /*
-   * Matches example exactly (ul/li pattern).
-   * DOM: autofill=1st child (top), otp=2nd child (middle), renewal=3rd child (bottom).
-   * CSS `order` swaps visually: front strip → highest order (bottom=screen bottom, in front).
-   *                              back strip  → lower order (peeks above front).
-   *
-    * When `has-renewal` is set on the wrapper, the renewal strip is LOCKED to order:3
-    * (always front) regardless of frontStrip. autofill and otp shift down one slot.
-    */
+{#if attachmentLibraryOpen}
+  <AttachmentLibraryDialog onClose={() => { attachmentLibraryOpen = false; }} />
+{/if}
 
-  /* Android-style vertical edge handle (LEFT of strip stack) — horizontal drag only */
-  .strips-edge-handle {
-    width: 18px;
-    min-height: 32px;
-    padding: 0;
-    border: none;
+<style>
+  :global(.autofill-identity-menu > button) {
+    border-radius: 0 9999px 9999px 0;
     background: transparent;
-    cursor: ew-resize;
-    display: flex;
-    align-items: center;
-    justify-content: flex-start;
-    touch-action: pan-x;
-    transition: transform 120ms cubic-bezier(0.2, 0, 0, 1);
+    color: inherit;
+    border: 0;
   }
-  .strips-edge-handle:active {
-    cursor: grabbing;
+
+  :global([dir='rtl'] .autofill-identity-menu > button) {
+    border-radius: 9999px 0 0 9999px;
   }
-  .strips-edge-handle-pill {
-    width: 5px;
-    min-height: 24px;
-    border-radius: 0 999px 999px 0;
-    background: color-mix(in srgb, var(--md-on-surface) 35%, transparent);
-    border: 1px solid color-mix(in srgb, var(--md-outline-variant) 60%, transparent);
-    border-inline-start: none;
-    box-shadow: 2px 0 8px color-mix(in srgb, var(--md-shadow, #000) 18%, transparent);
-    transition: background 0.15s ease, width 0.15s ease;
+
+  /*
+   * The row's SELECTED/ACTIVE/HIGHLIGHTED surfaces live in the shared row
+   * contract (`src/styles/row-surfaces.css`) - one home for every list row in
+   * the app, so no view (this one included) picks its own fill, edge or hover
+   * wash. `mailRowSurfaceClass` supplies the classes; the values are not here.
+   */
+
+  /*
+   * 'Expanded' hover preview (preferences.emailPreviewStyle): when the user
+   * picks 'expanded' in Settings, the row's OWN one-line truncated body
+   * preview (p.email-body-preview) grows to four wrapped lines while the row
+   * is hovered - same element, same text, no separate preview block - and
+   * collapses back to one line when the cursor leaves. The class is applied
+   * only in 'expanded' mode, so 'tooltip' mode keeps the plain truncate.
+   */
+  .email-row-expandable {
+    transition: background-color 150ms ease;
   }
-  .strips-edge-handle:hover .strips-edge-handle-pill,
-  .strips-edge-handle:focus-visible .strips-edge-handle-pill {
-    background: var(--md-primary);
-    width: 6px;
+  .email-row-expandable:hover {
+    background-color: color-mix(in srgb, var(--md-surface-variant) 40%, transparent);
   }
-  .strips-edge-handle:focus-visible {
-    outline: none;
+  .email-row-expandable .email-body-preview {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 1;
+    line-clamp: 1;
+    overflow: hidden;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .email-row-expandable:hover .email-body-preview {
+    -webkit-line-clamp: 4;
+    line-clamp: 4;
   }
 
   :global(.bottom-strips-wrapper) {
     position: absolute;
-    /* Float ABOVE the floating nav — bottom equals the nav height so strips stack on top of it */
-    bottom: var(--bottom-safe-area, 44px);
+    /* Float ABOVE the floating nav - bottom equals the nav height so strips stack on top of it,
+       plus the shell selection bar's height while one is showing. */
+    bottom: calc(var(--bottom-safe-area, 44px) + var(--selection-bar-offset, 0px));
     left: 50%;
     transform: translateX(-50%);
-    width: min(350px, 100%);
+    min-width: 0;
+    max-width: 100%;
     display: flex;
     flex-direction: column;
-    gap: 0;
-    perspective: 500px;
-    transform-style: preserve-3d;
-    transition: gap 500ms;
+    transition: opacity 180ms ease, transform 180ms ease, visibility 180ms ease;
     margin-bottom: 4px;
     /* Transparent gaps must NOT block clicks on content below */
     pointer-events: none;
   }
 
-  :global(.bottom-strips-wrapper:hover) {
-    gap: 5px;
+  :global(.bottom-strips-wrapper.scroll-chrome-hidden) {
+    opacity: 0;
+    visibility: hidden;
+    transform: translateX(-50%) translateY(calc(100% + 8px));
+    pointer-events: none;
+  }
+
+  :global(.bottom-strips-wrapper.scroll-chrome-hidden *) {
+    pointer-events: none;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    :global(.bottom-strips-wrapper) {
+      transition: none;
+    }
   }
 
   :global(.bottom-strip-item) {
     position: relative;
     list-style: none;
-    transition: transform 500ms, opacity 500ms, width 500ms;
-    transition-delay: calc(var(--i, 1) * 50ms);
-    /* Wrapper is pointer-events:none — restore auto on each strip so they are clickable */
+    /* Wrapper is pointer-events:none - restore auto on each strip so they are clickable */
     pointer-events: auto;
   }
 
-  /* ── No renewal: existing 2-strip swap rules ── */
-  /* autofill front: autofill→order:2, otp→order:1 */
-  :global(.bottom-strips-wrapper.front-autofill:not(.has-renewal) .bottom-strip-autofill) {
-    order: 2;
-    transform: translateZ(0) translateY(0);
-    opacity: 1;
-    width: 350px;
-  }
-  :global(.bottom-strips-wrapper.front-autofill:not(.has-renewal) .bottom-strip-otp) {
-    order: 1;
-    transform: translateZ(0) translateY(5px);
-    opacity: 0.95;
-    width: 340px;
-    margin: 0 auto;
-  }
-
-  /* otp front: otp→order:2, autofill→order:1 */
-  :global(.bottom-strips-wrapper.front-otp:not(.has-renewal) .bottom-strip-otp) {
-    order: 2;
-    transform: translateZ(0) translateY(0);
-    opacity: 1;
-    width: 350px;
-  }
-  :global(.bottom-strips-wrapper.front-otp:not(.has-renewal) .bottom-strip-autofill) {
-    order: 1;
-    transform: translateZ(0) translateY(5px);
-    opacity: 0.95;
-    width: 340px;
-    margin: 0 auto;
-  }
-
-  /* ── Renewal present: renewal LOCKED to order:3 (always front) ── */
-  :global(.bottom-strips-wrapper.has-renewal .bottom-strip-renewal) {
-    order: 3;
-    transform: translateZ(0) translateY(0);
-    opacity: 1;
-    width: 350px;
-  }
-  :global(.bottom-strips-wrapper.has-renewal .bottom-strip-autofill) {
-    order: 2;
-    transform: translateZ(0) translateY(5px);
-    opacity: 0.95;
-    width: 340px;
-    margin: 0 auto;
-  }
-  :global(.bottom-strips-wrapper.has-renewal .bottom-strip-otp) {
-    order: 1;
-    transform: translateZ(0) translateY(5px);
-    opacity: 0.95;
-    width: 340px;
-    margin: 0 auto;
-  }
-
-  /* ── hover: fan out all strips flat, full opacity, natural positions ── */
-  :global(.bottom-strips-wrapper:hover .bottom-strip-item) {
-    opacity: 1;
-    transform: translateZ(0) translateY(0);
-    width: 350px;
-    margin: 0 auto;
-  }
-
-  /* Selection strip: 2× height, front strip — retains bottom-safe-area positioning */
-  :global(.bottom-strips-wrapper.has-selection .bottom-strip-selection) {
-    order: 2;
-    transform: translateZ(0) translateY(0);
-    opacity: 1;
-    width: 350px;
-  }
 </style>

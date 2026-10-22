@@ -1,15 +1,46 @@
 /**
- * Demo mode: isolated bag of fake inboxes/emails.
+ * Demo mode: isolated bag of fake addresses/emails.
  * Real user data is snapshotted and restored on exit so real mode is never mixed.
  */
-import type { Browser } from 'wxt/browser';
-import type { Account, Email } from '@/utils/types.js';
+import { copyToClipboardFromBackground } from '@/utils/clipboard/clipboard.js';
+import { tSync } from '@/utils/i18n/i18n-background.js';
+import { withLock } from '@/utils/mutex.js';
+import { createBrowserNotification } from '@/utils/notifications/notification-permission.js';
+import { playNotificationSoundIfEnabled } from '@/utils/notifications/notification-sound.js';
+import { maybeAutoCopyOtp } from '@/utils/otp/otp-auto-copy.js';
+import { updateStoredObject } from '@/utils/storage/rmw.js';
+import {
+  getEmailMaps,
+  getStoredEmailsForAddress,
+  setLogicalEmailMaps,
+  setLogicalEmailMapsUnlockedForLockedCaller,
+  setStoredEmailsForAddress,
+  updateAddresses,
+} from '@/utils/storage/storage-keys.js';
+import { arrayOrEmpty } from '@/utils/storage/storage-shape-guards.js';
+import { writeWithRetry } from '@/utils/storage/storage-write.js';
+import type { Address, Email } from '@/utils/types.js';
 
 export const DEMO_INBOX_ID = 'demo-inbox-1';
 export const DEMO_ADDRESS = 'demo.user@example.com';
 export const MAX_DEMO_INBOXES = 8;
 
 const SNAPSHOT_KEY = 'realModeSnapshot_v1';
+const USER_DATA_SNAPSHOT_KEY = 'realModeUserDataSnapshot_v1';
+const DEMO_SHOWCASE_TAB_IDS_KEY = 'demoShowcaseTabIds';
+
+/**
+ * Is this record a playground inbox?
+ *
+ * Two spellings exist and both count: the seeded/created records carry
+ * `provider: 'demo'`, and their ids are `demo-inbox-*` (the id is what survives
+ * a username-derived address, which is why the list cannot be filtered by an
+ * address prefix). One predicate, so a new call site cannot filter on half the
+ * rule and leave a demo inbox behind on exit.
+ */
+function isDemoAddress(record: Address): boolean {
+  return record.provider === 'demo' || String(record.id || '').startsWith('demo-');
+}
 
 const DEMO_SENDERS = [
   {
@@ -81,7 +112,7 @@ function makeEmail(
     id?: string;
     received_at?: number;
   },
-  inboxAddress: string
+  address: string
 ): Email {
   const id = partial.id || `demo-mail-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const email: Email = {
@@ -95,7 +126,7 @@ function makeEmail(
     unread: true,
     otp: partial.otp || undefined,
     isOtp: !!partial.otp,
-    original_inbox: inboxAddress,
+    original_inbox: address,
   };
   if (partial.magic) {
     const magicUrl =
@@ -125,15 +156,33 @@ export async function isDemoMode(ext: Browser): Promise<boolean> {
 }
 
 type Snapshot = {
-  inboxes: Account[];
+  addresses: Address[];
   storedEmails: Record<string, Email[]>;
   archivedEmails: Record<string, Email[]>;
-  activeInboxId?: string;
+  activeAddressId?: string;
   latestOtp?: unknown;
   selectedEmail?: string;
 };
 
-function buildDemoBag(index: number, username?: string): Account {
+type UserDataSnapshot = {
+  identities: unknown[];
+  loginInfo: unknown[];
+  selectedIdentityId: string | null;
+};
+
+async function restoreDemoUserData(ext: Browser): Promise<void> {
+  const { [USER_DATA_SNAPSHOT_KEY]: snapshot } = (await ext.storage.local.get([
+    USER_DATA_SNAPSHOT_KEY,
+  ])) as { [USER_DATA_SNAPSHOT_KEY]?: UserDataSnapshot };
+  if (!snapshot) return;
+  await writeWithRetry({
+    identities: snapshot.identities,
+    loginInfo: snapshot.loginInfo,
+    selectedIdentityId: snapshot.selectedIdentityId,
+  });
+}
+
+function buildDemoBag(index: number, username?: string): Address {
   const now = Date.now();
   const local = username?.trim() || (index === 0 ? 'demo.user' : `demo.user${index + 1}`);
   const address = `${local}@example.com`;
@@ -141,7 +190,6 @@ function buildDemoBag(index: number, username?: string): Account {
     id: `demo-inbox-${index + 1}`,
     address,
     provider: 'demo',
-    status: 'active',
     accountStatus: 'active',
     autoExtend: index % 2 === 0,
     createdAt: now - (index + 1) * 3600_000,
@@ -185,79 +233,95 @@ export async function enterDemoMode(ext: Browser): Promise<void> {
   const existing = (await ext.storage.local.get([
     'demoMode',
     SNAPSHOT_KEY,
-    'inboxes',
-    'storedEmails',
-    'archivedEmails',
-    'activeInboxId',
+    USER_DATA_SNAPSHOT_KEY,
+    'addresses',
+    'identities',
+    'loginInfo',
+    'selectedIdentityId',
+    'activeAddressId',
     'latestOtp',
     'selectedEmail',
   ])) as {
     demoMode?: boolean;
     [SNAPSHOT_KEY]?: Snapshot;
-    inboxes?: Account[];
-    storedEmails?: Record<string, Email[]>;
-    archivedEmails?: Record<string, Email[]>;
-    activeInboxId?: string;
+    [USER_DATA_SNAPSHOT_KEY]?: UserDataSnapshot;
+    addresses?: Address[];
+    identities?: unknown[];
+    loginInfo?: unknown[];
+    selectedIdentityId?: string | null;
+    activeAddressId?: string;
     latestOtp?: unknown;
     selectedEmail?: string;
   };
 
+  const existingLogical = await getEmailMaps();
+
   // Only snapshot real data if we are not already in demo (avoid overwriting real snapshot)
   if (!existing.demoMode) {
+    if (!existing[USER_DATA_SNAPSHOT_KEY]) {
+      await writeWithRetry({
+        [USER_DATA_SNAPSHOT_KEY]: {
+          identities: existing.identities || [],
+          loginInfo: existing.loginInfo || [],
+          selectedIdentityId: existing.selectedIdentityId ?? null,
+        } satisfies UserDataSnapshot,
+      });
+    }
+
     // If current bag is already pure demo, don't snapshot it as "real"
-    const current = Array.isArray(existing.inboxes) ? existing.inboxes : [];
+    const current = Array.isArray(existing.addresses) ? existing.addresses : [];
     const looksLikeDemoOnly =
       current.length > 0 &&
       current.every((i) => i.provider === 'demo' || String(i.id || '').startsWith('demo-'));
     if (!looksLikeDemoOnly) {
       const snapshot: Snapshot = {
-        inboxes: current,
-        storedEmails:
-          existing.storedEmails && typeof existing.storedEmails === 'object'
-            ? existing.storedEmails
-            : {},
-        archivedEmails:
-          existing.archivedEmails && typeof existing.archivedEmails === 'object'
-            ? existing.archivedEmails
-            : {},
-        activeInboxId: existing.activeInboxId,
+        addresses: current,
+        storedEmails: existingLogical.storedEmails,
+        archivedEmails: existingLogical.archivedEmails,
+        activeAddressId: existing.activeAddressId,
         latestOtp: existing.latestOtp,
         selectedEmail: existing.selectedEmail,
       };
-      await ext.storage.local.set({ [SNAPSHOT_KEY]: snapshot });
+      await writeWithRetry({ [SNAPSHOT_KEY]: snapshot });
     }
   }
 
-  // Seed multiple demo inboxes so address selector / OTP / magic strips are exercisable
-  const inbox0 = buildDemoBag(0);
-  const inbox1 = buildDemoBag(1);
-  const inbox2 = buildDemoBag(2);
-  const demos = [inbox0, inbox1, inbox2];
+  // Seed multiple demo addresses so address selector / OTP / magic strips are exercisable
+  const address0 = buildDemoBag(0);
+  const address1 = buildDemoBag(1);
+  const address2 = buildDemoBag(2);
+  const demos = [address0, address1, address2];
   const storedEmails: Record<string, Email[]> = {};
   for (let i = 0; i < demos.length; i++) {
     storedEmails[demos[i].address] = buildDemoEmailsFor(demos[i].address, i);
   }
-  const firstBag = storedEmails[inbox0.address] || [];
+  const firstBag = storedEmails[address0.address] || [];
   const firstOtp = firstBag.find((m) => m.otp);
 
-  // Atomic swap: demo flag + isolated bags only (never merge with real inboxes)
-  await ext.storage.local.set({
+  // Atomic swap: demo flag + isolated bags only (never merge with real addresses)
+  await writeWithRetry({
     demoMode: true,
-    inboxes: demos,
-    storedEmails,
-    archivedEmails: {},
-    activeInboxId: inbox0.id,
-    selectedEmail: inbox0.address,
+    addresses: demos,
+    activeAddressId: address0.id,
+    selectedEmail: address0.address,
     latestOtp: firstOtp
       ? {
           otp: firstOtp.otp,
           sender: firstOtp.from,
           senderName: firstOtp.from_name,
           context: firstOtp.subject || '',
+          // The shortcut's staleness guard (resolveLatestOtpForCopy) refuses a
+          // record that cannot prove freshness and CLEARS the key, so demo mode
+          // must carry the same `received_at` every background writer does -
+          // without it the playground's copy-latest-OTP shortcut was a silent
+          // no-op that also wiped the OTP the playground displayed.
+          received_at: firstOtp.received_at,
+          recipient: address0.address,
         }
       : null,
     demoReceiveIndex: 0,
   });
+  await setLogicalEmailMaps(storedEmails, {});
 
   // Open in-extension signup showcase pages so Autofill can be demonstrated
   try {
@@ -266,7 +330,7 @@ export async function enterDemoMode(ext: Browser): Promise<void> {
       void simulateDemoReceive(ext);
     }, 2000);
   } catch {
-    /* non-fatal — demo data still loaded */
+    /* non-fatal - demo data still loaded */
   }
 }
 
@@ -281,7 +345,7 @@ export const PROD_DEMO_BASE_URL = 'https://demo.1click.mail';
 export const DEV_DEMO_BASE_URL = 'http://localhost:5173/demo';
 
 /** Dynamically resolves demo page URL based on environment (localhost in dev/test, HTTPS domain in prod). */
-export function getDemoPageUrl(page: string, _ext?: Browser): string {
+export function getDemoPageUrl(page: string): string {
   const isDev = process.env.NODE_ENV !== 'production';
   const cleanPage = page.replace(/^demo\//, '');
   if (isDev) {
@@ -290,7 +354,7 @@ export function getDemoPageUrl(page: string, _ext?: Browser): string {
   return `${PROD_DEMO_BASE_URL}/${cleanPage}`;
 }
 
-/** Open 2–3 signup demo pages in new tabs (used by demo mode). */
+/** Open 2-3 signup demo pages in new tabs (used by demo mode). */
 export async function openDemoSignupShowcase(ext: Browser): Promise<void> {
   const tabsApi = (
     ext as unknown as {
@@ -299,90 +363,168 @@ export async function openDemoSignupShowcase(ext: Browser): Promise<void> {
   ).tabs;
   if (!tabsApi?.create) return;
 
+  let tabIds: number[] = [];
+  try {
+    const stored = (await ext.storage.session.get([DEMO_SHOWCASE_TAB_IDS_KEY])) as Record<
+      string,
+      unknown
+    >;
+    tabIds = Array.isArray(stored[DEMO_SHOWCASE_TAB_IDS_KEY])
+      ? (stored[DEMO_SHOWCASE_TAB_IDS_KEY] as number[]).filter(Number.isInteger)
+      : [];
+  } catch {
+    // Demo showcase tabs are best-effort; unavailable session storage must not
+    // prevent the demo inbox itself from working.
+  }
+
   for (let i = 0; i < DEMO_SIGNUP_PAGES.length; i++) {
     const page = DEMO_SIGNUP_PAGES[i];
     if (!page) continue;
-    const url = getDemoPageUrl(page, ext);
+    const url = getDemoPageUrl(page);
     // First page focused; others in background
-    await tabsApi.create({ url, active: i === 0 });
+    const tab = (await tabsApi.create({ url, active: i === 0 })) as { id?: number };
+    if (typeof tab.id === 'number') {
+      tabIds.push(tab.id);
+      try {
+        await ext.storage.session.set({ [DEMO_SHOWCASE_TAB_IDS_KEY]: tabIds });
+      } catch {
+        // The tabs still open; cleanup will be best-effort without session state.
+      }
+    }
   }
 }
 
 /** Exit demo: restore real snapshot if present. */
 export async function exitDemoMode(ext: Browser): Promise<void> {
+  try {
+    const tabsApi = (
+      ext as unknown as {
+        tabs?: {
+          get?: (tabId: number) => Promise<{ url?: string }>;
+          remove?: (tabId: number) => Promise<unknown>;
+        };
+      }
+    ).tabs;
+    const tabState = (await ext.storage.session.get([DEMO_SHOWCASE_TAB_IDS_KEY])) as Record<
+      string,
+      unknown
+    >;
+    const tabIds = Array.isArray(tabState[DEMO_SHOWCASE_TAB_IDS_KEY])
+      ? (tabState[DEMO_SHOWCASE_TAB_IDS_KEY] as number[]).filter(Number.isInteger)
+      : [];
+    const expectedUrls = new Set(DEMO_SIGNUP_PAGES.map(getDemoPageUrl));
+    if (tabsApi?.get && tabsApi.remove) {
+      await Promise.all(
+        tabIds.map(async (tabId) => {
+          try {
+            const tab = await tabsApi.get?.(tabId);
+            if (tab?.url && expectedUrls.has(tab.url)) await tabsApi.remove?.(tabId);
+          } catch {
+            // The tab may already be closed or unavailable.
+          }
+        })
+      );
+    }
+    await ext.storage.session.remove(DEMO_SHOWCASE_TAB_IDS_KEY);
+  } catch {
+    // Showcase-tab cleanup must not prevent restoring the user's real data.
+  }
+
   const { [SNAPSHOT_KEY]: snapshot } = (await ext.storage.local.get([SNAPSHOT_KEY])) as {
     [SNAPSHOT_KEY]?: Snapshot;
   };
 
   if (snapshot) {
-    await ext.storage.local.set({
-      demoMode: false,
-      inboxes: snapshot.inboxes || [],
-      storedEmails: snapshot.storedEmails || {},
-      archivedEmails: snapshot.archivedEmails || {},
-      activeInboxId: snapshot.activeInboxId,
+    await writeWithRetry({
+      addresses: snapshot.addresses || [],
+      activeAddressId: snapshot.activeAddressId,
       latestOtp: snapshot.latestOtp ?? null,
       selectedEmail: snapshot.selectedEmail,
     });
-    await ext.storage.local.remove(SNAPSHOT_KEY);
+    await setLogicalEmailMaps(snapshot.storedEmails || {}, snapshot.archivedEmails || {});
+    await restoreDemoUserData(ext);
+    await writeWithRetry({ demoMode: false });
+    await ext.storage.local.remove([SNAPSHOT_KEY, USER_DATA_SNAPSHOT_KEY]);
   } else {
-    // No snapshot (edge case): clear demo bag only
-    const { inboxes = [], storedEmails = {} } = (await ext.storage.local.get([
-      'inboxes',
-      'storedEmails',
-    ])) as { inboxes?: Account[]; storedEmails?: Record<string, Email[]> };
-    await ext.storage.local.set({
-      demoMode: false,
-      inboxes: (inboxes || []).filter(
-        (i) => i.provider !== 'demo' && !String(i.id || '').startsWith('demo-')
-      ),
-      storedEmails: Object.fromEntries(
-        Object.entries(storedEmails || {}).filter(
-          ([k]) => !k.endsWith('@example.com') || !k.startsWith('demo.')
-        )
-      ),
-      archivedEmails: {},
-      latestOtp: null,
+    // No snapshot (edge case): clear demo bag only. Demo bags are keyed by
+    // ADDRESS, and createDemoAddress derives the address from the caller's
+    // username (e.g. john@example.com, id demo-inbox-4) - so a key-prefix
+    // filter on 'demo.' alone misses every custom-username inbox and orphans
+    // its bag forever. Resolve the demo addresses from the address list
+    // (provider === 'demo' || id starts with 'demo-') instead, keeping the
+    // legacy 'demo.*@example.com' prefix check for pre-list seed keys.
+    const logical = await getEmailMaps();
+    const storedEmails = logical.storedEmails;
+    // The list edit is a serialized read-modify-write: the updater sees the
+    // addresses storage holds when it runs and reports back the demo records it
+    // removed, so an inbox created or deleted meanwhile is neither erased nor
+    // left behind. A whole-key write of the list read here used to do both.
+    let demoAddresses = new Set<string>();
+    await updateAddresses((current) => {
+      const demo = current.filter(isDemoAddress);
+      demoAddresses = new Set(demo.map((i) => i.address).filter(Boolean));
+      return current.filter((i) => !isDemoAddress(i));
     });
+    const isDemoBagKey = (k: string): boolean =>
+      demoAddresses.has(k) || (k.endsWith('@example.com') && k.startsWith('demo.'));
+    await setLogicalEmailMaps(
+      Object.fromEntries(Object.entries(storedEmails || {}).filter(([k]) => !isDemoBagKey(k))),
+      Object.fromEntries(
+        Object.entries(logical.archivedEmails || {}).filter(([k]) => !isDemoBagKey(k))
+      )
+    );
+    await restoreDemoUserData(ext);
+    // The demo flag flips LAST: while it is still on the UI is a playground
+    // (which tolerates an empty inbox list), where the reverse order would list
+    // playground inboxes as if they were live mailboxes for a moment.
+    await writeWithRetry({ demoMode: false, latestOtp: null });
+    await ext.storage.local.remove(USER_DATA_SNAPSHOT_KEY);
   }
 }
 
 /** Create a new demo inbox (max MAX_DEMO_INBOXES). Returns address or null if at cap. */
-export async function createDemoInbox(ext: Browser, emailUser?: string): Promise<string | null> {
+export async function createDemoAddress(ext: Browser, emailUser?: string): Promise<string | null> {
   if (!(await isDemoMode(ext))) return null;
-  const { inboxes = [], storedEmails = {} } = (await ext.storage.local.get([
-    'inboxes',
-    'storedEmails',
-  ])) as { inboxes?: Account[]; storedEmails?: Record<string, Email[]> };
 
-  const demoInboxes = (inboxes || []).filter(
-    (i) => i.provider === 'demo' || String(i.id || '').startsWith('demo-')
-  );
-  if (demoInboxes.length >= MAX_DEMO_INBOXES) return null;
-
-  const index = demoInboxes.length;
-  const inbox = buildDemoBag(index, emailUser);
-  // Ensure unique address
-  let n = index;
-  while ((inboxes || []).some((i) => i.address === inbox.address)) {
-    n += 1;
-    inbox.address = `demo.user${n + 1}@example.com`;
-    inbox.id = `demo-inbox-${n + 1}`;
-  }
-  const bag = buildDemoEmailsFor(inbox.address, index);
-  const nextInboxes = [
-    ...(inboxes || []).filter(
-      (i) => i.provider === 'demo' || String(i.id || '').startsWith('demo-')
-    ),
-    inbox,
-  ];
-  await ext.storage.local.set({
-    inboxes: nextInboxes,
-    storedEmails: { ...storedEmails, [inbox.address]: bag },
-    activeInboxId: inbox.id,
-    selectedEmail: inbox.address,
+  // The cap, the bag index and the address-uniqueness walk are all decided
+  // against the list storage holds when the write runs, so two surfaces
+  // creating a demo inbox at once produce two distinct inboxes instead of the
+  // second overwriting the first (or duplicating its id).
+  const created: { record: Address | null; index: number } = { record: null, index: 0 };
+  await updateAddresses((current) => {
+    const demo = current.filter(isDemoAddress);
+    if (demo.length >= MAX_DEMO_INBOXES) return current;
+    created.index = demo.length;
+    const record = buildDemoBag(demo.length, emailUser);
+    // Ensure unique address
+    let n = created.index;
+    while (current.some((i) => i.address === record.address)) {
+      n += 1;
+      record.address = `demo.user${n + 1}@example.com`;
+      record.id = `demo-inbox-${n + 1}`;
+    }
+    created.record = record;
+    return [...demo, record];
   });
-  return inbox.address;
+  // At the cap the updater left the list untouched and created nothing.
+  if (!created.record) return null;
+
+  const record = created.record;
+  const bag = buildDemoEmailsFor(record.address, created.index);
+  // Read and write under the same lock. Taking this snapshot before the lock
+  // lets two concurrent inbox creations each persist a stale full-map copy,
+  // erasing the other inbox's bag even though both address records survive.
+  await withLock('emails_storage_lock', async () => {
+    const logical = await getEmailMaps();
+    await setLogicalEmailMapsUnlockedForLockedCaller(
+      { ...logical.storedEmails, [record.address]: bag },
+      logical.archivedEmails
+    );
+  });
+  // Selection follows the list write: the inbox exists by the time it is
+  // pointed at, so no reader can resolve the pointer to nothing.
+  await writeWithRetry({ activeAddressId: record.id, selectedEmail: record.address });
+  return record.address;
 }
 
 /** @deprecated use enterDemoMode via setDemoMode(true) */
@@ -391,61 +533,120 @@ export async function seedDemoData(ext: Browser): Promise<void> {
 }
 
 /** Simulate one new incoming message (only while demoMode is on). */
-export async function simulateDemoReceive(ext: Browser): Promise<Email | null> {
+export interface DemoSimulateResult {
+  mail: Email;
+  /** Whether the per-site auto-copy feature fired for this delivery. */
+  autoCopied: boolean;
+}
+
+/**
+ * The demo delivery cursor: a whole number in `0..DEMO_SENDERS.length`.
+ *
+ * Parsed (not merely cast) because the value drives an array index - a corrupt
+ * or hand-edited record must degrade to "start at the first sender" rather than
+ * make every later delivery pick a template by `NaN`.
+ */
+function parseDemoReceiveIndex(raw: unknown): number {
+  return typeof raw === 'number' && Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 0;
+}
+
+export async function simulateDemoReceive(ext: Browser): Promise<DemoSimulateResult | null> {
   const {
     demoMode,
-    storedEmails = {},
-    demoReceiveIndex = 0,
-    activeInboxId,
-    inboxes = [],
-  } = (await ext.storage.local.get([
-    'demoMode',
-    'storedEmails',
-    'demoReceiveIndex',
-    'activeInboxId',
-    'inboxes',
-  ])) as {
+    activeAddressId,
+    addresses = [],
+  } = (await ext.storage.local.get(['demoMode', 'activeAddressId', 'addresses'])) as {
     demoMode?: boolean;
-    storedEmails?: Record<string, Email[]>;
-    demoReceiveIndex?: number;
-    activeInboxId?: string;
-    inboxes?: Account[];
+    activeAddressId?: string;
+    addresses?: Address[];
   };
   if (!demoMode) return null;
 
+  // Shape guard (storage-shape-guards.ts): a corrupt non-array addresses value
+  // degrades to empty - `(x || []).find` does not catch truthy garbage, and this
+  // runs in a message-handler path that must not throw.
+  const addressList = arrayOrEmpty<Address>(addresses);
   const active =
-    (inboxes || []).find((i) => i.id === activeInboxId) ||
-    (inboxes || []).find((i) => i.provider === 'demo') ||
+    addressList.find((i) => i.id === activeAddressId) ||
+    addressList.find((i) => i.provider === 'demo') ||
     null;
   const address = active?.address || DEMO_ADDRESS;
 
-  const tpl = DEMO_SENDERS[demoReceiveIndex % DEMO_SENDERS.length];
-  const mail = makeEmail(
-    {
-      from: tpl.from,
-      from_name: tpl.from_name,
-      subject: tpl.subject,
-      body: tpl.body,
-      otp: tpl.otp,
-      magic: tpl.magic,
-    },
-    address
-  );
-  const bag = [...(storedEmails[address] || [])];
-  bag.unshift(mail);
-  if (bag.length > 40) bag.length = 40;
-
-  await ext.storage.local.set({
-    storedEmails: { ...storedEmails, [address]: bag },
-    demoReceiveIndex: (demoReceiveIndex % DEMO_SENDERS.length) + 1,
+  const mail = await withLock('emails_storage_lock', async () => {
+    const cursorResult = (await ext.storage.local.get(['demoReceiveIndex'])) as {
+      demoReceiveIndex?: unknown;
+    };
+    const cursor = parseDemoReceiveIndex(cursorResult.demoReceiveIndex);
+    const tpl = DEMO_SENDERS[cursor % DEMO_SENDERS.length];
+    const delivery = makeEmail(
+      {
+        from: tpl.from,
+        from_name: tpl.from_name,
+        subject: tpl.subject,
+        body: tpl.body,
+        otp: tpl.otp,
+        magic: tpl.magic,
+      },
+      address
+    );
+    const bag = [...(await getStoredEmailsForAddress(active?.id, address))];
+    bag.unshift(delivery);
+    if (bag.length > 40) bag.length = 40;
+    await setStoredEmailsForAddress(active?.id || `demo-${address}`, address, bag);
+    await updateStoredObject(
+      'demoReceiveIndex',
+      (current) => (current % DEMO_SENDERS.length) + 1,
+      parseDemoReceiveIndex
+    );
+    return delivery;
+  });
+  await writeWithRetry({
     latestOtp: mail.otp
       ? {
           otp: mail.otp,
           sender: mail.from,
           senderName: mail.from_name,
           context: mail.subject || '',
+          // Same freshness contract as the seed above and as every background
+          // writer - a simulated delivery is the FRESHEST code there is.
+          received_at: mail.received_at,
+          recipient: address,
         }
       : undefined,
   });
-  return mail;
+
+  // Simulated delivery runs the SAME per-site auto-copy path as real
+  // delivery, so demo mode exercises the full pipeline (clipboard copy +
+  // value-free confirmation) and the behavior is testable offline.
+  let autoCopied = false;
+  const otp = mail.otp;
+  if (otp) {
+    autoCopied = await maybeAutoCopyOtp({
+      otp,
+      sender: mail.from || '',
+      copy: (text) => copyToClipboardFromBackground(text),
+      notify: (ok) => {
+        try {
+          // Audible confirmation for the auto-copy event - same custom sound
+          // as real delivery, gated by the soundEnabled toggle.
+          void playNotificationSoundIfEnabled();
+          void ext.runtime.sendMessage({ type: 'otpAutoCopied', ok }).catch(() => {
+            createBrowserNotification('otp_auto_copy', {
+              type: 'basic',
+              iconUrl: 'icons/icon48.png',
+              title: ok
+                ? tSync('notifications.otpAutoCopiedTitle')
+                : tSync('notifications.otpAutoCopyFailedTitle'),
+              message: ok
+                ? tSync('notifications.otpAutoCopiedMessage')
+                : tSync('notifications.otpAutoCopyFailedMessage'),
+            });
+          });
+        } catch {
+          /* ignore */
+        }
+      },
+    });
+  }
+  return { mail, autoCopied };
 }

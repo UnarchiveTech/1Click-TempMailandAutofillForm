@@ -1,11 +1,65 @@
-// biome-ignore-all lint/suspicious/noExplicitAny: stub globalThis.fetch
-import { afterEach, describe, expect, mock, test } from 'bun:test';
-import { EmailService, type ProviderConfig } from '@/utils/email-service';
-import { deriveInboxTiming } from '@/utils/provider-expiry';
+import { afterAll, afterEach, describe, expect, type Mock, mock, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import {
+  applyProviderConfigArray,
+  EmailService,
+  type ProviderConfig,
+  resetProviderConfigsToBundled,
+  saveProviderOverridesToStorage,
+} from '@/utils/email/email-service';
+import {
+  localizedErrorMessageOrFallback,
+  translateResultMessage,
+  ValidationError,
+} from '@/utils/errors';
+import { deriveAddressTiming } from '@/utils/provider/provider-expiry';
+import { PROJECT_ROOT } from '../helpers/project-root';
+
+// This suite exercises request construction and response handling. URL and DNS
+// safety behavior has its own tests, so keep those network checks out of this
+// fetch-call fixture.
+mock.module('@/utils/provider/instance-validation.js', () => ({
+  validateFetchUrl: mock(async () => ({ ok: true })),
+}));
+
+afterAll(() => {
+  mock.restore();
+});
 
 // ── Mock fetch ──────────────────────────────────────────────────────────────
 
-const originalFetch = globalThis.fetch;
+/** Exactly the arguments `fetch` receives, so call assertions stay typed. */
+type FetchCall = [input: RequestInfo | URL, init?: RequestInit];
+type FetchImpl = (...args: FetchCall) => Promise<Response>;
+type FetchMock = Mock<FetchImpl>;
+
+/**
+ * `globalThis.fetch` seen as a plain callable: these tests replace it wholesale
+ * and never use Bun's `preconnect` companion property.
+ */
+const fetchHost = globalThis as unknown as { fetch: FetchImpl };
+
+const originalFetch = fetchHost.fetch;
+
+/** The stub currently installed on `globalThis.fetch`, if any. */
+let currentFetch: FetchMock | null = null;
+
+/**
+ * Install a `globalThis.fetch` stub and remember it, so tests can assert on the
+ * calls it recorded. The implementation may ignore request arguments it does
+ * not need.
+ */
+function installFetch(impl: () => Promise<Response>): FetchMock {
+  currentFetch = mock<FetchImpl>(impl);
+  fetchHost.fetch = currentFetch;
+  return currentFetch;
+}
+
+/** Calls recorded by the stub installed via {@link installFetch}. */
+function fetchCalls(): FetchCall[] {
+  if (!currentFetch) throw new Error('No fetch stub installed');
+  return currentFetch.mock.calls;
+}
 
 function mockFetch(
   responses: Array<{
@@ -14,12 +68,12 @@ function mockFetch(
     json: () => Promise<unknown>;
     text?: () => Promise<string>;
   }>
-) {
+): FetchMock {
   let callIndex = 0;
-  (globalThis as any).fetch = mock(() => {
+  return installFetch(() => {
     const resp = responses[Math.min(callIndex, responses.length - 1)];
     callIndex++;
-    return Promise.resolve(resp) as Promise<Response>;
+    return Promise.resolve({ headers: new Headers(), body: null, ...resp } as Response);
   });
 }
 
@@ -52,7 +106,8 @@ function httpError(status: number, statusText = 'Error') {
 }
 
 afterEach(() => {
-  globalThis.fetch = originalFetch;
+  fetchHost.fetch = originalFetch;
+  currentFetch = null;
 });
 
 // ── Test config ─────────────────────────────────────────────────────────────
@@ -124,7 +179,7 @@ describe('executeOperation', () => {
     const result = await service.executeOperation('createInbox');
 
     expect(globalThis.fetch).toHaveBeenCalledTimes(1);
-    const calledUrl = (globalThis.fetch as any).mock.calls[0][0] as string;
+    const calledUrl = fetchCalls()[0][0];
     expect(calledUrl).toContain('api.test.com');
     expect(calledUrl).toContain('f=get_inbox');
     expect(calledUrl).toContain('ip=127.0.0.1');
@@ -138,7 +193,7 @@ describe('executeOperation', () => {
     const service = new EmailService(testConfig, {} as never);
     await service.executeOperation('checkEmails', { auth: { token: 'mytoken' } });
 
-    const calledUrl = (globalThis.fetch as any).mock.calls[0][0] as string;
+    const calledUrl = fetchCalls()[0][0];
     expect(calledUrl).toContain('token=mytoken');
   });
 
@@ -176,7 +231,7 @@ describe('executeOperation', () => {
     const service = new EmailService(testConfig, {} as never);
     await service.executeOperation('checkEmails', { auth: { token: 'authtoken' } });
 
-    const calledUrl = (globalThis.fetch as any).mock.calls[0][0] as string;
+    const calledUrl = fetchCalls()[0][0];
     expect(calledUrl).toContain('token=authtoken');
   });
 });
@@ -247,7 +302,7 @@ describe('header auth', () => {
     const service = new EmailService(headerConfig, {} as never);
     await service.executeOperation('createInbox', { auth: { token: 'mykey' } });
 
-    const calledOptions = (globalThis.fetch as any).mock.calls[0][1] as RequestInit;
+    const calledOptions = fetchCalls()[0][1] as RequestInit;
     expect((calledOptions.headers as Record<string, string>)['X-API-Key']).toBe('mykey');
   });
 });
@@ -271,10 +326,12 @@ describe('cookie auth', () => {
       url: 'https://api.test.com/endpoint',
       name: 'PHPSESSID',
       value: 'sid123',
+      secure: true,
+      httpOnly: true,
     });
 
-    const calledUrl = (globalThis.fetch as any).mock.calls[0][0] as string;
-    const calledOptions = (globalThis.fetch as any).mock.calls[0][1] as RequestInit;
+    const calledUrl = fetchCalls()[0][0];
+    const calledOptions = fetchCalls()[0][1] as RequestInit;
     expect(calledUrl).not.toContain('sid123');
     expect((calledOptions.headers as Record<string, string>).Cookie).toBeUndefined();
   });
@@ -300,7 +357,7 @@ describe('forceNewSession', () => {
     const service = new EmailService(forceConfig, {} as never);
     await service.executeOperation('createInbox', { forceNewSession: true });
 
-    const calledOptions = (globalThis.fetch as any).mock.calls[0][1] as RequestInit;
+    const calledOptions = fetchCalls()[0][1] as RequestInit;
     expect((calledOptions.headers as Record<string, string>)['Cache-Control']).toBe('no-cache');
     expect(calledOptions.credentials).toBe('omit');
     expect(calledOptions.cache).toBe('no-store');
@@ -311,12 +368,12 @@ describe('forceNewSession', () => {
 
 function mockFetchRaw(
   responses: Array<{ ok: boolean; status: number; text: () => Promise<string> }>
-) {
+): FetchMock {
   let callIndex = 0;
-  (globalThis as any).fetch = mock(() => {
+  return installFetch(() => {
     const resp = responses[Math.min(callIndex, responses.length - 1)];
     callIndex++;
-    return Promise.resolve(resp) as Promise<Response>;
+    return Promise.resolve({ headers: new Headers(), body: null, ...resp } as Response);
   });
 }
 
@@ -500,8 +557,10 @@ describe('Retry-After header handling', () => {
       get: (name: string) => headersMap.get(name.toLowerCase()) || null,
     } as unknown as Headers;
 
-    (globalThis as any).fetch = mock(() => {
-      if ((globalThis.fetch as any).mock.calls.length === 1) {
+    let attempts = 0;
+    installFetch(() => {
+      attempts++;
+      if (attempts === 1) {
         return Promise.resolve({
           ok: false,
           status: 429,
@@ -531,7 +590,7 @@ describe('Retry-After header handling', () => {
 // ── cookie capture lifecycle ─────────────────────────────────────────────────
 
 describe('cookie capture lifecycle', () => {
-  test('captures configure cookies and sends them back', async () => {
+  test('captures Set-Cookie via getSetCookie and sends them via browser.cookies.set', async () => {
     const config: ProviderConfig = {
       ...testConfig,
       cookies: {
@@ -549,14 +608,17 @@ describe('cookie capture lifecycle', () => {
       },
     };
 
-    const headersMap = new Map<string, string>([
-      ['set-cookie', 'PHPSESSID=xyz789; Path=/, SUBSCR=abc456; Path=/'],
-    ]);
+    // `set-cookie` is a FORBIDDEN response header in a service worker
+    // (headers.get returns null) - capture runs off `getSetCookie()` instead.
     const mockHeaders = {
-      get: (name: string) => headersMap.get(name.toLowerCase()) || null,
+      get: () => null,
+      getSetCookie: () => [
+        'PHPSESSID=xyz789; Path=/',
+        'SUBSCR=abc456; Path=/; Expires=Wed, 21 Oct 2026 07:28:00 GMT',
+      ],
     } as unknown as Headers;
 
-    (globalThis as any).fetch = mock(() => {
+    installFetch(() => {
       return Promise.resolve({
         ok: true,
         status: 200,
@@ -565,19 +627,37 @@ describe('cookie capture lifecycle', () => {
       } as unknown as Response);
     });
 
-    const service = new EmailService(config, {} as never);
+    const cookies = { set: mock(() => Promise.resolve({})) };
+    const service = new EmailService(config, { cookies } as never);
     await service.executeOperation('testOp');
 
     const captured = service.getSessionCookies();
     expect(captured.PHPSESSID).toBe('xyz789');
     expect(captured.SUBSCR).toBe('abc456');
 
+    // Second operation: the captured cookies are written into the browser
+    // cookie jar (credentials: 'include' attaches them) - never a manual
+    // Cookie header, which fetch() would silently drop.
     await service.executeOperation('testOp');
-    const lastFetchCall = (globalThis.fetch as any).mock.calls[1];
+    expect(cookies.set).toHaveBeenCalledWith({
+      url: 'https://api.test.com/endpoint',
+      name: 'PHPSESSID',
+      value: 'xyz789',
+      secure: true,
+      httpOnly: false,
+      path: '/',
+    });
+    expect(cookies.set).toHaveBeenCalledWith({
+      url: 'https://api.test.com/endpoint',
+      name: 'SUBSCR',
+      value: 'abc456',
+      secure: true,
+      httpOnly: false,
+      path: '/',
+    });
+    const lastFetchCall = fetchCalls()[1];
     const requestOptions = lastFetchCall[1] as RequestInit;
-    expect((requestOptions.headers as Record<string, string>).Cookie).toBe(
-      'PHPSESSID=xyz789; SUBSCR=abc456'
-    );
+    expect((requestOptions.headers as Record<string, string>).Cookie).toBeUndefined();
   });
 });
 
@@ -609,7 +689,7 @@ describe('header capture lifecycle', () => {
       get: (name: string) => headersMap.get(name.toLowerCase()) || null,
     } as unknown as Headers;
 
-    (globalThis as any).fetch = mock(() => {
+    installFetch(() => {
       return Promise.resolve({
         ok: true,
         status: 200,
@@ -644,7 +724,7 @@ describe('empty body policy rules', () => {
       },
     };
 
-    (globalThis as any).fetch = mock(() => {
+    installFetch(() => {
       return Promise.resolve({
         ok: true,
         status: 200,
@@ -671,7 +751,7 @@ describe('empty body policy rules', () => {
       },
     };
 
-    (globalThis as any).fetch = mock(() => {
+    installFetch(() => {
       return Promise.resolve({
         ok: true,
         status: 200,
@@ -702,7 +782,7 @@ describe('response required fields validation checking', () => {
       },
     };
 
-    (globalThis as any).fetch = mock(() => {
+    installFetch(() => {
       return Promise.resolve({
         ok: true,
         status: 200,
@@ -729,7 +809,7 @@ describe('response required fields validation checking', () => {
       },
     };
 
-    (globalThis as any).fetch = mock(() => {
+    installFetch(() => {
       return Promise.resolve({
         ok: true,
         status: 200,
@@ -766,7 +846,7 @@ describe('response contract schema validation', () => {
       },
     };
 
-    (globalThis as any).fetch = mock(() => {
+    installFetch(() => {
       return Promise.resolve({
         ok: true,
         status: 200,
@@ -800,7 +880,7 @@ describe('response contract schema validation', () => {
       },
     };
 
-    (globalThis as any).fetch = mock(() => {
+    installFetch(() => {
       return Promise.resolve({
         ok: true,
         status: 200,
@@ -834,7 +914,7 @@ describe('response contract schema validation', () => {
       },
     };
 
-    (globalThis as any).fetch = mock(() => {
+    installFetch(() => {
       return Promise.resolve({
         ok: true,
         status: 200,
@@ -849,9 +929,9 @@ describe('response contract schema validation', () => {
   });
 });
 
-// ── deriveInboxTiming strategy configuration ──────────────────────────────────
+// ── deriveAddressTiming strategy configuration ──────────────────────────────────
 
-describe('deriveInboxTiming strategy configuration', () => {
+describe('deriveAddressTiming strategy configuration', () => {
   test('uses custom createdAt and expiresAt and ttl fields when configured', () => {
     const config: ProviderConfig = {
       ...testConfig,
@@ -871,8 +951,197 @@ describe('deriveInboxTiming strategy configuration', () => {
       custom_expires: 1700086400000,
     };
 
-    const timing = deriveInboxTiming(payload, config);
+    const timing = deriveAddressTiming(payload, config);
     expect(timing.createdAt).toBe(1700000000000);
     expect(timing.expiresAt).toBe(1700086400000);
+  });
+});
+
+// ── applyProviderConfigArray / saveProviderOverridesToStorage error payloads ───
+//
+// These two producers describe why an override was rejected. They used to return
+// the validator's English prose (and, for a duplicate id, a template literal), so
+// the first UI consumer to render them would have shown English in all eight
+// locales - and the id of the offending provider lived in a string that a
+// key-only payload could not carry. The reason is now a `LocalizedMessage`: a
+// stable `errors.*` key with its slot values inside the same value, which is
+// what makes it render (`{id}` filled) rather than leak.
+
+/** Minimal stand-in for svelte-i18n's `$t`, reading the real `en.json`. */
+const EN_ERRORS: Record<string, string> = (() => {
+  const en = JSON.parse(readFileSync(`${PROJECT_ROOT}/src/locales/en.json`, 'utf8')) as Record<
+    string,
+    Record<string, string>
+  >;
+  // Keyed by the path a call site uses (`errors.<name>`), so the fake resolves
+  // exactly the strings the producer names.
+  return Object.fromEntries(
+    Object.entries(en.errors).map(([name, value]) => [`errors.${name}`, value])
+  );
+})();
+
+function fakeT(key: string, options?: { values?: Record<string, string | number> }): string {
+  const template = EN_ERRORS[key];
+  if (template === undefined) return key;
+  const values = options?.values;
+  if (!values) return template;
+  return template.replace(/\{(\w+)\}/g, (match, name: string) =>
+    name in values ? String(values[name]) : match
+  );
+}
+
+/** In-memory stand-in for `browser.storage.local`. */
+function fakeStorage() {
+  const store: Record<string, unknown> = {};
+  return {
+    storage: {
+      local: {
+        set: async (items: Record<string, unknown>) => {
+          Object.assign(store, items);
+        },
+        remove: async (key: string | string[]) => {
+          for (const k of Array.isArray(key) ? key : [key]) delete store[k];
+        },
+      },
+    },
+  };
+}
+
+describe('provider override rejection reasons are keyed, never English prose', () => {
+  // These calls mutate the module-level provider map that `loadProviderConfig()`
+  // serves to every later test file in this process - a successful apply
+  // replaces the bundled providers with `test-provider`. Restore the bundled
+  // list after each case so no other file observes the override.
+  afterEach(() => {
+    resetProviderConfigsToBundled();
+  });
+
+  test('an empty list rejects with the array-required key', () => {
+    const result = applyProviderConfigArray([]);
+
+    expect(result.ok).toBe(false);
+    expect(result.error?.key).toBe('errors.providerConfigArrayRequired');
+    expect(result.error?.values).toBeUndefined();
+  });
+
+  test('a schema-invalid list names the offending field, never the validator message', () => {
+    // `validateProviderConfig` rejects the missing `name` field with a keyed
+    // reason, so the payload names it instead of collapsing to
+    // `errors.providerConfigInvalid` - and never carries its English prose.
+    const result = applyProviderConfigArray([{ id: 'x' } as ProviderConfig]);
+
+    expect(result.ok).toBe(false);
+    expect(result.error?.key).toBe('errors.providerConfigFieldMissing');
+    expect(result.error?.values).toEqual({ field: 'name' });
+    // The whole payload is the key + values: no prose survived anywhere in it.
+    expect(JSON.stringify(result.error)).not.toContain('Provider config');
+    expect(JSON.stringify(result.error)).not.toContain('missing required field');
+  });
+
+  test('the field-naming reason renders with the field substituted', () => {
+    const result = applyProviderConfigArray([
+      { ...testConfig, retry: { ...testConfig.retry, maxAttempts: -1 } },
+    ]);
+
+    const rendered = translateResultMessage(result.error, fakeT);
+    expect(rendered).toContain('retry.maxAttempts');
+    expect(rendered).not.toContain('{');
+  });
+
+  test('a wrong-shape field names the field in the rendered sentence', () => {
+    // Deliberately invalid input, so the fixture has to bypass the declared
+    // types - the validator is what is under test here.
+    const wrongRenewable = {
+      ...testConfig,
+      expiry: { duration: 3_600_000, renewable: 'yes' },
+    } as unknown as ProviderConfig;
+    const result = applyProviderConfigArray([wrongRenewable]);
+
+    expect(result.error?.key).toBe('errors.providerConfigFieldBoolean');
+    const rendered = translateResultMessage(result.error, fakeT);
+    expect(rendered).toContain('expiry.renewable');
+    expect(rendered).not.toContain('{');
+  });
+
+  test('the JSON editor path throws the same field-naming pair', async () => {
+    const rejection = await saveProviderOverridesToStorage(fakeStorage(), [
+      { id: 'x' } as ProviderConfig,
+    ]).then(
+      () => null,
+      (e: unknown) => e
+    );
+
+    const error = rejection as ValidationError;
+    expect(error.translationKey).toBe('errors.providerConfigFieldMissing');
+    expect(error.translationValues).toEqual({ field: 'name' });
+    expect(
+      localizedErrorMessageOrFallback(error, fakeT, 'mailProvider.editJsonSaveFailed')
+    ).toContain('name');
+  });
+
+  test('a duplicate id carries the offending id as a slot value', () => {
+    const result = applyProviderConfigArray([testConfig, { ...testConfig }]);
+
+    expect(result.ok).toBe(false);
+    expect(result.error?.key).toBe('errors.providerConfigDuplicateId');
+    expect(result.error?.values).toEqual({ id: 'test-provider' });
+  });
+
+  test('the rejected reason renders with the id substituted, no {slot} left', () => {
+    const result = applyProviderConfigArray([testConfig, { ...testConfig }]);
+
+    const rendered = translateResultMessage(result.error, fakeT);
+    expect(rendered).toContain('test-provider');
+    expect(rendered).not.toContain('{');
+    expect(rendered).not.toContain('errors.');
+  });
+
+  test('an empty key renders nothing rather than a raw key', () => {
+    // `translateResultMessage` returns '' for a `{slot}` it could not fill, so a
+    // consumer's own `|| $t('…failed')` copy takes over instead of the user
+    // reading `Duplicate provider id "{id}"`.
+    const orphaned = { key: 'errors.providerConfigDuplicateId' };
+
+    expect(translateResultMessage(orphaned, fakeT)).toBe('');
+  });
+
+  test('saveProviderOverridesToStorage throws a keyed ValidationError, not prose', async () => {
+    const ext = fakeStorage();
+
+    const rejection = await saveProviderOverridesToStorage(ext, [
+      testConfig,
+      { ...testConfig },
+    ]).then(
+      () => null,
+      (e: unknown) => e
+    );
+
+    expect(rejection).toBeInstanceOf(ValidationError);
+    const error = rejection as ValidationError;
+    expect(error.translationKey).toBe('errors.providerConfigDuplicateId');
+    expect(error.translationValues).toEqual({ id: 'test-provider' });
+    // The JSON editor's own `localizedErrorMessageOrFallback` path - the reason
+    // the pair has to travel on the error, not just the key.
+    expect(
+      localizedErrorMessageOrFallback(error, fakeT, 'mailProvider.editJsonSaveFailed')
+    ).toContain('test-provider');
+  });
+
+  test('an empty list throws the array-required key', async () => {
+    const rejection = await saveProviderOverridesToStorage(fakeStorage(), []).then(
+      () => null,
+      (e: unknown) => e
+    );
+
+    expect((rejection as ValidationError).translationKey).toBe(
+      'errors.providerConfigArrayRequired'
+    );
+  });
+
+  test('a valid list still saves and applies', async () => {
+    const ext = fakeStorage();
+
+    await expect(saveProviderOverridesToStorage(ext, [testConfig])).resolves.toBeUndefined();
+    expect(applyProviderConfigArray([testConfig]).ok).toBe(true);
   });
 });

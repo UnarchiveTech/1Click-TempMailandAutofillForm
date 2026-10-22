@@ -1,6 +1,6 @@
 <script lang="ts">
 /**
- * In-extension QA playground — documents fixtures and deep-links for autofill testing.
+ * In-extension QA playground - documents fixtures and deep-links for autofill testing.
  */
 import { t } from 'svelte-i18n';
 import { browser } from 'wxt/browser';
@@ -48,11 +48,11 @@ async function copyServeCommand() {
 }
 </script>
 
-<div class="flex flex-col h-full min-h-0">
-  <div class="shrink-0 px-3 pt-2 pb-2 border-b border-md-outline-variant/30 flex items-center gap-2">
+<div class="scroll-frame flex flex-col h-full min-h-0">
+  <div class="scroll-edge shrink-0 pt-2 pb-2 border-b border-md-outline-variant/30 flex items-center gap-2">
     <button
       type="button"
-      class="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-md-surface-variant"
+      class="w-8 h-8 flex items-center justify-center rounded-full hover:bg-md-surface-variant active:bg-md-surface-variant/80"
       aria-label={$t('common.back')}
       onclick={onBack}
     >
@@ -64,7 +64,7 @@ async function copyServeCommand() {
     </div>
   </div>
 
-  <div class="flex-1 min-h-0 overflow-y-auto px-3 py-3 space-y-3">
+  <div class="scroll-body scroll-body-framed flex-1 min-h-0 overflow-y-auto py-3 space-y-3">
     <div class="rounded-xl border border-md-outline-variant/40 bg-md-surface-container-low p-3 space-y-2">
       <p class="text-sm text-md-on-surface">{$t('playground.serveHint')}</p>
       <code class="block text-xs font-mono bg-md-surface px-2 py-1.5 rounded-lg border border-md-outline-variant/30 break-all">
@@ -93,8 +93,6 @@ async function copyServeCommand() {
       </div>
     {/each}
 
-    <div class="rounded-xl border border-md-primary/30 bg-md-primary/5 p-3">
-      <p class="text-xs text-md-on-surface/70">{$t('playground.checklist')}</p>
-    </div>
+    <p class="rounded-xl border border-md-primary/30 bg-md-primary/5 p-3 text-xs text-md-on-surface/70">{$t('playground.checklist')}</p>
   </div>
 </div>

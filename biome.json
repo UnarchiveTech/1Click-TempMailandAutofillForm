@@ -6,7 +6,9 @@
     "useIgnoreFile": true
   },
   "files": {
-    "ignoreUnknown": false
+    "ignoreUnknown": false,
+    "maxSize": 4194304,
+    "includes": ["**", "!tests/visual/preview-responsive-button-layout-module.js"]
   },
   "formatter": {
     "enabled": true,

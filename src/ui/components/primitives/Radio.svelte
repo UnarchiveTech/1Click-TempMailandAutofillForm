@@ -1,10 +1,10 @@
 <script lang="ts">
 /**
- * Radio — MD3 radio button with hover/pressed state layers.
+ * Radio - MD3 radio button with hover/pressed state layers.
  *
  * Renders a real (visually-hidden) <input type="radio"> for semantics and
- * label-activation plus the radioChecked / radioUnchecked glyph. Native radios
- * use bind:group; this component instead takes checked + onchange — the parent
+ * label-activation plus the radioButtonChecked / radioButtonUnchecked glyph. Native radios
+ * use bind:group; this component instead takes checked + onchange - the parent
  * owns the group value (e.g. checked={group === 'a'} onchange={() => group = 'a'}).
  */
 import Icon from '@/ui/components/icons/Icon.svelte';
@@ -15,7 +15,7 @@ interface Props {
   /** Radio group name (form semantics). */
   name?: string;
   value?: string;
-  /** 'md' = 20px glyph, 'sm' = 16px glyph */
+  /** 'md' = 40px target / 24px glyph, 'sm' = 32px target / 20px glyph */
   size?: 'sm' | 'md';
   id?: string;
   class?: string;
@@ -35,23 +35,19 @@ let {
   onchange,
 }: Props = $props();
 
-let inputEl = $state<HTMLInputElement | null>(null);
-
-const glyph = $derived(size === 'sm' ? 'w-4 h-4' : 'w-5 h-5');
+const target = $derived(size === 'sm' ? 'w-8 h-8' : 'w-10 h-10');
+const glyph = $derived(size === 'sm' ? 'w-5 h-5' : 'w-6 h-6');
 </script>
 
 <span
-  class="inline-flex items-center justify-center rounded-full cursor-pointer select-none {disabled
-    ? 'opacity-40 pointer-events-none'
-    : 'hover:bg-md-on-surface/8 active:bg-md-on-surface/12'} transition-colors {className}"
+  class="relative inline-flex shrink-0 items-center justify-center align-middle rounded-full select-none {target} {disabled ? 'opacity-40' : ''} {className}"
 >
   <input
-    bind:this={inputEl}
     {id}
     {name}
     {value}
     type="radio"
-    class="peer sr-only"
+    class="md-choice-input absolute inset-0 w-full h-full opacity-0 cursor-pointer disabled:cursor-not-allowed m-0"
     checked={checked}
     {disabled}
     aria-label={ariaLabel}
@@ -61,17 +57,11 @@ const glyph = $derived(size === 'sm' ? 'w-4 h-4' : 'w-5 h-5');
     }}
   />
   <span
-    class="flex items-center justify-center rounded-full peer-focus-visible:ring-2 peer-focus-visible:ring-md-primary/40 {glyph} {checked
+    class="md-choice-state flex items-center justify-center rounded-full pointer-events-none transition-colors {target} {checked
       ? 'text-md-primary'
-      : 'text-md-on-surface/30'}"
+      : 'text-md-on-surface-variant'}"
     aria-hidden="true"
-    onclick={(e) => {
-      if (disabled) return;
-      // Stop the outer label from double-toggling; toggle once via the input.
-      e.preventDefault();
-      inputEl?.click();
-    }}
   >
-    <Icon name={checked ? 'radioChecked' : 'radioUnchecked'} class={glyph} />
+    <Icon name={checked ? 'radioButtonChecked' : 'radioButtonUnchecked'} class={glyph} />
   </span>
 </span>

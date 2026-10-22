@@ -3,7 +3,7 @@
  */
 
 export { classifyFieldA11y, getAccessibleName } from './a11y-fields.js';
-export { getActiveInboxMeta } from './active-inbox-meta.js';
+export { getActiveAddressMeta } from './active-inbox-meta.js';
 export type { AddressUsageMap, AddressUsageSite } from './address-usage.js';
 export { getAddressUsageDomains, getAddressUsageMap } from './address-usage.js';
 export { buildAutofillPlan } from './autofill-plan.js';
@@ -15,7 +15,7 @@ export {
   recordAutofillSuccess,
 } from './blocklist-learn.js';
 export {
-  createFreshInboxAddress,
+  createFreshAddress,
   pageShowsEmailConflict,
   pageShowsOtpFailure,
   pageShowsUsernameConflict,
@@ -39,10 +39,10 @@ export type { FreshnessCandidate } from './freshness.js';
 export { pickFreshestIdentity, rankIdentitiesForSignup } from './freshness.js';
 export { rememberIdentityForDomain, routeIdentityForDomain } from './identity-router.js';
 export {
-  getLifecycleForInbox,
+  getLifecycleForAddress,
   recomputeLifecycleFromStorage,
-  recordInboxAutofill,
-  recordInboxMailSignals,
+  recordAddressAutofill,
+  recordAddressMailSignals,
   suggestLifecycleActions,
 } from './inbox-lifecycle.js';
 export {
@@ -57,13 +57,6 @@ export {
   isInQuietHours,
   isOtpOrMagic,
 } from './notification-policy.js';
-export type { SignupOutcomeStatus } from './post-submit.js';
-export {
-  looksLikeSignupSuccess,
-  markLatestCredentialStatus,
-  markLatestCredentialVerified,
-  watchPostSubmitSuccess,
-} from './post-submit.js';
 export {
   getBestHealthyProvider,
   getProviderFailoverOrder,
@@ -74,12 +67,15 @@ export {
   recordProviderFetch,
   resolveCreateProvider,
 } from './provider-health.js';
+export type { SignupOutcomeStatus } from './signup-attempts.js';
+export { detectSignupPage } from './signup-page.js';
+export type { SignupAttemptRef, SignupProgress } from './signup-state.js';
 export { recordAutofillOutcome, shouldPreferReplay } from './site-memory.js';
 export type { SiteRule, SiteRuleMatch } from './site-rules.js';
 export {
   clearArchiveSchedule,
   deleteSiteRule,
-  getDueArchiveInboxIds,
+  getDueArchiveAddressIds,
   loadSiteRules,
   matchSiteRule,
   resolveRuleIdentityId,
@@ -91,13 +87,14 @@ export {
 export type { SmartAutofillSettings } from './smart-settings.js';
 export {
   DEFAULT_SMART_AUTOFILL,
+  initializeSmartAutofillSettings,
   loadSmartAutofillSettings,
   saveSmartAutofillSettings,
 } from './smart-settings.js';
 export {
   getSiteProfile,
+  loadAddressLifecycleMap,
   loadIdentityStickyMap,
-  loadInboxLifecycleMap,
   loadNotificationIntelligence,
   loadProviderHealthMap,
   loadSiteProfiles,

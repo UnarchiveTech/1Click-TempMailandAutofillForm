@@ -9,263 +9,12 @@
  * before pattern matching so they don't break token detection.
  */
 
-const OTP_KEYWORDS_BY_LANG: Record<string, readonly string[]> = {
-  en: [
-    'code',
-    'codes',
-    'otp',
-    'pin',
-    'password',
-    'passcode',
-    'pass',
-    'verification',
-    'verify',
-    'confirm',
-    'confirmation',
-    'authenticate',
-    'authentication',
-    'security',
-    'secure',
-    'login',
-    'signin',
-    'sign-in',
-    'one time password',
-    'one-time password',
-    'security code',
-    'confirm code',
-  ],
-  de: [
-    'code',
-    'passwort',
-    'pin',
-    'kennwort',
-    'zugang',
-    'sicherheit',
-    'verifizierung',
-    'bestätigung',
-    'bestatigung',
-    'authentifizierung',
-    'sicherheitscode',
-    'bestätigungscode',
-    'bestatigungscode',
-    'verifizierungscode',
-    'zugangscode',
-    'einmalkennwort',
-    'einmalpasswort',
-    'anmeldecode',
-  ],
-  fr: [
-    'code',
-    'mot de passe',
-    'mot passe',
-    'pin',
-    'passe',
-    'vérification',
-    'verification',
-    'confirmation',
-    'authentification',
-    'code de vérification',
-    'code de verification',
-    'code confidentiel',
-    'code secret',
-  ],
-  es: [
-    'código',
-    'codigo',
-    'contraseña',
-    'contrasena',
-    'clave',
-    'pin',
-    'verificación',
-    'verificacion',
-    'confirmación',
-    'confirmacion',
-    'autenticación',
-    'autenticacion',
-    'código de verificación',
-    'codigo de verificacion',
-    'código de confirmación',
-    'codigo de confirmacion',
-    'código de seguridad',
-    'codigo de seguridad',
-  ],
-  it: [
-    'codice',
-    'password',
-    'pin',
-    'pass',
-    'passcode',
-    'verifica',
-    'conferma',
-    'autenticazione',
-    'codice di verifica',
-    'codice di conferma',
-    'codice di sicurezza',
-  ],
-  pt: [
-    'código',
-    'codigo',
-    'senha',
-    'pin',
-    'passe',
-    'palavra-passe',
-    'verificação',
-    'verificacao',
-    'confirmação',
-    'confirmacao',
-    'autenticação',
-    'autenticacao',
-    'código de verificação',
-    'codigo de verificacao',
-    'código de confirmação',
-    'codigo de confirmacao',
-    'código de segurança',
-    'codigo de seguranca',
-  ],
-  nl: [
-    'code',
-    'pin',
-    'wachtwoord',
-    'toegangscode',
-    'inlogcode',
-    'verificatie',
-    'bevestiging',
-    'authenticatie',
-    'beveiliging',
-    'verificatiecode',
-    'beveiligingscode',
-    'bevestigingscode',
-  ],
-  ru: [
-    'код',
-    'пароль',
-    'пин',
-    'подтверждение',
-    'проверка',
-    'верификация',
-    'аутентификация',
-    'код подтверждения',
-    'код проверки',
-  ],
-  ja: [
-    'コード',
-    '認証',
-    '確認',
-    'パスワード',
-    'セキュリティ',
-    '暗証番号',
-    'パスコード',
-    '認証コード',
-    '確認コード',
-    'セキュリティコード',
-    'ワンタイムパスワード',
-    'パスコード',
-  ],
-  'zh-CN': [
-    '验证码',
-    '校验码',
-    '密码',
-    '确认码',
-    '动态密码',
-    '安全码',
-    '一次性密码',
-    '验证',
-    '校验',
-    '确认',
-    '认证',
-    '授权',
-    '身份验证',
-    '动态码',
-  ],
-  'zh-TW': [
-    '確認碼',
-    '驗證碼',
-    '密碼',
-    '確認',
-    '驗證',
-    '認證',
-    '動態密碼',
-    '一次性密碼',
-    '安全碼',
-    '授權',
-    '身份驗證',
-    '動態碼',
-  ],
-  ko: [
-    '인증번호',
-    '인증코드',
-    '인증',
-    '비밀번호',
-    '비번',
-    '패스워드',
-    '확인',
-    '확인코드',
-    '보안',
-    '보안코드',
-    '일회용 비밀번호',
-    '일회용 암호',
-  ],
-  ar: [
-    'رمز التحقق',
-    'رمز التأكيد',
-    'كلمة المرور',
-    'كود التحقق',
-    'كود التأكيد',
-    'كود',
-    'رمز',
-    'تأكيد',
-    'تحقق',
-    'مصادقة',
-  ],
-  hi: [
-    'सत्यापन कोड',
-    'सुरक्षा कोड',
-    'पुष्टि कोड',
-    'ओटीपी',
-    'पासवर्ड',
-    'पिन',
-    'कोड',
-    'सत्यापन',
-    'पुष्टि',
-    'सुरक्षा',
-    'प्रमाणीकरण',
-  ],
-  tr: [
-    'doğrulama kodu',
-    'dogrulama kodu',
-    'güvenlik kodu',
-    'guvenlik kodu',
-    'onay kodu',
-    'doğrulama',
-    'dogrulama',
-    'güvenlik',
-    'guvenlik',
-    'onay',
-    'kod',
-    'şifre',
-    'sifre',
-    'pin',
-    'parola',
-  ],
-};
+import otpDetectionLexicon from '@/config/otp-detection-lexicon.json';
+import { decodeHtmlEntities } from '@/utils/email/decode-html-entities.js';
+import { createOtpEvidenceChecker, stripTelephoneLinks } from '@/utils/otp/email-code-evidence.js';
 
-const EXPIRY_LANGUAGE_BY_LANG: Record<string, readonly string[]> = {
-  en: ['valid for', 'expires in', 'expire', 'expires', 'expiry'],
-  de: ['gültig für', 'gultig fur', 'läuft ab', 'lauft ab', 'verfällt', 'verfallt', 'gültig bis'],
-  fr: ['valable pour', 'valide pour', 'expire dans', 'valable jusqu', 'expire le'],
-  es: ['válido por', 'valido por', 'válido hasta', 'valido hasta', 'expira en', 'caduca en'],
-  it: ['valido per', 'scade in', 'valido fino a', 'scade il'],
-  pt: ['válido por', 'valido por', 'válido até', 'valido ate', 'expira em'],
-  nl: ['geldig voor', 'geldig tot', 'verloopt over', 'verloopt in'],
-  ru: ['действителен', 'истекает', 'истечёт', 'истечет', 'до конца'],
-  ja: ['有効期限', 'まで有効', 'の間有効', '失効'],
-  'zh-CN': ['有效期限', '过期', '失效', '有效时间'],
-  'zh-TW': ['有效期限', '過期', '失效', '有效時間'],
-  ko: ['유효 기간', '만료', '유효시간'],
-  ar: ['صالح حتى', 'ينتهي', 'صالحة لمدة'],
-  hi: ['के लिए मान्य', 'समाप्त', 'मान्य तक'],
-  tr: ['kadar geçerli', 'sona erer', 'geçerlilik', 'süresi'],
-};
+const OTP_KEYWORDS_BY_LANG = otpDetectionLexicon.otpKeywords;
+const EXPIRY_LANGUAGE_BY_LANG = otpDetectionLexicon.expiryKeywords;
 
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -282,35 +31,66 @@ function buildKeywordAlternation(byLang: Record<string, readonly string[]>): str
     .join('|');
 }
 
-const KEYWORD_GROUP = buildKeywordAlternation(OTP_KEYWORDS_BY_LANG);
+// Latin keywords must be whole words: "pin" inside "shipping" and "pass"
+// inside longer prose/base64 strings are not verification context. CJK words
+// still match adjacent localized text without Latin word boundaries.
+const KEYWORD_GROUP = `(?<![a-zA-Z])(?:${buildKeywordAlternation(OTP_KEYWORDS_BY_LANG)})(?![a-zA-Z])`;
 const EXPIRY_GROUP = buildKeywordAlternation(EXPIRY_LANGUAGE_BY_LANG);
+const NON_OTP_NUMBER_GROUP = buildKeywordAlternation(otpDetectionLexicon.nonOtpNumberKeywords);
+const NON_OTP_NUMBER_SUFFIX =
+  '(?:\\s*[:#]|\\s+(?:number|no\\.?|id)(?:\\s+(?:is|was|are))?|\\s+(?:is|was|are)|[-_]+)?';
+const NON_OTP_NUMBER_LABEL_AT_END = new RegExp(
+  `(?:${NON_OTP_NUMBER_GROUP})${NON_OTP_NUMBER_SUFFIX}\\s*$`,
+  'iu'
+);
 
 const YOUR_POSSESSIVES =
   '(?:your|this|the|votre|tu|dein|deine|ihr|euer|sein|ihre|ihr|tu|su|su|sus|uw|jouw|je|mon|ma|mes|son|sa|tuo|tua|il|la|lo|i|gli|le)';
 
-const ORDER_INVOICE_GUARD = '(?<!order\\s*#?|invoice\\s*#?|item\\s*#?|tracking\\s*#?|ticket\\s*#?)';
+// Words that typically precede a NON-OTP number: "Order 12345", "Invoice no.
+// 567890", "Reference: 123456", "your balance is 1234". The lookbehind blocks
+// a code-shaped token when one of these immediately precedes it, so order /
+// invoice / tracking / reference numbers are never surfaced as OTPs. Covers
+// the colon form ("Order: 123456"), the "number" form ("order number 123456"),
+// and the copula form ("your balance is 1234").
+const ORDER_INVOICE_GUARD = `(?<!(?:${NON_OTP_NUMBER_GROUP})${NON_OTP_NUMBER_SUFFIX}\\s*#?\\s*)`;
+
+// Code-shaped capture: 3-8 alphanumeric chars with OPTIONAL single dashes or
+// spaces between them, so "XY-4829" / "AB-12-34" / "123 456" are captured in
+// full and normalized ("XY4829" etc.) instead of truncating to their numeric
+// tail.
+const CODE_CAPTURE = '([a-zA-Z0-9](?:[- ]?[a-zA-Z0-9]){2,7})';
+
+// Reject pure-letter tokens - including separated runs like "at https" or
+// "a-b-c" - so words are never captured as codes. Digits or a dash/spaces
+// adjacent to a digit break the letter-only run and let the capture through.
+const NOT_PURE_LETTERS = '(?![a-zA-Z](?:[- ]?[a-zA-Z]){2,7}\\b)';
 
 const PATTERNS: readonly RegExp[] = [
-  // 1. Standalone 4-8 char token on its own line. Guarded against order/invoice
-  //    /tracking/ticket numbers so "Order #12345678" on its own line doesn't win
-  //    over a keyword-anchored OTP elsewhere in the body.
-  new RegExp(`^\\s*(?![a-zA-Z]{4,8}$)${ORDER_INVOICE_GUARD}([a-zA-Z0-9]{4,8})\\s*$`, 'm'),
-  // 2. Keyword : code
+  // 1. Keyword : code
   new RegExp(
-    `(?:${KEYWORD_GROUP})[\\s\\S]{0,75}[:：]\\s*\\b(?![a-zA-Z]{3,8}\\b)${ORDER_INVOICE_GUARD}([a-zA-Z0-9]{3,8})\\b`,
+    `(?:${KEYWORD_GROUP})[\\s\\S]{0,75}[:：]\\s*\\b${NOT_PURE_LETTERS}${ORDER_INVOICE_GUARD}${CODE_CAPTURE}\\b`,
     'iu'
   ),
-  // 3. (possessive) + keyword + (is|below) + code
+  // 2. (possessive) + keyword + (is|below) + code
   new RegExp(
-    `(?:${YOUR_POSSESSIVES}\\s+)?(?:${KEYWORD_GROUP})\\s*(?:is|below|=|:|：)?\\s*\\b(?![a-zA-Z]{3,8}\\b)${ORDER_INVOICE_GUARD}([a-zA-Z0-9]{3,8})\\b`,
+    `(?:${YOUR_POSSESSIVES}\\s+)?(?:${KEYWORD_GROUP})\\s*(?:is|below|=|:|：)?\\s*\\b${NOT_PURE_LETTERS}${ORDER_INVOICE_GUARD}${CODE_CAPTURE}\\b`,
     'iu'
   ),
-  // 4. Keyword ... 3-8 digit code (proximity)
+  // 3. Keyword ... 3-8 digit code (proximity)
   new RegExp(`(?:${KEYWORD_GROUP})[\\s\\S]{0,50}\\b${ORDER_INVOICE_GUARD}(\\d{3,8})\\b`, 'iu'),
+  // 4. Standalone 4-8 char token on its own line. Runs AFTER the keyword
+  //    patterns so a stray "2026" line cannot beat "Your code is 482901",
+  //    and is guarded against order/invoice/tracking numbers.
+  /^(?![a-zA-Z]{4,8}$)([a-zA-Z0-9](?:[- ]?[a-zA-Z0-9]){3,7})$/iu,
 ];
 
-// Subject-only: first 3-8 char alphanumeric token (last-resort permissive)
-const SUBJECT_FALLBACK = /\b(?![a-zA-Z]{3,8}\b)([a-zA-Z0-9]{3,8})\b/;
+// Subject-only fallback: a code-only subject, optionally prefixed Re/Fwd.
+// Ordinary headlines and numbers embedded in prose are not OTP evidence.
+const SUBJECT_FALLBACK = new RegExp(
+  `^(?:(?:re|fw|fwd):\\s*)?${NOT_PURE_LETTERS}${CODE_CAPTURE}$`,
+  'iu'
+);
 
 // Expiration-language fallback
 const EXPIRY_FALLBACK_PATTERN = new RegExp(
@@ -330,8 +110,151 @@ const BLOCK_PAIR_PATTERN = new RegExp(
   'gi'
 );
 
-function extractFromBlockTags(html: string): string | null {
+// OTP keyword test over a tag-stripped window (built once, shared by blocks).
+// `g` is required for matchAll.
+const BLOCK_KEYWORD_TEST = new RegExp(`(?:${KEYWORD_GROUP})`, 'giu');
+const OTP_CONTEXT_TEST = new RegExp(KEYWORD_GROUP, 'iu');
+
+// How far (in stripped chars) an OTP keyword may sit from a code-shaped block
+// element for the block to count as "anchored". Transactional emails usually
+// render the code in a block right under the "Your code is" paragraph.
+const BLOCK_KEYWORD_WINDOW = 600;
+
+// Class/id attributes that mark a block element as an OTP container even with
+// no nearby keyword text (e.g. <div class="otp-code">123456</div>).
+const BLOCK_CLASS_HINT = /(?:class|id)\s*=\s*["'][^"']*["']/i;
+
+function getLocalizedMonthNames(): string[] {
+  const names = new Set<string>();
+  const locales = new Set(['en-US', ...Object.keys(OTP_KEYWORDS_BY_LANG)]);
+
+  for (const locale of locales) {
+    for (let month = 0; month < 12; month++) {
+      const date = new Date(Date.UTC(2026, month, 17));
+      for (const options of [
+        { month: 'long' as const },
+        { month: 'short' as const },
+        { day: 'numeric' as const, month: 'long' as const, year: 'numeric' as const },
+      ]) {
+        try {
+          const formatted = new Intl.DateTimeFormat(locale, { ...options, timeZone: 'UTC' });
+          const monthPart = options.day
+            ? formatted.formatToParts(date).find((part) => part.type === 'month')?.value
+            : formatted.format(date);
+          if (monthPart?.trim()) names.add(monthPart.trim());
+        } catch {
+          // Unsupported locale: the remaining locales still cover date names.
+        }
+      }
+    }
+  }
+
+  return [...names].sort((a, b) => b.length - a.length);
+}
+
+const MONTH_NAME_GROUP = getLocalizedMonthNames().map(escapeRegex).join('|');
+const WRITTEN_DATE_PATTERNS = [
+  new RegExp(`(?:${MONTH_NAME_GROUP})\\.?\\s+\\d{1,2}(?:st|nd|rd|th)?[,]?\\s+\\d{4}`, 'giu'),
+  new RegExp(
+    `\\d{1,2}(?:st|nd|rd|th)?[.]?\\s+(?:de\\s+)?(?:${MONTH_NAME_GROUP})(?:\\s+de)?[,]?\\s+\\d{4}`,
+    'giu'
+  ),
+  new RegExp(`\\d{4}\\s+(?:${MONTH_NAME_GROUP})\\s+\\d{1,2}`, 'giu'),
+];
+const CJK_DATE_PATTERN =
+  /(?<!\d)(?:19|20|21)\d{2}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日?(?!\d)|(?<!\d)(?:19|20|21)\d{2}\s*년\s*\d{1,2}\s*월\s*\d{1,2}\s*일?(?!\d)/giu;
+const COMPACT_DATE_PATTERN = /\b(?:19|20|21)\d{6}\b/g;
+const OTP_LABEL_AT_END = new RegExp(
+  `(?:${KEYWORD_GROUP})\\s*(?:(?:is|below)\\s*)?[:：=]?\\s*$`,
+  'iu'
+);
+
+function isValidCompactDate(value: string): boolean {
+  if (!/^(?:19|20|21)\d{6}$/.test(value)) return false;
+  const year = Number(value.slice(0, 4));
+  const month = Number(value.slice(4, 6));
+  const day = Number(value.slice(6, 8));
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return (
+    month >= 1 &&
+    month <= 12 &&
+    day >= 1 &&
+    date.getUTCFullYear() === year &&
+    date.getUTCMonth() === month - 1 &&
+    date.getUTCDate() === day
+  );
+}
+
+function hasWrittenDate(text: string, containing?: string): boolean {
+  for (const pattern of WRITTEN_DATE_PATTERNS) {
+    const matcher = new RegExp(pattern.source, pattern.flags);
+    for (const match of text.matchAll(matcher)) {
+      if (!containing || match[0].includes(containing)) return true;
+    }
+  }
+  return false;
+}
+
+function maskDateLikeText(text: string): string {
+  let masked = text;
+  for (const pattern of WRITTEN_DATE_PATTERNS) {
+    masked = masked.replace(pattern, ' ');
+  }
+  return masked
+    .replace(CJK_DATE_PATTERN, ' ')
+    .replace(COMPACT_DATE_PATTERN, (date, offset, source) => {
+      if (!isValidCompactDate(date)) return date;
+      const preceding = source.slice(Math.max(0, offset - 80), offset);
+      return OTP_LABEL_AT_END.test(preceding) ? date : ' ';
+    });
+}
+
+function nearestOtpKeywordDistance(
+  html: string,
+  index: number,
+  length: number,
+  inner: string
+): number | null {
+  const start = Math.max(0, index - BLOCK_KEYWORD_WINDOW);
+  const end = Math.min(html.length, index + length + BLOCK_KEYWORD_WINDOW);
+  const windowText = html
+    .slice(start, end)
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&#?\w+;?/g, ' ')
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+  // Locate the candidate text within the window (raw form, then de-separated).
+  let innerPos = -1;
+  for (const candidate of [inner.toLowerCase(), inner.replace(/[- ]/g, '').toLowerCase()]) {
+    innerPos = windowText.indexOf(candidate);
+    if (innerPos !== -1) break;
+  }
+  if (innerPos === -1) return null;
+  let best: number | null = null;
+  for (const km of windowText.matchAll(BLOCK_KEYWORD_TEST)) {
+    if (km.index === undefined) continue;
+    const dist = Math.abs(km.index - innerPos);
+    if (best === null || dist < best) best = dist;
+  }
+  return best;
+}
+
+function hasNearbyNonOtpNumberLabel(html: string, index: number): boolean {
+  const precedingText = html
+    .slice(Math.max(0, index - 120), index)
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&#?\w+;?/g, ' ')
+    .replace(/\s+/g, ' ');
+  return NON_OTP_NUMBER_LABEL_AT_END.test(precedingText);
+}
+
+function extractFromBlockTags(html: string, allowUnanchored = false): string | null {
   const noComments = html.replace(/<!--[\s\S]*?-->/g, ' ');
+  const assessEvidence = createOtpEvidenceChecker('', html);
+  let best: { normalized: string; distance: number } | null = null;
+  let firstUnanchored: string | null = null;
   for (const match of noComments.matchAll(BLOCK_PAIR_PATTERN)) {
     const inner = match[2]
       .replace(/<[^>]+>/g, ' ')
@@ -342,32 +265,48 @@ function extractFromBlockTags(html: string): string | null {
     // Must be 3-8 chars, code-shaped (alphanumeric with optional inner dashes/spaces),
     // and contain at least one digit. The digit requirement rejects words like
     // "Hello" or "Customer" that happen to land in a block element.
-    if (/^[a-zA-Z0-9][- a-zA-Z0-9]{1,6}[a-zA-Z0-9]$/.test(inner) && /\d/.test(inner)) {
-      const normalized = normalizeOtp(inner);
-      if (normalized) return normalized;
-    }
-  }
-  return null;
-}
+    if (!/^[a-zA-Z0-9][- a-zA-Z0-9]{1,6}[a-zA-Z0-9]$/.test(inner) || !/\d/.test(inner)) continue;
+    const normalized = normalizeOtp(inner);
+    if (!normalized) continue;
+    if (assessEvidence(normalized) === 'rejected') continue;
 
-function decodeHtmlEntities(text: string): string {
-  return text
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/&quot;/gi, '"')
-    .replace(/&apos;/gi, "'")
-    .replace(/&#39;/g, "'")
-    .replace(/&#x27;/gi, "'")
-    .replace(/&#(\d+);/g, (_, dec) => {
-      const code = Number.parseInt(dec, 10);
-      return code >= 0 && code <= 0x10ffff ? String.fromCodePoint(code) : '';
-    })
-    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => {
-      const code = Number.parseInt(hex, 16);
-      return code >= 0 && code <= 0x10ffff ? String.fromCodePoint(code) : '';
-    });
+    // Class/id hint (e.g. <div class="otp">) is the strongest anchor signal.
+    const openTag = match[0].match(/^<[^>]*>/)?.[0] ?? '';
+    const hintAttribute = openTag.match(BLOCK_CLASS_HINT)?.[0] || '';
+    const classHinted =
+      /(?:^|["'\s_-])(?:otp(?:[-_]?code)?|pin(?:[-_]?code)?|pass(?:word|code)?|verif(?:ication)?|confirm(?:ation)?|secur(?:ity)?|token|auth(?:entication)?|one[-_]?time)(?=$|["'\s_-])/i.test(
+        hintAttribute
+      );
+    if (match.index === undefined) continue;
+    if (!classHinted) {
+      const context = normalizeBody(
+        noComments.slice(Math.max(0, match.index - 100), match.index + match[0].length + 100)
+      );
+      const innerContextIndex = context.indexOf(inner);
+      const hasExplicitOtpLabel =
+        innerContextIndex >= 0 && OTP_LABEL_AT_END.test(context.slice(0, innerContextIndex));
+      if ((isValidCompactDate(inner) && !hasExplicitOtpLabel) || hasWrittenDate(context, inner)) {
+        continue;
+      }
+    }
+    // Structured number blocks are useful for OTP mail, but transactional
+    // templates also put order/tracking IDs in their own table cells. Keep a
+    // nearby localized non-OTP label from being overridden by the block
+    // shortcut; an explicit OTP class or nearby OTP wording still wins.
+    if (!classHinted && hasNearbyNonOtpNumberLabel(noComments, match.index)) continue;
+    const distance = classHinted
+      ? 0
+      : nearestOtpKeywordDistance(noComments, match.index, match[0].length, inner);
+    if (distance === null) {
+      if (/[a-z]/i.test(normalized) && normalizeBody(noComments).trim() !== inner) continue;
+      // Keep code-only templates as a last resort, but never promote an
+      // unlabelled footer year into an OTP.
+      if (!/^(?:19|20)\d{2}$/.test(normalized)) firstUnanchored ??= normalized;
+      continue;
+    }
+    if (!best || distance < best.distance) best = { normalized, distance };
+  }
+  return best?.normalized ?? (allowUnanchored ? firstUnanchored : null);
 }
 
 function normalizeOtp(candidate: string): string | null {
@@ -403,7 +342,7 @@ function normalizeBody(body: string | undefined): string {
 function maskNonOtpNumericPatterns(text: string): string {
   if (!text) return '';
   return (
-    text
+    maskDateLikeText(text)
       // Mask ISO dates (e.g. 2026-07-04 or 2026/07/04)
       .replace(/\b\d{4}[-/.]\d{1,2}[-/.]\d{1,2}\b/g, ' ')
       // Mask standard dates (e.g. 07/04/2026 or 07-04-2026)
@@ -412,12 +351,17 @@ function maskNonOtpNumericPatterns(text: string): string {
       .replace(/(?:\+?\d{1,3}[- .]?)?\(?\d{3}\)?[- .]?\d{3}[- .]?\d{4}/g, ' ')
       // Mask timestamps (e.g. 14:30:15)
       .replace(/\b\d{1,2}:\d{2}(?::\d{2})?\b/g, ' ')
+      // Device-login notices contain public IPs, not verification codes.
+      .replace(/\b\d{1,3}(?:\.\d{1,3}){3}\b/g, ' ')
   );
 }
 
-// Collapse dashes/spaces between digits so that "Code: 123-456" matches as
-// "Code: 123456". This only affects digit-boundary punctuation, leaving
-// "Item 12-34" alone (the dash there is between letters).
+// Collapse dashes/spaces between DIGITS so that "Code: 123-456" matches as
+// "Code: 123456". Deliberately digit-only: merging letter-adjacent spaces
+// would destroy \b boundaries in prose ("Your code is 482901"). Letter-
+// prefixed codes like "XY-4829" are instead handled by the separator-tolerant
+// capture groups (CODE_CAPTURE) in the patterns. Runs after date/phone/
+// timestamp masking.
 function collapseDigitSeparators(text: string): string {
   const masked = maskNonOtpNumericPatterns(text);
   return masked.replace(/(\d)[- ]+(?=\d)/g, '$1');
@@ -429,8 +373,15 @@ export type OtpDetectionMode = 'numeric' | 'alphanumeric' | 'balanced';
 /** Module default; background may set from storage before parse runs. */
 let activeOtpMode: OtpDetectionMode = 'balanced';
 
+/** Master switch for OTP extraction (default ON; set from storage). */
+let otpDetectionEnabled = true;
+
 export function setOtpDetectionMode(mode: OtpDetectionMode): void {
   activeOtpMode = mode === 'numeric' || mode === 'alphanumeric' ? mode : 'balanced';
+}
+
+export function setOtpDetectionEnabled(enabled: boolean): void {
+  otpDetectionEnabled = enabled;
 }
 
 export function getOtpDetectionMode(): OtpDetectionMode {
@@ -448,7 +399,7 @@ function passesModeFilter(otp: string, mode: OtpDetectionMode): boolean {
     if (/^[a-zA-Z]+$/.test(otp)) return false;
     return /[a-zA-Z]/.test(otp) && /[0-9]/.test(otp);
   }
-  // balanced: current behavior — digits or mixed codes
+  // balanced: current behavior - digits or mixed codes
   if (digitsOnly) return true;
   if (/^[a-zA-Z]+$/.test(otp)) return false;
   return true;
@@ -459,8 +410,18 @@ export function extractOTP(
   body: string | undefined,
   mode: OtpDetectionMode = activeOtpMode
 ): string | null {
-  // 1. Block-level HTML detection. Runs on raw body before any normalization
-  //    so the structural signal is preserved. High-confidence shortcut.
+  if (!otpDetectionEnabled) return null;
+  body = stripTelephoneLinks(body || '');
+  if (
+    /\b(?:off|discount|voucher|coupon|sale)\b/i.test(normalizeSubject(subject)) &&
+    /\b(?:using|use|apply|enter)\s+(?:the\s+)?(?:promo\s+)?code\b/i.test(normalizeBody(body)) &&
+    !/verification|verify|one[- ]?time|login\s+code|sign[- ]?in\s+code|\botp\b/i.test(subject || '')
+  )
+    return null;
+  // 1. Explicitly anchored block-level HTML detection. Runs on raw body before
+  //    normalization so the structural signal is preserved. Unanchored blocks
+  //    are deferred until after keyword patterns so a footer year cannot beat
+  //    a real code in the subject or body.
   if (body) {
     const blockOtp = extractFromBlockTags(body);
     if (blockOtp && passesModeFilter(blockOtp, mode)) return blockOtp;
@@ -476,6 +437,12 @@ export function extractOTP(
     const normalizedBody = collapseDigitSeparators(normalizeBody(body));
     otp = findOtpInText(normalizedBody, false);
     if (otp && passesModeFilter(otp, mode)) return otp;
+
+    // Structural fallback runs only after subject and body keyword matches.
+    // It preserves code-only HTML while letting a labelled code outrank an
+    // unrelated earlier number block.
+    const blockFallback = extractFromBlockTags(body, true);
+    if (blockFallback && passesModeFilter(blockFallback, mode)) return blockFallback;
   }
 
   return null;
@@ -483,16 +450,54 @@ export function extractOTP(
 
 export function findOtpInText(text: string, isSubject: boolean): string | null {
   if (!text) return null;
+  const assessEvidence = createOtpEvidenceChecker('', text);
 
   const patterns = [...PATTERNS];
   if (isSubject) patterns.push(SUBJECT_FALLBACK);
 
-  for (const pattern of patterns) {
-    const match = text.match(pattern);
-    const captured = match?.[1];
-    if (!captured) continue;
-    const normalized = normalizeOtp(captured);
-    if (normalized) return normalized;
+  for (const [index, pattern] of patterns.entries()) {
+    if (index === 3) {
+      // Trim each line before testing. An unbounded whitespace prefix combined
+      // with the backwards number-label guard used to backtrack for tens of
+      // seconds on ordinary HTML newsletters containing many blank lines.
+      for (const line of text.matchAll(/[^\r\n]+/g)) {
+        const candidate = line[0].trim();
+        if (candidate.length < 4 || candidate.length > 15) continue;
+        const captured = candidate.match(pattern)?.[1];
+        if (!captured) continue;
+        // Mixed prose such as "0 pts", "2ndFloor" and "2 min" is not a
+        // standalone OTP. Mixed codes elsewhere still use keyword/class
+        // evidence; a body containing only the code remains supported.
+        if (/[a-z]/i.test(captured) && text.trim() !== candidate) {
+          const offset = line.index ?? 0;
+          const context =
+            text.slice(Math.max(0, offset - 100), offset) +
+            text.slice(offset + line[0].length, offset + line[0].length + 100);
+          if (!OTP_CONTEXT_TEST.test(context)) continue;
+        }
+        const preceding = text.slice(Math.max(0, (line.index ?? 0) - 120), line.index);
+        if (NON_OTP_NUMBER_LABEL_AT_END.test(preceding)) continue;
+        if (
+          /^\d{5}(?:\d{4})?$/.test(candidate) &&
+          /(?:,\s*[A-Z]{2}|postal\s+code|postcode|zip(?:\s+code)?)\s*=?\s*$/i.test(preceding)
+        )
+          continue;
+        const normalized = normalizeOtp(captured);
+        if (
+          normalized &&
+          !/^(?:19|20)\d{2}$/.test(normalized) &&
+          assessEvidence(normalized) !== 'rejected'
+        )
+          return normalized;
+      }
+      continue;
+    }
+    for (const match of text.matchAll(new RegExp(pattern.source, `${pattern.flags}g`))) {
+      const captured = match[1];
+      if (!captured) continue;
+      const normalized = normalizeOtp(captured);
+      if (normalized && assessEvidence(normalized) !== 'rejected') return normalized;
+    }
   }
 
   if (EXPIRY_TEST_PATTERN.test(text)) {
@@ -500,7 +505,7 @@ export function findOtpInText(text: string, isSubject: boolean): string | null {
     const candidate = match?.[1];
     if (candidate) {
       const normalized = normalizeOtp(candidate);
-      if (normalized) return normalized;
+      if (normalized && assessEvidence(normalized) !== 'rejected') return normalized;
     }
   }
 

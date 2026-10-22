@@ -1,0 +1,16 @@
+# Keep the pinned GitHub Actions (checkout@v7, cache@v6, upload-artifact@v7,
+# etc.) on their latest tags. Grouped so all action bumps arrive in one PR per
+# week - review majors carefully (see the Actions-bump conventions in AGENTS.md).
+version: 2
+updates:
+  - package-ecosystem: 'github-actions'
+    directory: '/'
+    schedule:
+      interval: 'weekly'
+      day: 'sunday'
+    groups:
+      github-actions:
+        patterns:
+          - '*'
+    labels:
+      - 'ci'

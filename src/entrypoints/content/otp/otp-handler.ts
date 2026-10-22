@@ -2,10 +2,12 @@
  * OTP input detection and autofill
  */
 
-import { t } from '@/utils/content-i18n.js';
-import { safeId, safeName, safePlaceholder } from '@/utils/dom-safe.js';
+import { t } from '@/utils/i18n/content-i18n.js';
 import { logDebug } from '@/utils/logger.js';
+import { safeId, safeName, safePlaceholder } from '@/utils/security/dom-safe.js';
+import { isFillableField } from '../autofill/fillable.js';
 import { showTooltip } from '../dom/tooltip.js';
+import { normalizeOtpCode } from './otp-code.js';
 
 /** Zip / postal / address PIN fields must never receive OTP codes. */
 function isZipOrPostalField(input: HTMLInputElement): boolean {
@@ -92,23 +94,29 @@ function looksLikeOtpField(input: HTMLInputElement): boolean {
   for (const keyword of strong) {
     if (hay.includes(keyword)) return true;
   }
-  // "code" alone is weak — require security-ish neighbours
+  // "code" alone is weak - require security-ish neighbours
   if (
     (hay.includes('code') || hay.includes('pin')) &&
     /(security|verify|login|auth|sms|email|confirm|enter|digit)/.test(hay)
   ) {
     return true;
   }
-  // inputmode numeric + maxlength 4–8 often OTP (not zip which is often 5–10 without code labels)
+  // Numeric 4-8 character fields are ambiguous: phone extensions, PINs, and
+  // short product codes also use them. Require an OTP/security hint or a
+  // page-level verification-step signal instead of classifying every such
+  // field as an OTP input.
   const maxL = input.maxLength;
   if (
     (input.inputMode === 'numeric' || input.type === 'tel' || input.type === 'number') &&
     maxL >= 4 &&
     maxL <= 8 &&
-    !isZipOrPostalField(input)
+    !isZipOrPostalField(input) &&
+    !/(address|street|city|state|country|zip|postal|phone|mobile|tel)/.test(hay)
   ) {
-    // Only if not labelled as address
-    if (!/(address|street|city|state|country|zip|postal)/.test(hay)) return true;
+    if (/(otp|verification|code|pin|security|auth|token|one-time|passcode|confirm)/.test(hay)) {
+      return true;
+    }
+    if (pageLooksLikeOtpStep()) return true;
   }
 
   // Email already submitted → standalone short code field on verify step
@@ -171,6 +179,15 @@ function isVisibleInput(input: HTMLInputElement): boolean {
   return true;
 }
 
+function isSingleDigitOtpInput(input: HTMLInputElement): boolean {
+  return (
+    input.maxLength === 1 ||
+    (input.inputMode === 'numeric' &&
+      input.maxLength === -1 &&
+      (!input.hasAttribute('size') || input.size <= 2))
+  );
+}
+
 /** Find clustered single-digit OTP boxes in a shared parent (not only siblings). */
 function findDigitOtpGroup(allInputs: HTMLInputElement[]): HTMLInputElement[] {
   // Group by parentElement
@@ -178,12 +195,8 @@ function findDigitOtpGroup(allInputs: HTMLInputElement[]): HTMLInputElement[] {
   for (const input of allInputs) {
     if (!isVisibleInput(input)) continue;
     if (isZipOrPostalField(input)) continue;
-    const maxL = input.maxLength;
-    const single =
-      maxL === 1 ||
-      input.getAttribute('maxlength') === '1' ||
-      (input.inputMode === 'numeric' && (maxL === 1 || maxL === -1) && input.size <= 2);
-    if (!single && maxL !== 1) continue;
+    // size defaults to 20 even when no size attribute was authored.
+    if (!isSingleDigitOtpInput(input)) continue;
     if (input.type === 'password' || input.type === 'email') continue;
     const parent = input.parentElement;
     if (!parent) continue;
@@ -223,7 +236,15 @@ export function findOtpInputs(): HTMLInputElement[] {
       !isZipOrPostalField(el) &&
       isVisibleInput(el)
   );
-  if (oneTime) return [oneTime];
+  if (oneTime) {
+    // An explicitly single-digit field may mark only the first box. An
+    // unbounded autocomplete field remains authoritative for a whole code.
+    if (oneTime.maxLength === 1) {
+      const group = findDigitOtpGroup(allDeep);
+      if (group.includes(oneTime)) return group;
+    }
+    return [oneTime];
+  }
 
   const visibleInputs = allDeep.filter(
     (input) =>
@@ -240,34 +261,46 @@ export function findOtpInputs(): HTMLInputElement[] {
   const keywordMatched = visibleInputs.filter(
     (el) => el.type !== 'password' && looksLikeOtpField(el)
   );
-  if (keywordMatched.length > 0) return keywordMatched;
+  if (keywordMatched.length > 0) {
+    if (keywordMatched.length < 4 && keywordMatched.every(isSingleDigitOtpInput)) {
+      const group = findDigitOtpGroup(allDeep);
+      if (group.length >= 4 && keywordMatched.every((input) => group.includes(input))) return group;
+    }
+    return keywordMatched;
+  }
 
   // Digit groups (Canva / bank-style 6-box codes)
   const digitGroup = findDigitOtpGroup(allDeep);
-  if (digitGroup.length >= 4) return digitGroup;
+  if (digitGroup.length >= 4 && pageLooksLikeOtpStep()) return digitGroup;
 
-  // Sibling chain fallback
-  let potentialOtpGroup: HTMLInputElement[] = [];
-  for (let i = 0; i < allDeep.length; i++) {
-    const input = allDeep[i];
-    if (!input || isZipOrPostalField(input) || !isVisibleInput(input)) {
-      if (potentialOtpGroup.length >= 4 && potentialOtpGroup.length <= 8) return potentialOtpGroup;
-      potentialOtpGroup = [];
-      continue;
+  // Sibling-chain fallback is ambiguous (many forms use one-character fields),
+  // so only enable it when the page itself signals an OTP/verification step.
+  if (pageLooksLikeOtpStep()) {
+    let potentialOtpGroup: HTMLInputElement[] = [];
+    for (let i = 0; i < allDeep.length; i++) {
+      const input = allDeep[i];
+      if (!input || isZipOrPostalField(input) || !isVisibleInput(input)) {
+        if (potentialOtpGroup.length >= 4 && potentialOtpGroup.length <= 8)
+          return potentialOtpGroup;
+        potentialOtpGroup = [];
+        continue;
+      }
+      if (input.type !== 'text' && input.type !== 'tel' && input.type !== 'number' && input.type) {
+        if (potentialOtpGroup.length >= 4 && potentialOtpGroup.length <= 8)
+          return potentialOtpGroup;
+        potentialOtpGroup = [];
+        continue;
+      }
+      if (input.maxLength === 1) {
+        potentialOtpGroup.push(input);
+      } else {
+        if (potentialOtpGroup.length >= 4 && potentialOtpGroup.length <= 8)
+          return potentialOtpGroup;
+        potentialOtpGroup = [];
+      }
     }
-    if (input.type !== 'text' && input.type !== 'tel' && input.type !== 'number' && input.type) {
-      if (potentialOtpGroup.length >= 4 && potentialOtpGroup.length <= 8) return potentialOtpGroup;
-      potentialOtpGroup = [];
-      continue;
-    }
-    if (input.maxLength === 1) {
-      potentialOtpGroup.push(input);
-    } else {
-      if (potentialOtpGroup.length >= 4 && potentialOtpGroup.length <= 8) return potentialOtpGroup;
-      potentialOtpGroup = [];
-    }
+    if (potentialOtpGroup.length >= 4 && potentialOtpGroup.length <= 8) return potentialOtpGroup;
   }
-  if (potentialOtpGroup.length >= 4 && potentialOtpGroup.length <= 8) return potentialOtpGroup;
 
   // Page is clearly OTP step: take first short numeric-ish field
   if (pageLooksLikeOtpStep()) {
@@ -309,38 +342,52 @@ function setNativeValue(input: HTMLInputElement, value: string): void {
 }
 
 export async function fillOtp(otp: string): Promise<void> {
+  const code = normalizeOtpCode(otp);
+  if (!code) return;
   const inputs = findOtpInputs();
   if (inputs.length === 0) {
     logDebug('No OTP input field found.');
     return;
   }
 
-  const code = String(otp || '').trim();
-  if (!code) return;
-
   if (inputs.length === 1) {
     const input = inputs[0];
     if (!input) return;
+    if (!isFillableField(input)) return;
     input.focus();
     setNativeValue(input, code);
 
     await showTooltip(input, await t('contentAutofill.otpFilled'), false);
   } else if (inputs.length > 1) {
-    // Fill digit-by-digit even if group size differs slightly from code length
+    const last = inputs[inputs.length - 1];
+    const remainder = code.slice(inputs.length - 1);
+    // Validate before clearing anything. Never bypass the form's maxlength
+    // or report success after putting a partial code into a digit group.
+    if (
+      code.length < inputs.length ||
+      (inputs.every(isSingleDigitOtpInput) && code.length !== inputs.length) ||
+      (last && last.maxLength >= 0 && remainder.length > last.maxLength)
+    ) {
+      logDebug('OTP length does not match the detected input group.');
+      if (last) await showTooltip(last, await t('contentAutofill.otpLengthMismatch'), true);
+      return;
+    }
+    // Clear every recognized box first so old trailing characters cannot remain.
+    for (const input of inputs) {
+      if (input && isFillableField(input)) setNativeValue(input, '');
+    }
     const n = Math.min(inputs.length, code.length);
     for (let i = 0; i < n; i++) {
       const input = inputs[i];
-      if (input) {
+      if (input && isFillableField(input)) {
         input.focus();
         setNativeValue(input, code[i] || '');
       }
     }
-    const last = inputs[inputs.length - 1];
-    // Remainder into last box if single leftover
-    if (code.length > inputs.length && last) {
-      last.removeAttribute('maxlength');
-      if (last.maxLength === 1) last.maxLength = code.length;
-      setNativeValue(last, code.slice(inputs.length - 1));
+    // A wider final segment may accept the remaining characters. Its value
+    // replaces the digit already filled there, so the slice starts at n - 1.
+    if (code.length > inputs.length && last && isFillableField(last)) {
+      setNativeValue(last, remainder);
     }
 
     if (last) await showTooltip(last, await t('contentAutofill.otpFilled'), false);

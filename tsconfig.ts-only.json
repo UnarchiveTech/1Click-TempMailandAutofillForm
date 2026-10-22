@@ -1,0 +1,15 @@
+{
+  // Companion pass to svelte-check: enforces noUnusedLocals/noUnusedParameters on
+  // plain TypeScript. svelte-check cannot apply these (tsc cannot see Svelte 5
+  // snippet-as-children prop forwarding - see the NOTE in tsconfig.json), and
+  // Biome cannot analyze Svelte templates - so .ts dead code is enforced HERE,
+  // while .svelte files stay exempt. `bun run typecheck` runs both passes:
+  // svelte-check --tsconfig ./tsconfig.json && tsc --noEmit -p ./tsconfig.ts-only.json
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noUnusedLocals": true,
+    "noUnusedParameters": true
+  },
+  "include": ["src/**/*.ts", "tests/**/*.ts", "scripts/**/*.ts", "*.config.ts"],
+  "exclude": ["node_modules", ".output"]
+}

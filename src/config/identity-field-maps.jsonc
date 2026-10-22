@@ -2,7 +2,7 @@
  * Default domain-specific identity field overrides.
  *
  * Keys are domain patterns (exact match or suffix match with dot prefix).
- * Values are partial Identity field overrides — they take precedence over
+ * Values are partial Identity field overrides - they take precedence over
  * the selected identity's default values when autofilling on that domain.
  *
  * Example: LinkedIn requires a real name (not random) and a username.

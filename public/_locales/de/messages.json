@@ -1,0 +1,12 @@
+{
+  "extName": { "message": "1Click: Temp-Mail & Autofill-Formular" },
+  "extDescription": {
+    "message": "Temporäre E-Mail-Adressen erzeugen und OTPs sowie Anmeldeformulare mit einem Klick automatisch ausfüllen."
+  },
+  "cmdAutofillForm": {
+    "message": "Das Anmeldeformular auf der aktuellen Seite automatisch ausfüllen"
+  },
+  "cmdOpenAutofillManager": { "message": "Autofill-Verwaltung öffnen (Profile & Zugangsdaten)" },
+  "cmdQuickGenerateInbox": { "message": "Schnell eine neue temporäre E-Mail-Adresse erzeugen" },
+  "cmdCopyLatestOtp": { "message": "Den neuesten OTP-Code in die Zwischenablage kopieren" }
+}

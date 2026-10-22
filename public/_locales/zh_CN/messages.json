@@ -1,0 +1,8 @@
+{
+  "extName": { "message": "1Click: 临时邮箱 & 自动填表" },
+  "extDescription": { "message": "一键生成临时邮箱地址，并自动填充验证码和登录表单。" },
+  "cmdAutofillForm": { "message": "自动填写当前页面上的注册表单" },
+  "cmdOpenAutofillManager": { "message": "打开自动填充管理器（个人资料与凭据）" },
+  "cmdQuickGenerateInbox": { "message": "快速生成新的临时邮箱地址" },
+  "cmdCopyLatestOtp": { "message": "将最新的验证码复制到剪贴板" }
+}

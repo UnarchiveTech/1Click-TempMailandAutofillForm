@@ -2,8 +2,9 @@ name: Build and Release Extensions
 
 on:
   push:
-    branches:
-      - main
+    # Tag pushes are the release trigger. Plain pushes to main intentionally do
+    # NOT build (nothing consumes those artifacts) - use workflow_dispatch for
+    # ad-hoc builds of a branch.
     tags:
       - 'v*'
   workflow_dispatch:
@@ -13,9 +14,31 @@ on:
         required: false
         type: string
         default: ''
+      dry_run:
+        description: 'Check credentials only - do not upload or submit anything.'
+        required: false
+        type: boolean
+        default: true
+      submit_review:
+        description: 'Submit for store review after uploading (false = upload a draft only).'
+        required: false
+        type: boolean
+        default: false
+
+# Same-ref retriggers (e.g. a re-pushed tag or a new dispatch on the same
+# branch) cancel the older run - the newest build is authoritative. Store
+# submissions get their own single-flight group in the `submit` job below.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
-  contents: write
+  # Safe default - every job below overrides with the least privilege it needs.
+  # LIVE-CI CHECK after this change: (1) `build` artifact upload succeeds,
+  # (2) `release` downloads + creates/clobbers the Release, (3) `submit` dry-run
+  # passes. A "Resource not accessible by integration" error means the job's
+  # actions:/contents: scope is too narrow - widen that job only.
+  contents: read
 
 jobs:
   # ─── Validate version before doing any work ────────────────────────────
@@ -23,12 +46,23 @@ jobs:
   # overrides must agree with it (or explicitly override it for re-builds).
   version:
     runs-on: ubuntu-latest
+    # Read-only - version resolution never writes.
+    permissions:
+      contents: read
+    timeout-minutes: 10
     outputs:
       version: ${{ steps.resolve.outputs.version }}
+      sanitized_version: ${{ steps.sanitize.outputs.version }}
       from_tag: ${{ steps.resolve.outputs.from_tag }}
+      prerelease: ${{ steps.resolve.outputs.prerelease }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
 
       - name: Resolve build version
         id: resolve
@@ -38,11 +72,15 @@ jobs:
           GITHUB_REF_VAL: ${{ github.ref }}
         run: |
           set -euo pipefail
+          # Semver pre-release: any version containing a '-' (e.g. 3.1.0-beta.2,
+          # 3.0.0-rc.1). Those publish as GitHub pre-releases only - never to stores.
+          pre() { [[ "$1" == *-* ]] && echo true || echo false; }
           PKG_VERSION=$(node -p "require('./package.json').version")
           if [[ "$EVENT_NAME" == "pull_request" ]]; then
             echo "PR build - using package.json version: $PKG_VERSION"
             echo "version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
             echo "from_tag=false"       >> "$GITHUB_OUTPUT"
+            echo "prerelease=$(pre "$PKG_VERSION")" >> "$GITHUB_OUTPUT"
           elif [[ "$EVENT_NAME" == "push" && "$GITHUB_REF_VAL" == refs/tags/* ]]; then
             TAG="${GITHUB_REF_VAL#refs/tags/}"
             TAG_VERSION="${TAG#v}"
@@ -54,6 +92,7 @@ jobs:
             echo "Tag $TAG matches package.json - using $PKG_VERSION"
             echo "version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
             echo "from_tag=true"        >> "$GITHUB_OUTPUT"
+            echo "prerelease=$(pre "$TAG_VERSION")" >> "$GITHUB_OUTPUT"
           elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
             OVERRIDE="$VERSION_OVERRIDE"
             if [[ -n "$OVERRIDE" ]]; then
@@ -61,35 +100,85 @@ jobs:
               echo "Manual override: $OVERRIDE (package.json: $PKG_VERSION)"
               echo "version=$OVERRIDE" >> "$GITHUB_OUTPUT"
               echo "from_tag=false"     >> "$GITHUB_OUTPUT"
+              echo "prerelease=$(pre "$OVERRIDE")" >> "$GITHUB_OUTPUT"
             else
               echo "Dispatch with no override - using package.json: $PKG_VERSION"
               echo "version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
               echo "from_tag=false"       >> "$GITHUB_OUTPUT"
+              echo "prerelease=$(pre "$PKG_VERSION")" >> "$GITHUB_OUTPUT"
             fi
           else
             echo "Branch push - using package.json: $PKG_VERSION"
             echo "version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
             echo "from_tag=false"       >> "$GITHUB_OUTPUT"
+            echo "prerelease=$(pre "$PKG_VERSION")" >> "$GITHUB_OUTPUT"
           fi
+
+      # Mirrors sanitizeVersionForManifest() in src/utils/version-sanitize.ts
+      # (consumed by wxt.config.ts): '3.0.0-beta-1' ships a manifest version of
+      # '3.0.0.1' (4-integer scheme required by the stores). The build job
+      # compares the BUILT manifest against this value, not the raw package
+      # version - otherwise every pre-release would fail.
+      # This MUST stay byte-for-byte in sync with src/utils/version-sanitize.ts
+      # (split at the FIRST dash only - split('-', 2) drops multi-dash
+      # pre-release counters). Unit tests there pin the mapping.
+      # Local equivalence check: VERSION_OVERRIDE=3.0.0-beta-1 bun wxt build
+      # -b chrome -> built manifest version 3.0.0.1, matching this output.
+      - name: Sanitize expected manifest version
+        id: sanitize
+        env:
+          RAW_VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          SAN_VERSION=$(RAW_VERSION="$RAW_VERSION" node -e '
+            const v = process.env.RAW_VERSION.replace(/^v/, "");
+            const i = v.indexOf("-");
+            const core = i === -1 ? v : v.slice(0, i);
+            const pre = i === -1 ? "" : v.slice(i + 1);
+            const p = core.split(".").map((x) => parseInt(x, 10)).filter((n) => Number.isFinite(n) && n >= 0).map((n) => Math.min(n, 65535));
+            if (pre) {
+              const n = parseInt(pre.replace(/\D/g, ""), 10);
+              if (Number.isFinite(n) && p.length < 4) p.push(Math.min(n || 1, 65535));
+            }
+            const f = p.slice(0, 4);
+            process.stdout.write(f.length === 0 ? "0.0.0" : f.join("."));
+          ')
+          echo "version=$SAN_VERSION" >> "$GITHUB_OUTPUT"
+          echo "expected manifest version: $SAN_VERSION"
+
+      # Same guard as `bun run bump-version --check` locally: clean tree and
+      # the latest reachable tag matching package.json. Only meaningful on tag
+      # pushes - dispatch re-builds and branch pushes intentionally run with a
+      # version that has no matching tag yet.
+      - name: Verify release state (tag push only)
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        run: bun run bump-version --check
 
   build:
     needs: version
+    # Gate: run only for tag pushes (from_tag) or manual dispatch - never for
+    # plain pushes to a branch.
+    if: needs.version.outputs.from_tag == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    permissions:
+      # Reads the repo + uploads the per-browser zips as workflow artifacts.
+      contents: read
+      actions: write
+    timeout-minutes: 60
     strategy:
       matrix:
-        browser: [chrome, firefox]
+        browser: [chrome, firefox, safari]
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version-file: package.json
 
       - name: Cache Bun dependencies
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.bun/install/cache
@@ -102,7 +191,10 @@ jobs:
         run: bun install
 
       - name: Run Biome lint check
-        run: bun x biome check
+        # --error-on-warnings: the repo is held at zero lint warnings (the
+        # `check` npm script enforces the same on PR/push validation via
+        # `bun run audit`); release must not be the path that lets them back.
+        run: bun x biome check --error-on-warnings
 
       - name: Run TypeScript type check
         run: bun run typecheck
@@ -110,8 +202,10 @@ jobs:
       - name: Check translation completeness
         run: bun run check-translations
 
-      - name: Run unit tests
-        run: bun test
+      - name: Run automated tests
+        # `--isolate` is REQUIRED (Bun does not honour the `[test] isolate`
+        # bunfig key); without it files share a module registry and global.
+        run: bun test --isolate
 
       - name: Build extension for ${{ matrix.browser }}
         env:
@@ -123,7 +217,7 @@ jobs:
 
       - name: Verify built manifest version
         env:
-          EXPECTED_VERSION: ${{ needs.version.outputs.version }}
+          EXPECTED_VERSION: ${{ needs.version.outputs.sanitized_version }}
         run: |
           BUILT_VERSION=$(node -p "require('./.output/${{ matrix.browser }}-mv3/manifest.json').version")
           if [[ "$BUILT_VERSION" != "$EXPECTED_VERSION" ]]; then
@@ -145,10 +239,38 @@ jobs:
           name: ${{ matrix.browser }}-extension
           path: ${{ matrix.browser }}-extension-${{ needs.version.outputs.version }}.zip
 
+      # AMO review requires a source archive (rebuildable code), not just the
+      # built extension. `wxt zip --browser firefox` emits both the extension
+      # and the sources zip. Kept as a WORKFLOW ARTIFACT ONLY (Actions run page,
+      # ~90 days) so the GitHub Release page stays clean - the submitter grabs
+      # it from there when uploading to addons.mozilla.org.
+      - name: Package Firefox sources zip (AMO review requirement)
+        if: matrix.browser == 'firefox'
+        env:
+          RELEASE_VERSION: ${{ needs.version.outputs.version }}
+          VERSION_OVERRIDE: ${{ needs.version.outputs.version }}
+        run: |
+          bun wxt zip --browser firefox
+          SOURCES_ZIP=$(ls .output/*-sources.zip | head -1)
+          cp "$SOURCES_ZIP" "firefox-sources-${RELEASE_VERSION}.zip"
+
+      - name: Upload Firefox sources artifact (not attached to Release)
+        if: matrix.browser == 'firefox'
+        uses: actions/upload-artifact@v7
+        with:
+          name: firefox-sources
+          path: firefox-sources-${{ needs.version.outputs.version }}.zip
+
   release:
     needs: [version, build]
     runs-on: ubuntu-latest
     if: needs.version.outputs.from_tag == 'true'
+    permissions:
+      # Downloads artifacts (actions: read) and creates/uploads the GitHub
+      # Release and its assets (contents: write).
+      contents: write
+      actions: read
+    timeout-minutes: 20
 
     steps:
       - name: Download Chrome artifact
@@ -163,14 +285,202 @@ jobs:
           name: firefox-extension
           path: ./
 
+      - name: Download Safari artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: safari-extension
+          path: ./
+
+      # Note: no Edge artifact on Releases - Edge Add-ons accepts the Chrome
+      # package, so Edge is submitted via the Chrome zip in the optional
+      # `submit` job when/if the store listing goes live.
+      # Idempotent release publishing: a re-run of this workflow (or a re-pushed
+      # tag) must not fail because the release already exists - detect it, then
+      # either create it (first time) or refresh its assets (re-run).
+      - name: Check if release already exists
+        id: release_exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "${{ github.ref_name }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Release ${{ github.ref_name }} already exists - will refresh assets only."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Release ${{ github.ref_name }} does not exist yet - will create it."
+          fi
+
       - name: Create GitHub Release
+        if: steps.release_exists.outputs.exists == 'false'
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
+          # Beta/rc tags (e.g. v3.1.0-beta.2) publish as GitHub pre-releases -
+          # they never reach the stores (the submit job refuses pre-releases).
+          prerelease: ${{ needs.version.outputs.prerelease == 'true' }}
           files: |
             chrome-extension-${{ needs.version.outputs.version }}.zip
             firefox-extension-${{ needs.version.outputs.version }}.zip
+            safari-extension-${{ needs.version.outputs.version }}.zip
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Re-run path: release exists -> refresh the zips (--clobber overwrites).
+      - name: Upload artifacts to existing release
+        if: steps.release_exists.outputs.exists == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ github.ref_name }}" \
+            chrome-extension-${{ needs.version.outputs.version }}.zip \
+            firefox-extension-${{ needs.version.outputs.version }}.zip \
+            safari-extension-${{ needs.version.outputs.version }}.zip \
+            --clobber
+
+  # ─── Optional: auto-submit Chrome + Firefox to the stores ────────────────
+  # Manual (workflow_dispatch) so a tag push never publishes by accident.
+  # First-time setup:
+  #   1. Run `bun wxt submit init` locally - it walks you through obtaining
+  #      the Chrome Web Store API credentials and the AMO JWT issuer/secret.
+  #   2. Save every value it prints as a GitHub Actions secret (repo Settings
+  #      -> Secrets and variables -> Actions) with the names referenced below.
+  # Chrome API: v1.1 (client id/secret/refresh token) is deprecated. Prefer API
+  # v2 service-account secrets (CHROME_SERVICE_ACCOUNT_*); when those are set
+  # the job uses them, otherwise it falls back to the v1.1 credentials.
+  submit:
+    name: Submit to stores (Chrome + Firefox)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    timeout-minutes: 30
+    # Single-flight: never let two dispatches submit the same version at once.
+    concurrency:
+      group: store-submit
+      cancel-in-progress: true
+    # Reads the repo only - store uploads authenticate with the secrets below,
+    # never with the GitHub token.
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - name: Install dependencies
+        run: bun install
+
+      # Pre-releases (version contains '-', e.g. 3.1.0-beta.2) publish on GitHub
+      # as pre-releases only - never submit them to the Chrome Web Store or AMO.
+      - name: Guard - never submit pre-releases to the stores
+        run: |
+          PKG=$(node -p "require('./package.json').version")
+          if [[ "$PKG" == *-* ]]; then
+            echo "::error::Version $PKG is a pre-release - refusing to submit to the stores."
+            echo "Pre-releases are GitHub-only; tag a stable version (no '-' suffix) to publish to stores."
+            exit 1
+          fi
+          echo "OK: $PKG is a stable version"
+
+      # Fresh zips from the current HEAD - dispatch this only when the
+      # package.json version is the one you want to submit to the stores.
+      - name: Build store zips (Chrome + Firefox + sources)
+        run: |
+          bun run zip:chrome
+          bun run zip:firefox
+          ls -1 .output/*-chrome.zip .output/*-firefox.zip .output/*-sources.zip
+
+      - name: Submit extensions to stores
+        id: submit
+        env:
+          CHROME_EXTENSION_ID: ${{ secrets.CHROME_EXTENSION_ID }}
+          CHROME_CLIENT_ID: ${{ secrets.CHROME_CLIENT_ID }}
+          CHROME_CLIENT_SECRET: ${{ secrets.CHROME_CLIENT_SECRET }}
+          CHROME_REFRESH_TOKEN: ${{ secrets.CHROME_REFRESH_TOKEN }}
+          CHROME_SERVICE_ACCOUNT_CLIENT_EMAIL: ${{ secrets.CHROME_SERVICE_ACCOUNT_CLIENT_EMAIL }}
+          CHROME_SERVICE_ACCOUNT_PRIVATE_KEY: ${{ secrets.CHROME_SERVICE_ACCOUNT_PRIVATE_KEY }}
+          CHROME_PUBLISHER_ID: ${{ secrets.CHROME_PUBLISHER_ID }}
+          FIREFOX_EXTENSION_ID: ${{ secrets.FIREFOX_EXTENSION_ID }}
+          FIREFOX_JWT_ISSUER: ${{ secrets.FIREFOX_JWT_ISSUER }}
+          FIREFOX_JWT_SECRET: ${{ secrets.FIREFOX_JWT_SECRET }}
+          EDGE_CLIENT_ID: ${{ secrets.EDGE_CLIENT_ID }}
+          EDGE_API_KEY: ${{ secrets.EDGE_API_KEY }}
+          EDGE_PRODUCT_ID: ${{ secrets.EDGE_PRODUCT_ID }}
+        run: |
+          set -euo pipefail
+
+          missing=()
+          [ -z "$CHROME_EXTENSION_ID" ] && missing+=("CHROME_EXTENSION_ID")
+          [ -z "$FIREFOX_EXTENSION_ID" ] && missing+=("FIREFOX_EXTENSION_ID")
+          [ -z "$FIREFOX_JWT_ISSUER" ] && missing+=("FIREFOX_JWT_ISSUER")
+          [ -z "$FIREFOX_JWT_SECRET" ] && missing+=("FIREFOX_JWT_SECRET")
+          if [ -z "$CHROME_SERVICE_ACCOUNT_CLIENT_EMAIL" ] && \
+             { [ -z "$CHROME_CLIENT_ID" ] || [ -z "$CHROME_CLIENT_SECRET" ] || [ -z "$CHROME_REFRESH_TOKEN" ]; }; then
+            missing+=("CHROME_SERVICE_ACCOUNT_* or CHROME_CLIENT_ID/SECRET/REFRESH_TOKEN")
+          fi
+          # Edge is optional - but if any Edge secret is set, all three are required.
+          if [ -n "$EDGE_CLIENT_ID$EDGE_API_KEY$EDGE_PRODUCT_ID" ]; then
+            for edge_var in EDGE_CLIENT_ID EDGE_API_KEY EDGE_PRODUCT_ID; do
+              [ -z "${!edge_var}" ] && missing+=("$edge_var")
+            done
+          fi
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Missing GitHub secrets: ${missing[*]}"
+            echo "Run 'bun wxt submit init' locally to obtain them, then add them under repo Settings -> Secrets."
+            exit 1
+          fi
+
+          # Chrome auth: API v2 (service account) when configured, else v1.1.
+          if [ -n "$CHROME_SERVICE_ACCOUNT_CLIENT_EMAIL" ]; then
+            CHROME_AUTH_ARGS=(
+              --chrome-api-version v2
+              --chrome-service-account-client-email "$CHROME_SERVICE_ACCOUNT_CLIENT_EMAIL"
+              --chrome-service-account-private-key "$CHROME_SERVICE_ACCOUNT_PRIVATE_KEY"
+              --chrome-publisher-id "$CHROME_PUBLISHER_ID"
+            )
+          else
+            CHROME_AUTH_ARGS=(
+              --chrome-client-id "$CHROME_CLIENT_ID"
+              --chrome-client-secret "$CHROME_CLIENT_SECRET"
+              --chrome-refresh-token "$CHROME_REFRESH_TOKEN"
+            )
+          fi
+
+          SUBMIT_ARGS=()
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            SUBMIT_ARGS+=(--dry-run)
+          elif [ "${{ inputs.submit_review }}" != "true" ]; then
+            # Upload-only by default; flip 'submit_review' to push for review.
+            SUBMIT_ARGS+=(--chrome-skip-submit-review --firefox-skip-submit-review)
+          fi
+
+          # Edge is Chromium - submit the Chrome zip. Only included when the
+          # optional Edge secrets are configured.
+          EDGE_ARGS=()
+          if [ -n "$EDGE_CLIENT_ID" ]; then
+            EDGE_ARGS=(
+              --edge-client-id "$EDGE_CLIENT_ID"
+              --edge-api-key "$EDGE_API_KEY"
+              --edge-product-id "$EDGE_PRODUCT_ID"
+              --edge-zip .output/*-chrome.zip
+            )
+            if [ "${{ inputs.dry_run }}" != "true" ] && [ "${{ inputs.submit_review }}" != "true" ]; then
+              EDGE_ARGS+=(--edge-skip-submit-review)
+            fi
+          fi
+
+          bun wxt submit \
+            --chrome-extension-id "$CHROME_EXTENSION_ID" \
+            "${CHROME_AUTH_ARGS[@]}" \
+            --chrome-zip .output/*-chrome.zip \
+            --firefox-extension-id "$FIREFOX_EXTENSION_ID" \
+            --firefox-jwt-issuer "$FIREFOX_JWT_ISSUER" \
+            --firefox-jwt-secret "$FIREFOX_JWT_SECRET" \
+            --firefox-zip .output/*-firefox.zip \
+            --firefox-sources-zip .output/*-sources.zip \
+            "${EDGE_ARGS[@]}" \
+            "${SUBMIT_ARGS[@]}"

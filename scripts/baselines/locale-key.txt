@@ -1,0 +1,10 @@
+# Locale-key reference baseline - a ratchet: rows may only disappear.
+# Format: <path><TAB><key>
+# Each row is a key referenced from code that does NOT exist in
+# src/locales/en.json, so t()/tSync()/$t() render the literal key text at
+# the user. Rows are pre-existing debt: fix the call site - or add the key
+# to en.json and every locale - then drop the row. A new row is never a fix,
+# because any finding that is not listed here fails the gate.
+# Refresh (after shrinking) with:
+#   bun scripts/check-locale-key-references.ts --update
+

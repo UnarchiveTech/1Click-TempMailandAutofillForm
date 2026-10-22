@@ -5,23 +5,37 @@ on:
     branches:
       - main
       - master
+    # Docs/README-only PRs skip the heavy suite (audit, e2e, 3-browser build).
+    # NOTE: keep the ignored list tight - anything touching code, locales,
+    # package.json, or .github must still trigger the full validation.
+    paths-ignore:
+      - 'docs/**'
+      - 'docs-site/**'
+      - '**/*.md'
   workflow_dispatch:
+
+# Rapid pushes to the same PR cancel the still-running suite - the newest
+# commit's run is the only one that matters. Saves Actions minutes on stacked PRs.
+concurrency:
+  group: pr-validation-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   validate:
     runs-on: ubuntu-latest
-    
+    timeout-minutes: 30
+
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version-file: package.json
 
       - name: Cache Bun dependencies
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.bun/install/cache
@@ -33,23 +47,185 @@ jobs:
       - name: Install dependencies
         run: bun install
 
-      - name: Run Biome lint check
-        run: bun x biome check
+      - name: "Run lightweight checks (audit: biome + all check-* scripts)"
+        run: bun run audit
 
       - name: Run TypeScript type check
         run: bun run typecheck
 
-      - name: Check translation completeness
-        run: bun run check-translations
+      - name: Run automated tests
+        # `--isolate` is REQUIRED: Bun does not honour the `[test] isolate`
+        # bunfig key, so without it every file shares one global object and
+        # module registry (order-dependent failures; see bunfig.toml).
+        run: bun test --isolate
 
-      - name: Validate providers.jsonc
-        run: bun run check-providers
+      - name: Build extension for all browsers + nav flags
+        # build is Chrome-only by default (see package.json); build:all compiles
+        # Chrome + Firefox + Safari and runs check-nav-flags so Safari regressions
+        # and nav collisions are caught on every PR, not only at release time.
+        run: bun run build:all
 
-      - name: Check i18n visual fit (budgeted keys)
-        run: bun run check-i18n-fit --budgeted --report
+  e2e-firefox:
+    name: E2E Firefox (Selenium)
+    runs-on: ubuntu-latest
+    needs: validate
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
 
-      - name: Run unit tests
-        run: bun test
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
 
-      - name: Build extension
-        run: bun run build
+      - name: Cache Bun dependencies
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.bun/install/cache
+            node_modules
+          key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock', '**/package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Build Firefox extension
+        run: bun run build:firefox
+
+      - name: Run Firefox E2E (Selenium + geckodriver)
+        run: xvfb-run --auto-servernum bun run test:e2e:firefox
+
+      - name: Upload native Firefox evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-native-firefox
+          path: .wxt/e2e-firefox/
+          include-hidden-files: true
+          retention-days: 7
+
+  e2e-chrome:
+    name: E2E Chrome (Playwright + Chromium)
+    runs-on: ubuntu-latest
+    needs: validate
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - name: Cache Bun dependencies
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.bun/install/cache
+            node_modules
+          key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock', '**/package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Build Chrome extension
+        run: bun run build:chrome
+
+      - name: Install Playwright Chromium
+        run: bun x playwright install --with-deps chromium
+
+      - name: Run Chrome E2E (Playwright + CDP)
+        run: xvfb-run --auto-servernum bun run test:e2e
+
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-report-chrome
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  e2e-mirror:
+    name: E2E shared scenarios (${{ matrix.target }} engine preview)
+    runs-on: ubuntu-latest
+    needs: validate
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: chrome
+            engine: chromium
+            project: mirror-chrome
+          - target: firefox
+            engine: firefox
+            project: mirror-firefox
+          - target: safari
+            engine: webkit
+            project: mirror-safari-webkit
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - name: Install dependencies
+        run: bun install
+      - name: Build target extension
+        run: bun run build:${{ matrix.target }}
+      - name: Install browser engine
+        run: bun x playwright install --with-deps ${{ matrix.engine }}
+      - name: Run every shared scenario
+        run: bun run test:e2e:mirror --project=${{ matrix.project }}
+      - name: Upload per-scenario evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-mirror-${{ matrix.target }}
+          path: .wxt/e2e-mirror/
+          include-hidden-files: true
+          retention-days: 7
+
+  e2e-webkit:
+    name: E2E WebKit (engine smoke)
+    runs-on: ubuntu-latest
+    needs: validate
+    timeout-minutes: 25
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - name: Cache Bun dependencies
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.bun/install/cache
+            node_modules
+          key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock', '**/package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Build Safari extension
+        run: bun run build:safari
+
+      - name: Install Playwright WebKit
+        run: bun x playwright install --with-deps webkit
+
+      - name: Run WebKit engine smoke (built Safari content scripts)
+        run: bun run test:e2e:webkit

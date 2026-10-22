@@ -3,25 +3,27 @@
  * This eliminates duplication for truly identical setter patterns
  */
 
-import type { InboxSetters } from '@/features/inbox/inbox-actions';
-import type { ExportSetters } from '@/features/inbox/inbox-export';
+import type { AddressSetters } from '@/features/address/address-actions';
+import type { ExportSetters } from '@/features/address/inbox-export';
 import type { LoginSetters } from '@/features/login-info/login-actions';
 import type { QRSetters } from '@/features/qr/qr-actions';
 import type { SettingsSetters } from '@/features/settings/settings-actions';
 import type { ContrastLevel, ThemeMode, ThemeSetters } from '@/features/theme/theme-actions';
-import type { ToastType } from '@/ui/blocks/feedback/Toast.svelte';
+import type { ToastType } from '@/ui/blocks/feedback/toast-types.js';
 import type {
-  Account,
+  Address,
+  AutoRenewScope,
   CredentialsHistoryItem,
   Email,
+  EmailPreviewMode,
   Keybindings,
   ProviderInstance,
 } from '@/utils/types.js';
 
 interface CommonSettersConfig {
   // Inbox state setters
-  setAccounts: (value: Account[] | ((prev: Account[]) => Account[])) => void;
-  setAllInboxes: (value: Account[] | ((prev: Account[]) => Account[])) => void;
+  setAddresses: (value: Address[] | ((prev: Address[]) => Address[])) => void;
+  setAllAddresses: (value: Address[] | ((prev: Address[]) => Address[])) => void;
   setEmails: (value: Email[] | ((prev: Email[]) => Email[])) => void;
   setLatestOtp: (value: string) => void;
   setLatestOtpSender: (value: string) => void;
@@ -29,23 +31,26 @@ interface CommonSettersConfig {
   setOtpContext: (value: string) => void;
   setSelectedEmail: (value: string) => void;
   setLoading: (value: boolean) => void;
-  setLoadingInboxes: (value: boolean) => void;
+  setLoadingAddresses: (value: boolean) => void;
   setLoadingEmails: (value: boolean) => void;
   setNotificationsEnabled: (value: boolean) => void;
   setSoundEnabled: (value: boolean) => void;
   setExpiryWarningThreshold: (value: number) => void;
   setKeybindings: (value: Keybindings) => void;
   setAutoRefreshInterval: (value: number) => void;
-  setEmailPreviewEnabled: (value: boolean) => void;
+  setEmailPreviewMode: (value: EmailPreviewMode) => void;
   setDefaultDomain: (value: string) => void;
 
   // Settings state setters
   setAutoCopy: (value: boolean) => void;
   setAutoRenew: (value: boolean) => void;
+  setAutoRenewScope: (value: AutoRenewScope) => void;
+  setAutoRenewWindowMinutes: (value: number) => void;
   setSelectedProvider: (value: string) => void;
   setProviderInstances: (value: ProviderInstance[]) => void;
   setSelectedProviderInstance: (value: string | null) => void;
   setCustomColor: (value: string) => void;
+  setGlobalZoomEnabled: (value: boolean) => void;
   setShowDeveloperSettings: (value: boolean) => void;
   setEnableLogging: (value: boolean) => void;
   setSavingSettings: (value: boolean) => void;
@@ -60,8 +65,6 @@ interface CommonSettersConfig {
   // QR state setters
   setQrDialogOpen: (value: boolean) => void;
   setQrCanvas: (value: HTMLCanvasElement | null) => void;
-  setQrDialogElement: (value: HTMLElement | null) => void;
-  setPreviousFocusElement: (value: HTMLElement | null) => void;
 
   // Login state setters
   setSavedLogins: (
@@ -81,20 +84,20 @@ interface CommonSettersConfig {
   ) => void;
 
   // Functions
-  loadInboxes: () => Promise<void>;
+  loadAddresses: () => Promise<void>;
   confirmAsync?: (message: string) => Promise<boolean>;
 }
 
 /**
  * Creates common setter objects for entrypoint components
  * @param config - Configuration object containing state setters
- * @returns Object containing inboxSetters, settingsSetters, themeSetters, qrSetters, exportSetters, and loginSetters
+ * @returns Object containing addressSetters, settingsSetters, themeSetters, qrSetters, exportSetters, and loginSetters
  */
 export function useCommonSetters(config: CommonSettersConfig) {
   const {
     // Inbox
-    setAccounts,
-    setAllInboxes,
+    setAddresses,
+    setAllAddresses,
     setEmails,
     setLatestOtp,
     setLatestOtpSender,
@@ -102,22 +105,25 @@ export function useCommonSetters(config: CommonSettersConfig) {
     setOtpContext,
     setSelectedEmail,
     setLoading,
-    setLoadingInboxes,
+    setLoadingAddresses,
     setLoadingEmails,
     setNotificationsEnabled,
     setSoundEnabled,
     setExpiryWarningThreshold,
     setKeybindings,
     setAutoRefreshInterval,
-    setEmailPreviewEnabled,
+    setEmailPreviewMode,
     setDefaultDomain,
     // Settings
     setAutoCopy,
     setAutoRenew,
+    setAutoRenewScope,
+    setAutoRenewWindowMinutes,
     setSelectedProvider,
     setProviderInstances,
     setSelectedProviderInstance,
     setCustomColor,
+    setGlobalZoomEnabled,
     setShowDeveloperSettings,
     setEnableLogging,
     setSavingSettings,
@@ -130,21 +136,19 @@ export function useCommonSetters(config: CommonSettersConfig) {
     // QR
     setQrDialogOpen,
     setQrCanvas,
-    setQrDialogElement,
-    setPreviousFocusElement,
     // Login
     setSavedLogins,
     // Common
     setShowToast,
     // Functions
-    loadInboxes,
+    loadAddresses,
     confirmAsync,
   } = config;
 
   // Inbox setters
-  const inboxSetters: InboxSetters = {
-    setAccounts,
-    setAllInboxes,
+  const addressSetters: AddressSetters = {
+    setAddresses,
+    setAllAddresses,
     setEmails,
     setLatestOtp,
     setLatestOtpSender,
@@ -152,7 +156,7 @@ export function useCommonSetters(config: CommonSettersConfig) {
     setOtpContext,
     setSelectedEmail,
     setLoading,
-    setLoadingInboxes,
+    setLoadingAddresses,
     setLoadingEmails,
     setNotificationsEnabled,
     setSoundEnabled,
@@ -164,10 +168,13 @@ export function useCommonSetters(config: CommonSettersConfig) {
   const settingsSetters: SettingsSetters = {
     setAutoCopy,
     setAutoRenew,
+    setAutoRenewScope,
+    setAutoRenewWindowMinutes,
     setSelectedProvider,
     setProviderInstances,
     setSelectedProviderInstance,
     setCustomColor,
+    setGlobalZoomEnabled,
     setShowDeveloperSettings,
     setEnableLogging,
     setSavingSettings,
@@ -179,10 +186,10 @@ export function useCommonSetters(config: CommonSettersConfig) {
     setExpiryWarningThreshold,
     setKeybindings,
     setAutoRefreshInterval,
-    setEmailPreviewEnabled,
+    setEmailPreviewMode,
     setDefaultDomain,
     setShowToast,
-    loadInboxes,
+    loadAddresses,
     confirmAsync,
   };
 
@@ -197,15 +204,13 @@ export function useCommonSetters(config: CommonSettersConfig) {
   const qrSetters: QRSetters = {
     setQrDialogOpen,
     setQrCanvas,
-    setQrDialogElement,
-    setPreviousFocusElement,
     setShowToast,
   };
 
   // Export setters
   const exportSetters: ExportSetters = {
     setShowToast,
-    loadInboxes,
+    loadAddresses,
   };
 
   // Login setters
@@ -214,7 +219,7 @@ export function useCommonSetters(config: CommonSettersConfig) {
   };
 
   return {
-    inboxSetters,
+    addressSetters,
     settingsSetters,
     themeSetters,
     qrSetters,

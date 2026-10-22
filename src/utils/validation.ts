@@ -3,15 +3,9 @@
  * Provides validation functions for user inputs to prevent XSS, injection attacks, and data corruption
  */
 
-import {
-  OTP_LENGTH_MAX,
-  OTP_LENGTH_MIN,
-  PASSWORD_MAX_LENGTH,
-  PASSWORD_MIN_LENGTH,
-  USERNAME_MAX_LENGTH,
-  USERNAME_MIN_LENGTH,
-} from './constants.js';
+import { CONSTANTS } from './constants.js';
 import { ValidationError } from './errors.js';
+import { PUBLIC_SUFFIXES } from './security/root-domain.js';
 
 /**
  * Sanitize HTML content to prevent XSS attacks
@@ -67,12 +61,87 @@ export function sanitizeColor(color: string): string | null {
 export function normalizeDomain(d: string): string {
   let s = (d || '').trim().toLowerCase();
   s = s.replace(/^https?:\/\//i, '');
-  const slash = s.indexOf('/');
-  if (slash !== -1) s = s.slice(0, slash);
-  const query = s.indexOf('?');
-  if (query !== -1) s = s.slice(0, query);
+  // Cut path, query, AND fragment before stripping the port - a trailing
+  // `#fragment` after a `:port` (e.g. "example.com:8080#section") would
+  // otherwise defeat the /:\d+$/ port regex and leak the port into the result.
+  const cut = s.search(/[/?#]/);
+  if (cut !== -1) s = s.slice(0, cut);
   s = s.replace(/:\d+$/, '');
   return s.replace(/^www\./i, '');
+}
+
+/**
+ * Known public suffixes / multi-tenant shared hosts. Subdomain (suffix)
+ * credential matching must never span one of these: any third party can own a
+ * subdomain of e.g. `github.io` or `co.uk`, so treating the bare suffix as a
+ * credential boundary would over-share saved credentials to unrelated sites.
+ *
+ * Curated safety-net subset (not the full Mozilla PSL). Entries are matched on
+ * the FULL normalized domain, so `example.co.uk` is unaffected - only the bare
+ * `co.uk` / `github.io` / … itself is blocked from suffix matching.
+ * Exact-equality matches are always allowed (a credential literally saved on
+ * the bare host still matches that exact host).
+ */
+/**
+ * True when `domain` is a known public suffix / shared host that must never
+ * act as the parent side of a subdomain credential match.
+ */
+export function isPublicSuffix(domain: string): boolean {
+  return PUBLIC_SUFFIXES.has((domain || '').trim().toLowerCase());
+}
+
+function registrableSiteDomain(domain: string): string {
+  const labels = domain.split('.').filter(Boolean);
+  if (labels.length < 2) return domain;
+
+  // Find the longest known public suffix and include its directly preceding
+  // label. This groups sibling subdomains of one registrable site while
+  // keeping separate tenants under shared hosts (for example, github.io).
+  for (let index = 0; index < labels.length; index += 1) {
+    const suffix = labels.slice(index).join('.');
+    if (PUBLIC_SUFFIXES.has(suffix)) {
+      return index === 0 ? domain : labels.slice(index - 1).join('.');
+    }
+  }
+
+  // Keep a conservative fallback for common single-label TLDs absent from
+  // the curated suffix set.
+  return labels.slice(-2).join('.');
+}
+
+/**
+ * True when two normalized hosts are the same site or one is a subdomain of
+ * the other. A known public suffix can never be the shared parent boundary,
+ * so unrelated tenants such as `a.github.io` and `b.github.io` stay distinct.
+ */
+export function domainsShareSiteBoundary(left: string, right: string): boolean {
+  const leftDomain = normalizeDomain(left);
+  const rightDomain = normalizeDomain(right);
+  if (!leftDomain || !rightDomain) return false;
+  if (leftDomain === rightDomain) return true;
+  if (!isPublicSuffix(rightDomain) && leftDomain.endsWith(`.${rightDomain}`)) return true;
+  if (!isPublicSuffix(leftDomain) && rightDomain.endsWith(`.${leftDomain}`)) return true;
+  return false;
+}
+
+/** True when two hosts resolve to the same registrable site boundary. */
+export function domainsShareRegistrableSite(left: string, right: string): boolean {
+  const leftDomain = normalizeDomain(left);
+  const rightDomain = normalizeDomain(right);
+  if (!leftDomain || !rightDomain) return false;
+  return registrableSiteDomain(leftDomain) === registrableSiteDomain(rightDomain);
+}
+
+/** True when a host is exactly a configured domain or lies below that parent. */
+export function hostMatchesDomainScope(host: string, scope: string): boolean {
+  if (typeof host !== 'string' || typeof scope !== 'string') return false;
+  const normalizedHost = normalizeDomain(host);
+  const normalizedScope = normalizeDomain(scope);
+  if (!normalizedHost || !normalizedScope) return false;
+  return (
+    normalizedHost === normalizedScope ||
+    (!isPublicSuffix(normalizedScope) && normalizedHost.endsWith(`.${normalizedScope}`))
+  );
 }
 
 /**
@@ -90,17 +159,23 @@ export function validatePassword(password: string): void {
   if (!password) {
     throw new ValidationError('Password cannot be empty', { field: 'password' });
   }
-  if (password.length < PASSWORD_MIN_LENGTH) {
-    throw new ValidationError(`Password must be at least ${PASSWORD_MIN_LENGTH} characters`, {
-      field: 'password',
-      minLength: PASSWORD_MIN_LENGTH,
-    });
+  if (password.length < CONSTANTS.PASSWORD_MIN_LENGTH) {
+    throw new ValidationError(
+      `Password must be at least ${CONSTANTS.PASSWORD_MIN_LENGTH} characters`,
+      {
+        field: 'password',
+        minLength: CONSTANTS.PASSWORD_MIN_LENGTH,
+      }
+    );
   }
-  if (password.length > PASSWORD_MAX_LENGTH) {
-    throw new ValidationError(`Password must be less than ${PASSWORD_MAX_LENGTH} characters`, {
-      field: 'password',
-      maxLength: PASSWORD_MAX_LENGTH,
-    });
+  if (password.length > CONSTANTS.PASSWORD_MAX_LENGTH) {
+    throw new ValidationError(
+      `Password must be less than ${CONSTANTS.PASSWORD_MAX_LENGTH} characters`,
+      {
+        field: 'password',
+        maxLength: CONSTANTS.PASSWORD_MAX_LENGTH,
+      }
+    );
   }
 }
 
@@ -109,25 +184,41 @@ export function validatePassword(password: string): void {
  */
 export function validateUsername(username: string): void {
   if (!username) {
-    throw new ValidationError('Username cannot be empty', { field: 'username' });
+    throw new ValidationError(
+      'Username cannot be empty',
+      { field: 'username' },
+      'errors.validationUsernameEmpty'
+    );
   }
-  if (username.length < USERNAME_MIN_LENGTH) {
-    throw new ValidationError(`Username must be at least ${USERNAME_MIN_LENGTH} characters`, {
-      field: 'username',
-      minLength: USERNAME_MIN_LENGTH,
-    });
+  if (username.length < CONSTANTS.USERNAME_MIN_LENGTH) {
+    throw new ValidationError(
+      `Username must be at least ${CONSTANTS.USERNAME_MIN_LENGTH} characters`,
+      {
+        field: 'username',
+        minLength: CONSTANTS.USERNAME_MIN_LENGTH,
+      },
+      'errors.validationUsernameMinLength',
+      { min: CONSTANTS.USERNAME_MIN_LENGTH }
+    );
   }
-  if (username.length > USERNAME_MAX_LENGTH) {
-    throw new ValidationError(`Username must be less than ${USERNAME_MAX_LENGTH} characters`, {
-      field: 'username',
-      maxLength: USERNAME_MAX_LENGTH,
-    });
+  if (username.length > CONSTANTS.USERNAME_MAX_LENGTH) {
+    throw new ValidationError(
+      `Username must be less than ${CONSTANTS.USERNAME_MAX_LENGTH} characters`,
+      {
+        field: 'username',
+        maxLength: CONSTANTS.USERNAME_MAX_LENGTH,
+      },
+      'errors.validationUsernameMaxLength',
+      { max: CONSTANTS.USERNAME_MAX_LENGTH }
+    );
   }
   // Allow only alphanumeric characters and underscores
   if (!/^[a-zA-Z0-9_]+$/.test(username)) {
-    throw new ValidationError('Username can only contain letters, numbers, and underscores', {
-      field: 'username',
-    });
+    throw new ValidationError(
+      'Username can only contain letters, numbers, and underscores',
+      { field: 'username' },
+      'errors.validationUsernameCharset'
+    );
   }
 }
 
@@ -139,16 +230,16 @@ export function validateOTP(otp: string): void {
     throw new ValidationError('OTP cannot be empty', { field: 'otp' });
   }
   const trimmedOtp = otp.trim();
-  if (trimmedOtp.length < OTP_LENGTH_MIN) {
-    throw new ValidationError(`OTP must be at least ${OTP_LENGTH_MIN} characters`, {
+  if (trimmedOtp.length < CONSTANTS.OTP_LENGTH_MIN) {
+    throw new ValidationError(`OTP must be at least ${CONSTANTS.OTP_LENGTH_MIN} characters`, {
       field: 'otp',
-      minLength: OTP_LENGTH_MIN,
+      minLength: CONSTANTS.OTP_LENGTH_MIN,
     });
   }
-  if (trimmedOtp.length > OTP_LENGTH_MAX) {
-    throw new ValidationError(`OTP must be less than ${OTP_LENGTH_MAX} characters`, {
+  if (trimmedOtp.length > CONSTANTS.OTP_LENGTH_MAX) {
+    throw new ValidationError(`OTP must be less than ${CONSTANTS.OTP_LENGTH_MAX} characters`, {
       field: 'otp',
-      maxLength: OTP_LENGTH_MAX,
+      maxLength: CONSTANTS.OTP_LENGTH_MAX,
     });
   }
   // OTP should be numeric
@@ -184,7 +275,7 @@ export function validateTextInput(
     return '';
   }
   const trimmed = input.trim();
-  // Strip control characters (C0: U+0000–U+001F, DEL/C1: U+007F–U+009F - includes
+  // Strip control characters (C0: U+0000-U+001F, DEL/C1: U+007F-U+009F - includes
   // \n, \r, \t) and collapse any resulting whitespace runs into a single space.
   // \p{Cc} is the Unicode "Control" category and avoids embedding literal
   // control chars in the regex (which Biome's noControlCharactersInRegex bans).
@@ -193,10 +284,17 @@ export function validateTextInput(
     .replace(/\s+/g, ' ')
     .trim();
   if (cleaned.length > maxLength) {
-    throw new ValidationError(`${fieldName} must be less than ${maxLength} characters`, {
-      field: fieldName,
-      maxLength,
-    });
+    // `fieldName` arrives already localized (callers pass their own translated
+    // label), so the `{field}` slot is safe to interpolate as-is.
+    throw new ValidationError(
+      `${fieldName} must be less than ${maxLength} characters`,
+      {
+        field: fieldName,
+        maxLength,
+      },
+      'errors.validationTextTooLong',
+      { field: fieldName, max: maxLength }
+    );
   }
   return sanitizeHTML(cleaned);
 }

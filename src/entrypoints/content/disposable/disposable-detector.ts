@@ -6,14 +6,26 @@
  * alias instead. If no active inbox exists, it offers to create one.
  */
 
-import { getBlockedTempMailSite } from '@/utils/blocked-temp-mail-sites.js';
-import { getStorageViaBg, sendMessageViaBg, setStorageViaBg } from '@/utils/content-bg-bridge.js';
-import { NoActiveInboxError } from '@/utils/content-errors.js';
-import { t } from '@/utils/content-i18n.js';
-import { trustedClick } from '@/utils/dom-guard.js';
+import {
+  getStorageViaBg,
+  isSiteEmailAllowedViaBg,
+  sendMessageViaBg,
+  setStorageViaBg,
+} from '@/utils/content/content-bg-bridge.js';
+import { NoActiveAddressError } from '@/utils/content/content-errors.js';
+import { t } from '@/utils/i18n/content-i18n.js';
 import { logError } from '@/utils/logger.js';
-import { CONTENT_Z } from '@/utils/portal-layers.js';
+import { getBlockedTempMailSite } from '@/utils/provider/blocked-temp-mail-sites.js';
+import { trustedClick } from '@/utils/security/dom-guard.js';
+import type { AddressStatus } from '@/utils/types.js';
+import { CONTENT_Z } from '@/utils/ui/portal-layers.js';
 import { positionAtEndOfField, trackElementPosition } from '../dom/positioning.js';
+import { getOrCreateShadowRoot } from '../dom/shadow-dom.js';
+import {
+  isLiveMailboxAddress,
+  sanitizeBackgroundInboxResponse,
+  sanitizeTimestampMap,
+} from '../shared/address-liveness.js';
 
 /**
  * Check if the current site is known to reject disposable email domains.
@@ -39,7 +51,7 @@ function buildWarningChip(text: string): HTMLElement {
     border-radius: 999px;
     font-size: 11px;
     font-weight: 500;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+    box-shadow: 0 2px 8px color-mix(in srgb, var(--md-shadow) 15%, transparent);
     display: flex;
     align-items: center;
     gap: 4px;
@@ -77,23 +89,103 @@ const REAL_EMAIL_DOMAINS = new Set([
   'tutanota.com',
 ]);
 
-const DISMISSED_DOMAINS_KEY = 'disposableHintDismissedDomains';
-const PREFERRED_DOMAINS_KEY = 'disposablePreferredDomains';
+/** Exact match or subdomain of a known disposable domain. */
+const KNOWN_DISPOSABLE_DOMAINS = new Set([
+  'mailinator.com',
+  'mailinator.net',
+  '10minutemail.com',
+  '10minutemail.net',
+  'guerrillamail.com',
+  'guerrillamail.net',
+  'guerrillamail.org',
+  'guerrillamailblock.com',
+  'grr.la',
+  'pokemail.net',
+  'spam4.me',
+  'tempmail.com',
+  'tempmail.net',
+  'temp-mail.org',
+  'temp-mail.io',
+  'tempinbox.com',
+  'throwawaymail.com',
+  'yopmail.com',
+  'yopmail.net',
+  'mytemp.email',
+  'maildrop.cc',
+  'mailnesia.com',
+  'mintemail.com',
+  'dispostable.com',
+  'mailcatch.com',
+  'getnada.com',
+  'nada.email',
+  'trashmail.com',
+  'trashmail.de',
+  'sharklasers.com',
+  'emailnator.com',
+  'tempail.com',
+  'tempail.org',
+  'tempr.email',
+  'tmail.ws',
+  'tmailor.com',
+  'mail.tm',
+  'spamgourmet.com',
+  'mailmetrash.com',
+  'fakeinbox.com',
+  'fake-mail.net',
+  'burnermail.io',
+  'mohmal.com',
+  'mohmal.in',
+  'emailondeck.com',
+  'mailsac.com',
+  'mailhero.io',
+  'inboxkitten.com',
+  'dropmail.me',
+  'emltmp.com',
+  'mailnator.com',
+  'tempinbox.me',
+  'zippymail.info',
+  'cs.email',
+  'spambox.us',
+  'spam.la',
+  'wegwerfmail.de',
+  'wegwerfmail.net',
+  'einrot.com',
+  'einrot.de',
+  'fakemailgenerator.com',
+]);
+
+function isKnownDisposableDomain(domain: string): boolean {
+  const normalized = domain.toLowerCase();
+  for (const known of KNOWN_DISPOSABLE_DOMAINS) {
+    if (normalized === known || normalized.endsWith(`.${known}`)) return true;
+  }
+  return false;
+}
+
+// Key names must match CONTENT_SCRIPT_READABLE_STORAGE_KEYS (and the
+// CONTENT_SCRIPT_WRITABLE_STORAGE_KEYS subset for writes) in the background
+// message handler - setStorageViaBg/getStorageViaBg reject any other key from
+// a content script, which silently broke dismissals/preferences before.
+const DISMISSED_DOMAINS_KEY = 'dismissedDisposableDomains';
+const PREFERRED_DOMAINS_KEY = 'preferredDisposableDomains';
 const DISMISS_DURATION_MS = 5 * 60 * 1000;
 const INPUT_DEBOUNCE_MS = 350;
 
-type InboxShape = { id: string; address: string };
+type AddressShape = { id: string; address: string };
+/** A background response's inbox record after the shared response guard has PROVEN it live. */
+type LiveInboxRecord = {
+  id?: string;
+  address: string;
+  accountStatus?: AddressStatus;
+  expiresAt?: number;
+};
 
-interface InboxResponse {
-  activeInboxId?: string;
-  inboxes?: InboxShape[];
+interface AddressResponse {
+  activeAddressId?: string;
+  addresses?: AddressShape[];
 }
 
-interface DismissedDomainsResponse {
-  [key: string]: number;
-}
-
-import { safeId, safeName, safePlaceholder } from '@/utils/dom-safe.js';
+import { safeId, safeName, safePlaceholder } from '@/utils/security/dom-safe.js';
 
 function isEmailField(input: HTMLInputElement): boolean {
   if (input.type === 'email') return true;
@@ -116,14 +208,25 @@ function getEmailDomain(value: string): string | null {
 
 async function loadDismissedDomains(): Promise<Record<string, number>> {
   try {
-    return ((await getStorageViaBg(DISMISSED_DOMAINS_KEY)) as DismissedDomainsResponse) || {};
+    // The bridge resolves `{ [KEY]: storedValue }` - unwrap the VALUE first.
+    // This cast used to skip the unwrap, so lookups always missed (dismissals
+    // never took effect) and every persist re-wrote the wrapper with one more
+    // domain key, nesting the stored object a level deeper per accept.
+    const result = (await getStorageViaBg(DISMISSED_DOMAINS_KEY)) as {
+      [DISMISSED_DOMAINS_KEY]?: unknown;
+    };
+    // Shape-guard the map: only a plain object of finite-number timestamps is
+    // usable. Corrupt values degrade to "no dismissals" so a corrupted write
+    // can never be spread back into the next persist (which would canonize it).
+    return sanitizeTimestampMap(result?.[DISMISSED_DOMAINS_KEY]);
   } catch {
     /* ignore */
     return {};
   }
 }
 
-async function isDomainDismissed(domain: string): Promise<boolean> {
+/** Exposed for unit tests: corrupt dismissed-map values are pinned against this. */
+export async function isDomainDismissed(domain: string): Promise<boolean> {
   const dismissed = await loadDismissedDomains();
   const ts = dismissed[domain];
   if (!ts) return false;
@@ -183,35 +286,50 @@ export async function removePreferredDomain(domain: string): Promise<void> {
   }
 }
 
-async function getActiveInbox(): Promise<InboxShape | null> {
+/** Exposed for unit tests: corrupt-storage degradation is pinned against this. */
+export async function getActiveAddress(): Promise<AddressShape | null> {
   try {
-    const { activeInboxId, inboxes = [] } = (await getStorageViaBg([
-      'activeInboxId',
-      'inboxes',
-    ])) as InboxResponse;
-    if (!activeInboxId || !Array.isArray(inboxes) || inboxes.length === 0) return null;
-    return inboxes.find((i) => i.id === activeInboxId) || null;
+    const { activeAddressId, addresses } = (await getStorageViaBg(
+      ['activeAddressId', 'addresses'],
+      true
+    )) as AddressResponse;
+    if (!activeAddressId || !Array.isArray(addresses) || addresses.length === 0) return null;
+    // Shared liveness rule (address-liveness.ts): a corrupt entry (null /
+    // primitive / object without an address) must not become the chip's
+    // record - `field.value = record.address` would otherwise write the
+    // literal string "undefined" into the host page's input. Dead addresses
+    // (archived / deleted / expired) are equally not offerable.
+    return (
+      addresses.find(
+        (i): i is AddressShape => i?.id === activeAddressId && isLiveMailboxAddress(i)
+      ) || null
+    );
   } catch (error: unknown) {
     logError('Failed to load active inbox', error);
     return null;
   }
 }
 
-async function createTempInbox(): Promise<InboxShape | null> {
+/** Exposed for unit tests: malformed background responses are pinned against this. */
+export async function createTempAddress(): Promise<{
+  inbox: LiveInboxRecord | null;
+  needsUserInteraction?: boolean;
+}> {
   try {
-    const response = (await sendMessageViaBg({
-      type: 'createInboxWithGesture',
-    })) as {
-      success?: boolean;
-      inbox?: InboxShape;
-      error?: string;
-      needsUserInteraction?: boolean;
-    };
-    if (response?.success && response.inbox) return response.inbox;
-    return null;
+    // Response-shape guard (shared/address-liveness.ts): a malformed background
+    // answer must not hand a record without an address to the fill path (same
+    // "undefined" hazard as corrupt storage). Degrades to `inbox: null`, which
+    // the caller renders as its createFailed tooltip; a valid gesture token
+    // (`needsUserInteraction`) survives the guard - that's a REAL flow, not a
+    // failure.
+    return sanitizeBackgroundInboxResponse(
+      await sendMessageViaBg({
+        type: 'createAddressWithGesture',
+      })
+    );
   } catch (error: unknown) {
     logError('Failed to create temp inbox', error);
-    return null;
+    return { inbox: null };
   }
 }
 
@@ -228,7 +346,7 @@ function buildChip(text: string): HTMLElement {
     font-size: 11px;
     font-weight: 500;
     cursor: pointer;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+    box-shadow: 0 2px 8px color-mix(in srgb, var(--md-shadow) 15%, transparent);
     display: flex;
     align-items: center;
     gap: 4px;
@@ -236,6 +354,9 @@ function buildChip(text: string): HTMLElement {
     transition: opacity 0.2s, transform 0.1s;
     user-select: none;
     white-space: nowrap;
+    /* Inside the shadow host (which is pointer-events:none) the clickable
+       chip must re-enable pointer events for itself. */
+    pointer-events: auto;
   `;
   chip.textContent = text;
   return chip;
@@ -258,33 +379,26 @@ export function attachDisposableHint(
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
   let currentChip: HTMLElement | null = null;
   let currentDomain: string | null = null;
-  let currentInbox: InboxShape | null = null;
-  let _isDismissedForDomain = false;
+  let currentAddress: AddressShape | null = null;
 
   let warningChip: HTMLElement | null = null;
   const rejectingDomain = getDisposableRejectingDomain(window.location.hostname);
-
-  async function translate(key: string, vars?: Record<string, string | number>): Promise<string> {
-    // Use in-content i18n (same pack as autofill buttons) — no SW round-trip
-    try {
-      return await t(key, vars);
-    } catch {
-      /* ignore */
-      return key;
-    }
-  }
 
   async function refreshChip(): Promise<void> {
     const value = field.value;
     const domain = getEmailDomain(value);
 
     // ── Disposable-rejection warning ──────────────────────────────────
-    // If the current site is known to reject disposable emails AND the user
-    // has typed a disposable-looking email, show a warning instead of the
-    // "use temp alias" suggestion.
-    if (rejectingDomain && domain && !REAL_EMAIL_DOMAINS.has(domain)) {
+    // Never suggest a temporary alias on a site known to reject them. Only
+    // show the rejection warning when the address the user typed is itself a
+    // known disposable domain; a Gmail address should not be mislabeled.
+    if (rejectingDomain) {
       hideChip();
-      await showWarningChip();
+      if (domain && isKnownDisposableDomain(domain)) {
+        await showWarningChip();
+      } else {
+        hideWarningChip();
+      }
       return;
     }
     hideWarningChip();
@@ -294,18 +408,15 @@ export function attachDisposableHint(
       return;
     }
     if (await isDomainDismissed(domain)) {
-      _isDismissedForDomain = true;
-      // Preferred domains always show the suggestion — skip dismissal
+      // Preferred domains always show the suggestion - skip dismissal
       if (!(await isDomainPreferred(domain))) {
         hideChip();
         return;
       }
-      _isDismissedForDomain = false;
     }
-    _isDismissedForDomain = false;
 
     currentDomain = domain;
-    currentInbox = await getActiveInbox();
+    currentAddress = await getActiveAddress();
     await showChip();
   }
 
@@ -319,10 +430,10 @@ export function attachDisposableHint(
 
   async function showWarningChip(): Promise<void> {
     if (warningChip) return; // already showing
-    const text = await translate('disposable.rejectWarning', { domain: rejectingDomain || '' });
+    const text = await t('disposable.rejectWarning', { domain: rejectingDomain || '' });
     const chip = buildWarningChip(text);
     positionChip(chip, field, updatePositionListeners);
-    document.body.appendChild(chip);
+    getOrCreateShadowRoot()?.appendChild(chip);
     warningChip = chip;
   }
 
@@ -335,13 +446,13 @@ export function attachDisposableHint(
 
   async function showChip(): Promise<void> {
     const isPreferred = await isDomainPreferred(currentDomain || '');
-    const text = currentInbox
-      ? await translate('disposable.useAddressInstead', { address: currentInbox.address })
-      : await translate('disposable.createAliasInstead');
+    const text = currentAddress
+      ? await t('disposable.useAddressInstead', { address: currentAddress.address })
+      : await t('disposable.createAliasInstead');
 
     if (currentChip) {
       currentChip.textContent = isPreferred
-        ? `${text} · ${await translate('disposable.preferredDomain')}`
+        ? `${text} · ${await t('disposable.preferredDomain')}`
         : text;
       return;
     }
@@ -349,7 +460,8 @@ export function attachDisposableHint(
     const chip = buildChip(text);
     if (isPreferred) {
       chip.style.backgroundColor = 'var(--md-primary)';
-      chip.style.boxShadow = '0 0 0 2px var(--md-on-primary), 0 2px 8px rgba(0,0,0,0.15)';
+      chip.style.boxShadow =
+        '0 0 0 2px var(--md-on-primary), 0 2px 8px color-mix(in srgb, var(--md-shadow) 15%, transparent)';
     }
     chip.onmouseover = () => {
       chip.style.filter = 'brightness(0.9)';
@@ -357,7 +469,14 @@ export function attachDisposableHint(
     chip.onmouseout = () => {
       chip.style.filter = 'none';
     };
-    chip.onmousedown = () => {
+    chip.onmousedown = (event) => {
+      // Keep focus on the input until the click handler runs. Otherwise blur's
+      // delayed hide can remove this chip during a slow press.
+      event.preventDefault();
+      if (blurTimer) {
+        clearTimeout(blurTimer);
+        blurTimer = null;
+      }
       chip.style.transform = 'scale(0.97)';
     };
     chip.onmouseup = () => {
@@ -374,7 +493,7 @@ export function attachDisposableHint(
     );
 
     positionChip(chip, field, updatePositionListeners);
-    document.body.appendChild(chip);
+    getOrCreateShadowRoot()?.appendChild(chip);
     currentChip = chip;
   }
 
@@ -382,15 +501,31 @@ export function attachDisposableHint(
     if (!currentDomain) return;
     const domainToDismiss = currentDomain;
     try {
-      let inbox = currentInbox || (await getActiveInbox());
-      if (!inbox) {
-        inbox = await createTempInbox();
-        if (!inbox) {
+      // Both proven shapes carry `address: string` - the only field the fill
+      // reads - so the union is sound here.
+      let record: AddressShape | LiveInboxRecord | null =
+        currentAddress || (await getActiveAddress());
+      if (!record) {
+        const created = await createTempAddress();
+        if (created.needsUserInteraction) {
+          await showErrorTooltip(currentChip, await t('disposable.openExtensionToCreate'));
+          return;
+        }
+        if (!created.inbox) {
           await showErrorTooltip(currentChip, await t('disposable.createFailed'));
           return;
         }
+        record = created.inbox;
       }
-      field.value = inbox.address;
+      if (!field.isConnected || field.disabled || field.readOnly) {
+        await showErrorTooltip(currentChip, await t('disposable.fillFailed'));
+        return;
+      }
+      if (!(await isSiteEmailAllowedViaBg(record.address))) {
+        await showErrorTooltip(currentChip, await t('errors.siteEmailUnavailable'));
+        return;
+      }
+      field.value = record.address;
       field.dispatchEvent(new Event('input', { bubbles: true }));
       field.dispatchEvent(new Event('change', { bubbles: true }));
       await _dismissDomain(domainToDismiss);
@@ -401,7 +536,7 @@ export function attachDisposableHint(
       }
       currentChip = null;
     } catch (error: unknown) {
-      if (error instanceof NoActiveInboxError) {
+      if (error instanceof NoActiveAddressError) {
         await showErrorTooltip(currentChip, await t('disposable.noActiveAlias'));
       } else {
         logError('Failed to fill with temp alias', error);

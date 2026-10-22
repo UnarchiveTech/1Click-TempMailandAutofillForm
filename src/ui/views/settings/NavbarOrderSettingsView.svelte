@@ -2,56 +2,113 @@
 import { onMount } from 'svelte';
 import { t } from 'svelte-i18n';
 import { browser } from 'wxt/browser';
+import SubpageShell from '@/ui/components/composites/SubpageShell.svelte';
 import Icon from '@/ui/components/icons/Icon.svelte';
-import { Btn } from '@/ui/components/primitives';
+import { writeWithRetry } from '@/utils/storage/storage-write.js';
+import { normalizeAutoArrangeMore } from '@/utils/ui/more-menu-layout.js';
+import {
+  DEFAULT_NAV_ORDER,
+  type NavIndicatorMode,
+  navItemFor,
+  normalizeNavIndicatorModes,
+  normalizeNavOrder,
+  normalizePrimaryItemsPref,
+  type PrimaryItemsPref,
+} from '@/utils/ui/nav-layout.js';
+import { responsiveButtonLayout } from '@/utils/ui/responsive-button-layout.js';
 
-let { onBack = () => {}, showToast = (_msg: string) => {} } = $props<{
+let {
+  onBack = () => {},
+  showToast = (_msg: string) => {},
+}: {
   onBack?: () => void;
   showToast?: (msg: string) => void;
-}>();
+} = $props();
 
-export type NavItemId =
-  | 'mailbox'
-  | 'addresses'
-  | 'autofill'
-  | 'organize'
-  | 'activity'
-  | 'settings'
-  | 'about';
+/**
+ * Single source of truth: the canonical nav order + item labels/icons live in
+ * src/utils/ui/nav-layout.ts (the same list the Footer and Sidebar render). This
+ * view only reads from it, so the reorder UI can never drift from the real nav.
+ */
+type NavItemId = (typeof DEFAULT_NAV_ORDER)[number];
 
-export const DEFAULT_NAV_ORDER: NavItemId[] = [
-  'mailbox',
-  'addresses',
-  'autofill',
-  'organize',
-  'activity',
-  'settings',
-  'about',
-];
-
-const NAV_ITEM_METADATA: Record<NavItemId, { labelKey: string; icon: string }> = {
-  mailbox: { labelKey: 'nav.mailbox', icon: 'inbox' },
-  addresses: { labelKey: 'nav.addresses', icon: 'envelope' },
-  autofill: { labelKey: 'nav.autofill', icon: 'person' },
-  organize: { labelKey: 'nav.organize', icon: 'grid' },
-  activity: { labelKey: 'nav.activity', icon: 'barChart' },
-  settings: { labelKey: 'nav.settings', icon: 'settings' },
-  about: { labelKey: 'nav.about', icon: 'info' },
-};
+/** The choices for how many items stay primary before the rest collapse into More. */
+const PREFS: PrimaryItemsPref[] = ['auto', 1, 2, 3];
 
 let navOrder = $state<NavItemId[]>([...DEFAULT_NAV_ORDER]);
 
+/** 'auto' = fit as many as the width allows; 1|2|3 = force that many primary. */
+let minPrimary = $state<PrimaryItemsPref>('auto');
+
+/** Submenu-only auto-arrange for fewer rows (pill order never changes). */
+let autoArrange = $state(true);
+let navIndicatorModes = $state<Record<string, NavIndicatorMode>>(
+  normalizeNavIndicatorModes(undefined)
+);
+
+/** The three keys this page edits, read and followed as one set. */
+const PREF_KEYS = [
+  'customNavOrder',
+  'minPrimaryItems',
+  'autoArrangeMore',
+  'navIndicatorModes',
+] as const;
+
+function applyPrefs(next: Record<string, unknown>) {
+  navOrder = normalizeNavOrder(next.customNavOrder);
+  minPrimary = normalizePrimaryItemsPref(next.minPrimaryItems);
+  autoArrange = normalizeAutoArrangeMore(next.autoArrangeMore);
+  navIndicatorModes = normalizeNavIndicatorModes(next.navIndicatorModes);
+}
+
 onMount(() => {
-  void browser.storage.local.get(['customNavOrder']).then((res) => {
-    if (res.customNavOrder && Array.isArray(res.customNavOrder)) {
-      const valid = (res.customNavOrder as string[]).filter((id): id is NavItemId =>
-        DEFAULT_NAV_ORDER.includes(id as NavItemId)
-      );
-      const missing = DEFAULT_NAV_ORDER.filter((id) => !valid.includes(id));
-      navOrder = [...valid, ...missing];
+  void browser.storage.local.get([...PREF_KEYS]).then((res) => applyPrefs(res));
+
+  // Another surface (a second settings page, the popup, another device over
+  // sync) can change these keys while this page is open. Without a listener this
+  // view keeps rendering what it read at mount, and its own
+  // `if (autoArrange === v) return` / `if (minPrimary === p) return` guards then
+  // SWALLOW the click the user meant as a change: the stale page shows ON, the
+  // user clicks ON, the guard reads "no change" and writes nothing, and the
+  // stored OFF stands. Follow storage, exactly as the shell's navbar-preferences
+  // controller does.
+  const listener = (changes: Record<string, { newValue?: unknown }>, area: string) => {
+    if (area !== 'local') return;
+    if (changes.customNavOrder) navOrder = normalizeNavOrder(changes.customNavOrder.newValue);
+    if (changes.minPrimaryItems) {
+      minPrimary = normalizePrimaryItemsPref(changes.minPrimaryItems.newValue);
     }
-  });
+    if (changes.autoArrangeMore) {
+      autoArrange = normalizeAutoArrangeMore(changes.autoArrangeMore.newValue);
+    }
+    if (changes.navIndicatorModes) {
+      navIndicatorModes = normalizeNavIndicatorModes(changes.navIndicatorModes.newValue);
+    }
+  };
+  browser.storage.onChanged.addListener(listener);
+  return () => browser.storage.onChanged.removeListener(listener);
 });
+
+async function selectPref(p: PrimaryItemsPref) {
+  if (minPrimary === p) return;
+  minPrimary = p;
+  await writeWithRetry({ minPrimaryItems: p });
+  showToast($t('common.saved'));
+}
+
+async function selectAutoArrange(v: boolean) {
+  if (autoArrange === v) return;
+  autoArrange = v;
+  await writeWithRetry({ autoArrangeMore: v });
+  showToast($t('common.saved'));
+}
+
+async function selectIndicatorMode(id: NavItemId, mode: NavIndicatorMode) {
+  if (navIndicatorModes[id] === mode) return;
+  navIndicatorModes = { ...navIndicatorModes, [id]: mode };
+  await writeWithRetry({ navIndicatorModes: $state.snapshot(navIndicatorModes) });
+  showToast($t('common.saved'));
+}
 
 async function moveUp(idx: number) {
   if (idx <= 0) return;
@@ -74,90 +131,150 @@ async function moveDown(idx: number) {
 }
 
 async function saveOrder() {
-  await browser.storage.local.set({ customNavOrder: $state.snapshot(navOrder) });
+  await writeWithRetry({ customNavOrder: $state.snapshot(navOrder) });
   showToast($t('common.saved'));
 }
 
 async function resetOrder() {
   navOrder = [...DEFAULT_NAV_ORDER];
-  await browser.storage.local.set({ customNavOrder: DEFAULT_NAV_ORDER });
+  navIndicatorModes = normalizeNavIndicatorModes(undefined);
+  await writeWithRetry({
+    customNavOrder: DEFAULT_NAV_ORDER,
+    navIndicatorModes: $state.snapshot(navIndicatorModes),
+  });
   showToast($t('common.reset'));
 }
 </script>
 
-<div class="flex flex-col h-full min-h-0 bg-md-surface text-md-on-surface">
-  <!-- Header -->
-  <div class="flex items-center gap-2 px-2 py-3 border-b border-md-outline-variant/20 shrink-0">
-    <button
-      type="button"
-      class="w-8 h-8 flex items-center justify-center rounded-full hover:bg-md-surface-variant/50 transition-colors"
-      onclick={onBack}
-      aria-label={$t('common.back')}
-    >
-      <Icon name="chevronLeft" class="w-5 h-5" />
-    </button>
-    <div class="flex-1 min-w-0">
-      <h1 class="text-sm font-semibold text-md-on-surface truncate">{$t('settings.navbarOrderTitle') || 'Customizable Navbar Order'}</h1>
-      <p class="text-xs text-md-on-surface/50 truncate">{$t('settings.navbarOrderHint') || 'Re-order navigation items (More menu stays last)'}</p>
-    </div>
-    <Btn variant="outline" size="sm" onclick={() => void resetOrder()}>
-      {$t('common.reset') || 'Reset'}
-    </Btn>
-  </div>
-
-  <!-- Content -->
-  <div class="flex-1 min-h-0 overflow-y-auto px-2 py-3 space-y-4">
+<SubpageShell
+  onBack={onBack}
+  title={$t('settings.navbarOrderTitle')}
+  hint={$t('settings.navbarOrderHint')}
+  resetLabel={$t('common.reset')}
+  onReset={() => void resetOrder()}
+>
     <!-- Items list -->
     <div class="space-y-2">
       <div class="flex items-center gap-2 mb-1">
-        <Icon name="grip" class="w-4 h-4 text-md-primary" />
-        <span role="heading" aria-level="2" class="text-sm font-medium text-md-on-surface">{$t('settings.primaryNavItems') || 'Primary Navigation Order'}</span>
+        <Icon name="dragHandle" class="w-4 h-4 text-md-primary" />
+        <span role="heading" aria-level="2" class="text-sm font-medium text-md-on-surface">{$t('settings.primaryNavItems')}</span>
       </div>
+      <p class="text-xs text-md-on-surface/50">
+        <span class="font-medium">{$t('settings.navIndicatorTitle')}:</span>
+        {$t('settings.navIndicatorHint')}
+      </p>
       <div class="space-y-1.5">
       {#each navOrder as id, idx (id)}
-        {@const meta = NAV_ITEM_METADATA[id]}
-        <div class="flex items-center justify-between p-2.5 rounded-xl bg-md-surface-container-low border border-md-outline-variant/20 shadow-xs">
-          <div class="flex items-center gap-3">
+        {@const item = navItemFor(id)}
+        <div class="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-xl bg-md-surface-container-low border border-md-outline-variant/20 shadow-xs">
+          <div class="flex items-center gap-3 min-w-0 flex-1 basis-40">
             <span class="text-xs font-bold text-md-on-surface/40 w-4 text-center">{idx + 1}</span>
-            <Icon name={meta.icon} class="w-4 h-4 text-md-primary" />
-            <span class="text-sm font-medium text-md-on-surface">{$t(meta.labelKey)}</span>
+            <Icon name={item.iconName} class="w-4 h-4 text-md-primary" />
+            <span class="text-sm font-medium text-md-on-surface truncate">{$t(item.labelKey)}</span>
           </div>
-          <div class="flex items-center gap-1">
-            <button
-              type="button"
-              class="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-md-surface-variant/60 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+          <div class="flex items-center gap-1 ms-auto">
+            <div
+              role="group"
+              aria-label={$t('settings.navIndicatorFor', { values: { item: $t(item.labelKey) } })}
+              class="flex gap-0.5 p-0.5 rounded-lg bg-md-surface-container border border-md-outline-variant/20 me-1"
+            >
+              {#each ['dot', 'count'] as mode (mode)}
+                <button
+                  type="button"
+                  aria-pressed={navIndicatorModes[id] === mode}
+                  class="px-2 py-1 rounded-md ui-label transition-colors {navIndicatorModes[id] === mode
+                    ? 'bg-md-primary text-md-on-primary'
+                    : 'text-md-on-surface/70 hover:bg-md-surface-variant/50 active:bg-md-surface-variant/70'}"
+                  onclick={() => void selectIndicatorMode(id, mode as NavIndicatorMode)}
+                >
+                  {$t(mode === 'dot' ? 'settings.navIndicatorDot' : 'settings.navIndicatorCount')}
+                </button>
+              {/each}
+            </div>
+            <div class="flex flex-nowrap items-center gap-2" use:responsiveButtonLayout data-action-tier="XS">
+              <button
+                type="button"
+                class="h-8 flex items-center justify-center rounded-full hover:bg-md-surface-variant/60 active:bg-md-surface-variant/80 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
               disabled={idx === 0}
               onclick={() => void moveUp(idx)}
-              aria-label={$t('common.moveUp') || 'Move item up'}
+              aria-label={$t('common.moveUp')}
             >
-              <Icon name="chevronUp" class="w-4 h-4" />
+              <Icon name="chevronUp" class="w-5 h-5" />
             </button>
-            <button
-              type="button"
-              class="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-md-surface-variant/60 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              <button
+                type="button"
+                class="h-8 flex items-center justify-center rounded-full hover:bg-md-surface-variant/60 active:bg-md-surface-variant/80 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
               disabled={idx === navOrder.length - 1}
               onclick={() => void moveDown(idx)}
-              aria-label={$t('common.moveDown') || 'Move item down'}
+              aria-label={$t('common.moveDown')}
             >
-              <Icon name="chevronDown" class="w-4 h-4" />
-            </button>
+              <Icon name="chevronDown" class="w-5 h-5" />
+              </button>
+            </div>
           </div>
         </div>
       {/each}
     </div>
   </div>
 
+    <!-- Primary items preference -->
+    <div class="space-y-2">
+      <div class="flex items-center gap-2 mb-1">
+        <Icon name="dragHandle" class="w-4 h-4 text-md-primary" />
+        <span role="heading" aria-level="2" class="text-sm font-medium text-md-on-surface">{$t('settings.primaryItemsPrefTitle')}</span>
+      </div>
+      <div
+        role="group"
+        aria-label={$t('settings.primaryItemsPrefTitle')}
+        class="flex gap-1.5 p-1 rounded-xl bg-md-surface-container-low border border-md-outline-variant/20"
+      >
+        {#each PREFS as p (p)}
+          <button
+            type="button"
+            aria-pressed={minPrimary === p}
+            class="flex-1 px-2 py-1.5 rounded-lg ui-label transition-colors {minPrimary === p
+              ? 'bg-md-primary text-md-on-primary'
+              : 'text-md-on-surface/70 hover:bg-md-surface-variant/50 active:bg-md-surface-variant/70'}"
+            onclick={() => void selectPref(p)}
+          >
+            {p === 'auto' ? ($t('settings.primaryItemsPrefAuto')) : p}
+          </button>
+        {/each}
+      </div>
+      <p class="text-xs text-md-on-surface/50">{$t('settings.primaryItemsPrefHint')}</p>
+    </div>
+
+    <!-- More-submenu auto-arrange -->
+    <div class="space-y-2">
+      <div class="flex items-center gap-2 mb-1">
+        <Icon name="dragHandle" class="w-4 h-4 text-md-primary" />
+        <span role="heading" aria-level="2" class="text-sm font-medium text-md-on-surface">{$t('settings.autoArrangeMoreTitle')}</span>
+      </div>
+      <div
+        role="group"
+        aria-label={$t('settings.autoArrangeMoreTitle')}
+        class="flex gap-1.5 p-1 rounded-xl bg-md-surface-container-low border border-md-outline-variant/20"
+      >
+        {#each [true, false] as v (v)}
+          <button
+            type="button"
+            aria-pressed={autoArrange === v}
+            class="flex-1 px-2 py-1.5 rounded-lg ui-label transition-colors {autoArrange === v
+              ? 'bg-md-primary text-md-on-primary'
+              : 'text-md-on-surface/70 hover:bg-md-surface-variant/50 active:bg-md-surface-variant/70'}"
+            onclick={() => void selectAutoArrange(v)}
+          >
+            {v ? ($t('common.on')) : ($t('common.off'))}
+          </button>
+        {/each}
+      </div>
+      <p class="text-xs text-md-on-surface/50">{$t('settings.autoArrangeMoreHint')}</p>
+    </div>
+
   <!-- Responsiveness rules hint -->
   <div class="p-3 rounded-xl bg-md-tertiary-container/30 text-xs text-md-on-surface/70 space-y-1 leading-relaxed">
-    <p class="font-bold">💡 {$t('settings.responsiveOrderHintTitle') || 'Responsive Layout Rules'}:</p>
-    <p>{$t('settings.responsiveOrderHintBody') || 'Items dynamically expand into the navigation bar based on available screen width. The More menu always remains the final item when displayed.'}</p>
+    <p class="font-bold">💡 {$t('settings.responsiveOrderHintTitle')}:</p>
+    <p>{$t('settings.responsiveOrderHintBody')}</p>
   </div>
 
-    <!-- Dynamic End-of-Page Spacer -->
-    <div
-      class="w-full shrink-0 transition-[height] duration-200 ease-in-out pointer-events-none"
-      style="height: calc(var(--bottom-safe-area, 0px) + 16px);"
-      aria-hidden="true"
-    ></div>
-  </div>
-</div>
+</SubpageShell>

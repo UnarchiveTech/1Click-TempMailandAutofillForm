@@ -2,25 +2,71 @@
 #
 # Lefthook configuration for 1Click Temp Mail & Autofill Extension.
 # Refer to https://github.com/evilmartians/lefthook/blob/master/docs/configuration.md
-
 pre-commit:
   parallel: true
   commands:
-    sync-check:
-      run: bun scripts/check-sync-docs.ts
-
+    audit:
+      # THE commit-time gate. Runs exactly what CI runs (`bun run audit` in
+      # .github/workflows/pr-validation.yml): every check-* script -
+      # sync-docs, storage-namespace-drift, storage-rmw (an unserialized whole-
+      # key read-modify-write; see scripts/check-storage-rmw.ts +
+      # scripts/baselines/storage-rmw.txt), providers, hardcoded-English,
+      # layer-tokens, pseudo-overlays, avatar-sizes, icon-references (does every
+      # `<Icon name>` resolve in the catalog? an unknown name renders nothing;
+      # see scripts/check-icon-references.ts + scripts/baselines/icon-reference.txt),
+      # vocabulary-fields (does every field that CARRIES a shared vocabulary's
+      # token name its union - and is every vocabulary-keyed table typed? the
+      # registry is scripts/shared-vocabularies.ts, the gate
+      # scripts/check-vocabulary-fields.ts),
+      # z-layers (every overlay's stacking order against PORTAL_Z, and no entry
+      # animation retaining a transform), translations, terminology-drift (one
+      # concept = one term per locale, per curated group), unused-locales,
+      # locale-key-references (does every referenced key exist in en.json?),
+      # plural-keys (is every <key>/<key>Plural pair complete and reachable?),
+      # background-locales, message-types, branch-protection (live GitHub
+      # gate, skips without a token), suppressions (ratchet on inline lint
+      # suppressions; see scripts/check-suppressions.ts + scripts/baselines/suppressions.txt),
+      # stale-caches (every module-level cache must name a TTL, an invalidation
+      # path or a bound; see scripts/check-stale-caches.ts + scripts/baselines/stale-caches.txt),
+      # undo-guards (every toast undo callback names isUndoCurrent or a reasoned
+      # scripts/baselines/undo-guards.txt row; see scripts/check-undo-guards.ts),
+      # i18n-fit --strict - plus a full-repo Biome check. Declaring one command instead of a hand-maintained subset
+      # means commit-time enforcement can never drift from the CI gate again:
+      # a check added to the audit chain (like check-i18n-fit --strict, which
+      # the old subset omitted) is enforced on every commit automatically.
+      run: bun run audit
     biome:
-      glob: "*.{js,ts,jsx,tsx,svelte,json,jsonc}"
+      # Auto-format/lint-fix the staged files (audit re-verifies the result);
+      # safe to run in parallel - the fix finishes long before audit's chain
+      # reaches its final Biome step. The hook deliberately does NOT pass
+      # --error-on-warnings: combined with --write it still applies safe fixes
+      # but exits 1 on unfixable warnings, which would abort the commit with a
+      # modified-but-unstaged file. Fix-then-stage stays here; warning
+      # enforcement (zero-warning policy via --error-on-warnings) lives in the
+      # `check` npm script, which `bun run audit` re-runs as its final step.
+      glob: "*.{js,ts,jsx,tsx,svelte,json,jsonc,css}"
       run: bun x biome check --write --no-errors-on-unmatched {staged_files} && git add {staged_files}
-
-    check-translations:
-      run: bun run check-translations
-
-    check-hardcoded-english:
-      run: bun run check-hardcoded-english
-
+    check-mirror-locales:
+      # Fails when any locale is missing keys from en.json, so newly added keys
+      # can't ship without a translation (mirror-locales adds English fallbacks
+      # for translators to localize later). Not part of the audit chain.
+      run: bun run check-mirror-locales
+    check-version-parity:
+      # Fails when release.yml's inline manifest-version sanitizer drifts from
+      # src/utils/version-sanitize.ts, so the two copies can't silently
+      # disagree about pre-release versioning again. Not part of the audit chain.
+      run: bun run check-version-parity
+    check-tsconfig-coverage:
+      # Fails when tsconfig.json include loses an anchor (src/tests/scripts/
+      # root *.config.ts) or a root config / script file falls outside the
+      # parsed program, so typecheck coverage can't silently shrink.
+      # Not part of the audit chain.
+      run: bun run check-tsconfig-coverage
     typecheck:
       run: bun run typecheck
-
     test:
-      run: bun test tests/unit
+      # `--isolate` is REQUIRED, not decorative: Bun does not honour the
+      # `[test] isolate` bunfig key, so without the flag every file shares one
+      # global object and module registry and a dozen order-dependent tests in
+      # the expiry/email-storage suites fail. See tests/unit/harness/.
+      run: bun test --isolate tests

@@ -1,10 +1,11 @@
 /**
- * Identity routing — sticky domain identity, domain hints, selected/default.
+ * Identity routing - sticky domain identity, domain hints, selected/default.
  * Does not store passwords; only picks which Identity profile to use.
  */
 
 import { browser } from 'wxt/browser';
 import type { Identity } from '@/utils/types.js';
+import { hostMatchesDomainScope } from '@/utils/validation.js';
 import {
   getSiteProfile,
   getStickyIdentityForDomain,
@@ -12,13 +13,6 @@ import {
   setStickyIdentityForDomain,
 } from './storage.js';
 import type { IdentityRouteResult } from './types.js';
-
-function hostMatchesHint(domain: string, hint: string): boolean {
-  const d = normalizeDomain(domain);
-  const h = normalizeDomain(hint);
-  if (!d || !h) return false;
-  return d === h || d.endsWith(`.${h}`) || h.endsWith(`.${d}`);
-}
 
 /**
  * Pick the best identity for a page domain.
@@ -79,11 +73,13 @@ export async function routeIdentityForDomain(
     }
   }
 
-  // 3) Domain hints on identity
+  // 3) Domain hints & domain field overrides on identity
   if (d) {
     for (const id of list) {
       const hints = id.domainHints || [];
-      if (hints.some((h) => hostMatchesHint(d, h))) {
+      const overrideDomains = id.domainFieldOverrides ? Object.keys(id.domainFieldOverrides) : [];
+      const allDomains = [...hints, ...overrideDomains];
+      if (allDomains.some((h) => hostMatchesDomainScope(d, h))) {
         return { identityId: id.id, reason: 'domain_hint', identity: id };
       }
     }

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { detectIconFromMessage, ICON_KEYWORD_MAPPING } from '@/utils/iconMapping';
+import { detectIconFromMessage, ICON_KEYWORD_MAPPING } from '@/utils/ui/iconMapping';
 
 describe('detectIconFromMessage', () => {
   test('returns "deleted" for delete messages', () => {

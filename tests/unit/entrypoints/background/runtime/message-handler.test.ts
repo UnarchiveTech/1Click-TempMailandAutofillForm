@@ -1,32 +1,46 @@
 import { describe, expect, test } from 'bun:test';
 import type { RuntimeMessage } from '@/entrypoints/background/runtime/message-handler';
 import {
-  aliases,
+  handlers,
   requireNumber,
   requireString,
   resolveHandlerKey,
 } from '@/entrypoints/background/runtime/message-handler';
 
+describe('worker field-label handler', () => {
+  test('returns the real local classification through the registered handler', async () => {
+    let response: unknown;
+    await handlers.matchKindFromText?.(
+      { type: 'matchKindFromText', text: 'Given name' },
+      { id: 'test-extension' },
+      (value: unknown) => {
+        response = value;
+      }
+    );
+    expect(response).toEqual({ success: true, result: { kind: 'firstName', confidence: 0.9 } });
+  });
+});
+
 // ── requireString ────────────────────────────────────────────────────────────
 
 describe('requireString', () => {
   test('returns the value when it is a non-empty string', () => {
-    const msg: RuntimeMessage = { type: 'createInbox', provider: 'guerrilla' };
+    const msg: RuntimeMessage = { type: 'createAddress', provider: 'guerrilla' };
     expect(requireString(msg, 'provider')).toBe('guerrilla');
   });
 
   test('throws when the field is missing', () => {
-    const msg: RuntimeMessage = { type: 'createInbox' };
+    const msg: RuntimeMessage = { type: 'createAddress' };
     expect(() => requireString(msg, 'provider')).toThrow('provider');
   });
 
   test('throws when the field is an empty string', () => {
-    const msg: RuntimeMessage = { type: 'createInbox', provider: '' };
+    const msg: RuntimeMessage = { type: 'createAddress', provider: '' };
     expect(() => requireString(msg, 'provider')).toThrow('provider');
   });
 
   test('throws when the field is not a string', () => {
-    const msg = { type: 'createInbox', provider: 123 } as unknown as RuntimeMessage;
+    const msg = { type: 'createAddress', provider: 123 } as unknown as RuntimeMessage;
     expect(() => requireString(msg, 'provider')).toThrow('provider');
   });
 });
@@ -40,7 +54,9 @@ describe('requireNumber', () => {
   });
 
   test('throws when the field is missing', () => {
-    const msg: RuntimeMessage = { type: 'updateRefreshInterval' };
+    // Deliberately malformed payload - the union requires intervalMs, but the
+    // browser boundary can deliver anything; requireNumber is the runtime gate.
+    const msg = { type: 'updateRefreshInterval' } as unknown as RuntimeMessage;
     expect(() => requireNumber(msg, 'intervalMs')).toThrow('intervalMs');
   });
 
@@ -70,48 +86,25 @@ describe('requireNumber', () => {
 
 describe('resolveHandlerKey', () => {
   test('resolves findSiteReplay action handler', () => {
-    const msg: RuntimeMessage = { action: 'findSiteReplay' };
+    // Minimal payload (no required fields) - resolveHandlerKey only reads the
+    // discriminant, so a structurally-invalid message must still resolve.
+    const msg = { action: 'findSiteReplay' } as unknown as RuntimeMessage;
     expect(resolveHandlerKey(msg)).toBe('findSiteReplay');
   });
 
   test('resolves a known type-based handler', () => {
-    const msg: RuntimeMessage = { type: 'createInbox' };
-    expect(resolveHandlerKey(msg)).toBe('createInbox');
+    const msg: RuntimeMessage = { type: 'createAddress' };
+    expect(resolveHandlerKey(msg)).toBe('createAddress');
   });
 
-  test('resolves createInboxWithGesture type-based handler', () => {
-    const msg: RuntimeMessage = { type: 'createInboxWithGesture' };
-    expect(resolveHandlerKey(msg)).toBe('createInboxWithGesture');
+  test('resolves createAddressWithGesture type-based handler', () => {
+    const msg: RuntimeMessage = { type: 'createAddressWithGesture' };
+    expect(resolveHandlerKey(msg)).toBe('createAddressWithGesture');
   });
 
   test('resolves a known action-based handler (direct)', () => {
     const msg: RuntimeMessage = { action: 'hardReset' };
     expect(resolveHandlerKey(msg)).toBe('hardReset');
-  });
-
-  test('resolves a known action-based handler (alias)', () => {
-    const msg: RuntimeMessage = { action: 'removeCustomProviderInstance' };
-    expect(resolveHandlerKey(msg)).toBe('removeCustomInstance');
-  });
-
-  test('resolves addCustomProviderInstance alias to addCustomInstance', () => {
-    const msg: RuntimeMessage = { action: 'addCustomProviderInstance' };
-    expect(resolveHandlerKey(msg)).toBe('addCustomInstance');
-  });
-
-  test('resolves getSelectedProviderInstance alias to getSelectedInstance', () => {
-    const msg: RuntimeMessage = { action: 'getSelectedProviderInstance' };
-    expect(resolveHandlerKey(msg)).toBe('getSelectedInstance');
-  });
-
-  test('resolves setSelectedProviderInstance alias to setSelectedInstance', () => {
-    const msg: RuntimeMessage = { action: 'setSelectedProviderInstance' };
-    expect(resolveHandlerKey(msg)).toBe('setSelectedInstance');
-  });
-
-  test('resolves setInstance alias to setSelectedInstance', () => {
-    const msg: RuntimeMessage = { action: 'setInstance' };
-    expect(resolveHandlerKey(msg)).toBe('setSelectedInstance');
   });
 
   test('returns undefined for an unknown type', () => {
@@ -124,40 +117,57 @@ describe('resolveHandlerKey', () => {
     expect(resolveHandlerKey(msg)).toBeUndefined();
   });
 
+  test('rejects inherited object names as type and action handlers', () => {
+    for (const name of ['toString', 'constructor', '__proto__', 'hasOwnProperty']) {
+      expect(resolveHandlerKey({ type: name })).toBeUndefined();
+      expect(resolveHandlerKey({ action: name })).toBeUndefined();
+    }
+  });
+
+  test('falls back from an inherited type name to a real action', () => {
+    expect(resolveHandlerKey({ type: 'toString', action: 'hardReset' })).toBe('hardReset');
+  });
+
   test('returns undefined when neither type nor action is set', () => {
     const msg = {} as unknown as RuntimeMessage;
     expect(resolveHandlerKey(msg)).toBeUndefined();
   });
 
   test('prefers type over action when both are set and type is known', () => {
-    const msg = { type: 'createInbox', action: 'hardReset' } as unknown as RuntimeMessage;
-    expect(resolveHandlerKey(msg)).toBe('createInbox');
+    const msg = { type: 'createAddress', action: 'hardReset' } as unknown as RuntimeMessage;
+    expect(resolveHandlerKey(msg)).toBe('createAddress');
   });
 
   test('falls back to action when type is unknown but action is known', () => {
     const msg = { type: 'unknownType', action: 'hardReset' } as unknown as RuntimeMessage;
     expect(resolveHandlerKey(msg)).toBe('hardReset');
   });
-
-  test('falls back to aliased action when type is unknown', () => {
-    const msg = { type: 'unknownType', action: 'setInstance' } as unknown as RuntimeMessage;
-    expect(resolveHandlerKey(msg)).toBe('setSelectedInstance');
-  });
 });
 
-// ── aliases map integrity ────────────────────────────────────────────────────
+// ── legacy aliased action strings (alias map removed) ───────────────────────
 
-describe('aliases', () => {
-  test('every alias target is a real handler key', () => {
-    for (const [aliasAction, targetHandler] of Object.entries(aliases)) {
-      const msg = { action: aliasAction } as unknown as RuntimeMessage;
-      const resolved = resolveHandlerKey(msg);
-      expect(resolved).toBe(targetHandler);
-      expect(resolved).toBeDefined();
-    }
+// These action strings were previously translated to a canonical handler via the
+// `aliases` map (e.g. `setInstance` → `setSelectedInstance`). The map is gone, so
+// any stale sender still using them must fail closed (resolve to undefined).
+
+describe('legacy alias actions are no longer resolvable', () => {
+  test('setInstance resolves to undefined', () => {
+    const msg = { action: 'setInstance' } as unknown as RuntimeMessage;
+    expect(resolveHandlerKey(msg)).toBeUndefined();
   });
 
-  test('aliases is non-empty', () => {
-    expect(Object.keys(aliases).length).toBeGreaterThan(0);
+  test('removeCustomProviderInstance resolves to undefined', () => {
+    const msg = { action: 'removeCustomProviderInstance' } as unknown as RuntimeMessage;
+    expect(resolveHandlerKey(msg)).toBeUndefined();
+  });
+
+  test('getSelectedProviderInstance resolves to undefined', () => {
+    const msg = { action: 'getSelectedProviderInstance' } as unknown as RuntimeMessage;
+    expect(resolveHandlerKey(msg)).toBeUndefined();
+  });
+
+  test('setSelectedProviderInstance resolves to undefined', () => {
+    const msg = { action: 'setSelectedProviderInstance' } as unknown as RuntimeMessage;
+    expect(resolveHandlerKey(msg)).toBeUndefined();
   });
 });

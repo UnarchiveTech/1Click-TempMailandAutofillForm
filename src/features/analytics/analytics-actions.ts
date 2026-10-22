@@ -1,6 +1,6 @@
-import type { Browser } from 'wxt/browser';
-import { logError } from '@/utils/logger.js';
-import { DEFAULT_ANALYTICS } from '@/utils/storage-keys.js';
+import { logError, logWarn } from '@/utils/logger.js';
+import { DEFAULT_ANALYTICS } from '@/utils/storage/storage-keys.js';
+import type { PerformanceSummary, StorageTrendPoint } from '@/utils/types.js';
 
 export interface AnalyticsData {
   createdAt: string | number | undefined;
@@ -11,11 +11,15 @@ export interface AnalyticsData {
   extensionOpens?: number;
   emailsRead?: number;
   pageVisits?: Record<string, number>;
+  /** Sampled storage footprint history (persisted in the background). */
+  storageTrend?: StorageTrendPoint[];
   performance?: {
     emailFetchTimes: number[];
     providerLatency: Record<string, number[]>;
     uiRenderTimes: number[];
   };
+  /** Derived averages from the background (getAnalytics response); never persisted. */
+  performanceSummary?: PerformanceSummary;
 }
 
 export interface AnalyticsState {
@@ -30,11 +34,14 @@ export interface AnalyticsSetters {
 
 export async function loadAnalytics(
   ext: Browser,
-  _state: AnalyticsState,
+  state: AnalyticsState,
   setters: AnalyticsSetters
 ) {
+  // Background samples and dialog-visit tracking refresh this data frequently.
+  // Once loaded, retain the view and its focused controls during refreshes.
+  const showLoading = state.analytics.createdAt === undefined;
   try {
-    setters.setAnalyticsLoading(true);
+    if (showLoading) setters.setAnalyticsLoading(true);
     const response = await ext.runtime.sendMessage({ type: 'getAnalytics' });
     if (response?.success && response.analytics) {
       const loaded = response.analytics;
@@ -47,18 +54,20 @@ export async function loadAnalytics(
         extensionOpens: loaded.extensionOpens || 0,
         emailsRead: loaded.emailsRead || 0,
         pageVisits: loaded.pageVisits || {},
+        storageTrend: Array.isArray(loaded.storageTrend) ? loaded.storageTrend : [],
         performance: {
           emailFetchTimes: loaded.performance?.emailFetchTimes || [],
           providerLatency: loaded.performance?.providerLatency || {},
           uiRenderTimes: loaded.performance?.uiRenderTimes || [],
         },
+        performanceSummary: response.performanceSummary,
       };
       setters.setAnalytics(normalized);
     }
   } catch (e: unknown) {
     logError('loadAnalytics error:', undefined, e instanceof Error ? e : new Error(String(e)));
   } finally {
-    setters.setAnalyticsLoading(false);
+    if (showLoading) setters.setAnalyticsLoading(false);
   }
 }
 
@@ -73,6 +82,7 @@ export async function resetAnalytics(
       const resetData: AnalyticsData = {
         ...DEFAULT_ANALYTICS,
         createdAt: Date.now(),
+        storageTrend: [],
         performance: {
           emailFetchTimes: [],
           providerLatency: {},
@@ -80,6 +90,12 @@ export async function resetAnalytics(
         },
       };
       setters.setAnalytics(resetData);
+    } else {
+      // success:false - the reset did NOT happen; leave the data untouched and
+      // leave a trace instead of looking like a no-op.
+      logWarn('resetAnalytics rejected by background', {
+        error: (response as { error?: unknown } | undefined)?.error,
+      });
     }
   } catch (e: unknown) {
     logError('resetAnalytics error:', undefined, e instanceof Error ? e : new Error(String(e)));

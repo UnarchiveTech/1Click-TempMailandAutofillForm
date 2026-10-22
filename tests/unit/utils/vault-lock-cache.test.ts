@@ -1,5 +1,9 @@
-import { describe, expect, mock, test } from 'bun:test';
+import { afterAll, describe, expect, mock, test } from 'bun:test';
 
+// Restore module mocks so nothing leaks into later test files (one Bun process).
+afterAll(() => {
+  mock.restore();
+});
 const localStorage: Record<string, unknown> = {};
 const sessionStorage: Record<string, unknown> = {};
 
@@ -50,9 +54,9 @@ mock.module('wxt/browser', () => ({
 describe('lockVault', () => {
   test('clears the cached protected-vault key as well as session storage', async () => {
     const { MASTER_KEY_ID, clearCachedMasterKey, decrypt, encrypt } = await import(
-      '@/utils/crypto.js'
+      '@/utils/security/crypto.js'
     );
-    const { lockVault } = await import('@/utils/vault-lock.js');
+    const { lockVault } = await import('@/utils/storage/vault-lock.js');
 
     clearCachedMasterKey();
     resetStorage();
@@ -74,14 +78,14 @@ describe('lockVault', () => {
   });
 });
 
-describe('setInboxes', () => {
+describe('setAddresses', () => {
   test('encrypts tokens at rest and fails closed while the vault is locked', async () => {
-    const { MASTER_KEY_ID, clearCachedMasterKey } = await import('@/utils/crypto.js');
-    const { setInboxes } = await import('@/utils/storage-keys.js');
+    const { MASTER_KEY_ID, clearCachedMasterKey } = await import('@/utils/security/crypto.js');
+    const { setAddresses } = await import('@/utils/storage/storage-keys.js');
 
     clearCachedMasterKey();
     resetStorage();
-    await setInboxes([
+    await setAddresses([
       {
         id: 'inbox-1',
         address: 'person@example.com',
@@ -91,11 +95,14 @@ describe('setInboxes', () => {
       },
     ] as never);
 
-    const persistedInboxes = localStorage.inboxes as Array<{ token?: string; sidToken?: string }>;
-    expect(persistedInboxes[0].token).toStartWith('_enc_:');
-    expect(persistedInboxes[0].token).not.toContain('raw-token');
-    expect(persistedInboxes[0].sidToken).toStartWith('_enc_:');
-    expect(persistedInboxes[0].sidToken).not.toContain('raw-session-token');
+    const persistedAddresses = localStorage.addresses as Array<{
+      token?: string;
+      sidToken?: string;
+    }>;
+    expect(persistedAddresses[0].token).toStartWith('_enc_:');
+    expect(persistedAddresses[0].token).not.toContain('raw-token');
+    expect(persistedAddresses[0].sidToken).toStartWith('_enc_:');
+    expect(persistedAddresses[0].sidToken).not.toContain('raw-session-token');
 
     clearCachedMasterKey();
     resetStorage();
@@ -103,7 +110,7 @@ describe('setInboxes', () => {
     expect(sessionStorage[MASTER_KEY_ID]).toBeUndefined();
 
     await expect(
-      setInboxes([
+      setAddresses([
         {
           id: 'inbox-1',
           address: 'person@example.com',
@@ -113,6 +120,6 @@ describe('setInboxes', () => {
       ] as never)
     ).rejects.toThrow();
 
-    expect(localStorage.inboxes).toBeUndefined();
+    expect(localStorage.addresses).toBeUndefined();
   });
 });

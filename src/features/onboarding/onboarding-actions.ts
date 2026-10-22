@@ -1,14 +1,17 @@
+import type { browser } from 'wxt/browser';
+import { writeWithRetry } from '@/utils/storage/storage-write.js';
+
 export interface OnboardingSetters {
-  onCreateInbox: (provider: string) => void | Promise<void>;
+  onCreateAddress: (provider: string) => void | Promise<void>;
 }
 
-export async function handleCreateInbox(
+export async function handleCreateAddress(
   provider: string,
-  ext: typeof browser,
+  _ext: typeof browser,
   setters: OnboardingSetters
 ): Promise<void> {
   // Save selected provider so create uses the chosen one; mark complete only after success
-  await ext.storage.local.set({ selectedProvider: provider });
-  await setters.onCreateInbox(provider);
-  await ext.storage.local.set({ onboardingComplete: true });
+  await writeWithRetry({ selectedProvider: provider });
+  await setters.onCreateAddress(provider);
+  await writeWithRetry({ onboardingComplete: true });
 }

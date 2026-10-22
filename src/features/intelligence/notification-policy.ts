@@ -1,7 +1,8 @@
 /**
- * Notification smartness — quiet hours, OTP/magic-only, muted senders, digest.
+ * Notification smartness - quiet hours, OTP/magic-only, muted senders, digest.
  */
 
+import { isRealOtp } from '@/utils/otp/otp-code.js';
 import type { Email } from '@/utils/types.js';
 import { loadNotificationIntelligence, normalizeDomain } from './storage.js';
 import type { NotificationIntelligenceSettings } from './types.js';
@@ -28,14 +29,16 @@ export function isInQuietHours(
 }
 
 function senderDomain(email: Email): string {
-  const from = email.from || '';
+  // Display names can contain @ too; prefer the mailbox inside angle brackets.
+  const rawFrom = email.from || '';
+  const from = (/<([^<>]+)>/.exec(rawFrom)?.[1] ?? rawFrom).trim();
   const at = from.lastIndexOf('@');
   if (at >= 0) return normalizeDomain(from.slice(at + 1));
   return normalizeDomain(from);
 }
 
 export function isOtpOrMagic(email: Email): boolean {
-  if (email.otp || email.isOtp) return true;
+  if (isRealOtp(email.otp) || email.isOtp) return true;
   if (email.hasMagicLink) return true;
   if (email.magicLinks && email.magicLinks.length > 0) return true;
   return false;

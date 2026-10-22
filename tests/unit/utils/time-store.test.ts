@@ -1,11 +1,12 @@
 import { describe, expect, test } from 'bun:test';
-import { useCurrentTime } from '@/utils/time-store';
+import { get } from 'svelte/store';
+import { useCurrentTime } from '@/utils/time/time-store';
 
 describe('time-store', () => {
   test('returns current time dynamically', () => {
     const timeRef = useCurrentTime();
-    expect(typeof timeRef.currentTime).toBe('number');
-    expect(timeRef.currentTime).toBeLessThanOrEqual(Date.now());
+    expect(typeof get(timeRef)).toBe('number');
+    expect(get(timeRef)).toBeLessThanOrEqual(Date.now());
   });
 
   test('subscribes and updates, and handles double unsubscribe cleanly', () => {

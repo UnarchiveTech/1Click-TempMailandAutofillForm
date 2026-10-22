@@ -1,8 +1,8 @@
 /**
- * A11y-first field classification — prefer label / aria over name heuristics.
+ * A11y-first field classification - prefer label / aria over name heuristics.
  */
 
-import { matchKindFromTextViaBg } from '@/utils/content-bg-bridge.js';
+import { matchKindFromTextViaBg } from '@/utils/content/content-bg-bridge.js';
 import type { FormFieldKind } from './types.js';
 
 export function getAccessibleName(el: HTMLElement): string {
@@ -40,7 +40,7 @@ export function getAccessibleName(el: HTMLElement): string {
   return parts.join(' ').replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
-import { safeId, safeName } from '@/utils/dom-safe.js';
+import { safeId, safeName } from '@/utils/security/dom-safe.js';
 
 /** Score kind with a11y-first priority (label/aria > autocomplete > name/id). */
 export async function classifyFieldA11y(

@@ -3,7 +3,9 @@ let {
   compact = false,
   /** Show logo + 1Click title (omit "Temp Mail" subtitle) */
   showTitle = false,
-} = $props<{ compact?: boolean; showTitle?: boolean }>();
+  /** Explicit glyph size for standalone branding; header density stays unchanged. */
+  iconSize,
+}: { compact?: boolean; showTitle?: boolean; iconSize?: number } = $props();
 
 /** MD3 density: header uses 24dp icon; compact 20dp */
 const iconSizeClass = $derived(compact ? 'h-5 w-5' : 'h-6 w-6');
@@ -21,6 +23,8 @@ const showSubtitle = $derived(!compact && !showTitle);
     viewBox="0 0 900 900"
     xmlns="http://www.w3.org/2000/svg"
     class="shrink-0 transition-all duration-300 ease-out {iconSizeClass}"
+    style:width={iconSize === undefined ? undefined : `${iconSize}px`}
+    style:height={iconSize === undefined ? undefined : `${iconSize}px`}
     aria-hidden="true"
   >
     <style>
@@ -33,7 +37,7 @@ const showSubtitle = $derived(!compact && !showTitle);
     </defs>
     <g clip-path="url(#squareClip)">
       <!-- Tight viewBox crops the glyph's internal whitespace (path spans
-           x≈67–1134, y≈107–762 of the 1262×848 canvas); larger centered region
+           x≈67-1134, y≈107-762 of the 1262×848 canvas); larger centered region
            fills the tile ~93% wide instead of ~75%. -->
       <!-- Glyph sizing: at 24dp the glyph ink is ~13.75px tall while the bold
            16px "1Click" letters are ~12px tall, so the logo's top edge pokes

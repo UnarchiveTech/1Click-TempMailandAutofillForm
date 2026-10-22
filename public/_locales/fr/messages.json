@@ -1,0 +1,16 @@
+{
+  "extName": { "message": "1Click : Mail temporaire et remplissage" },
+  "extDescription": {
+    "message": "Générez des adresses e-mail temporaires et remplissez automatiquement les codes OTP et les formulaires de connexion en un clic."
+  },
+  "cmdAutofillForm": {
+    "message": "Remplir automatiquement le formulaire d'inscription de la page actuelle"
+  },
+  "cmdOpenAutofillManager": {
+    "message": "Ouvrir le gestionnaire de remplissage automatique (profils et identifiants)"
+  },
+  "cmdQuickGenerateInbox": {
+    "message": "Générer rapidement une nouvelle adresse e-mail temporaire"
+  },
+  "cmdCopyLatestOtp": { "message": "Copier le dernier code OTP dans le presse-papiers" }
+}

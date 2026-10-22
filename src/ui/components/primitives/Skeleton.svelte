@@ -28,6 +28,6 @@ function getVariantClasses() {
 </script>
 
 <div 
-  class="animate-pulse bg-md-outline-variant {getVariantClasses()} {className}"
+  class="animate-pulse motion-reduce:animate-none bg-md-outline-variant {getVariantClasses()} {className}"
   style="width: {width}; height: {height}; {radius ? `border-radius: ${radius};` : ''}"
 ></div>

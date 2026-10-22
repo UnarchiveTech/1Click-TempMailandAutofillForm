@@ -1,4 +1,3 @@
-// biome-ignore-all lint/suspicious/noExplicitAny: mock and stub typings
 import { describe, expect, mock, test } from 'bun:test';
 import {
   buildRequest,
@@ -13,8 +12,13 @@ import {
   resolveTemplateParams,
   resolveTemplateValue,
 } from '@/utils/dsl/email-fetcher';
-import type { EmailServiceContext, OperationConfig, ProviderConfig } from '@/utils/email-service';
-import type { Account } from '@/utils/types.js';
+import type {
+  EmailServiceContext,
+  OperationConfig,
+  ProviderConfig,
+} from '@/utils/email/email-service';
+import { loadProviderConfig } from '@/utils/email/email-service';
+import type { Address } from '@/utils/types.js';
 
 // Mock global browser API
 (globalThis as Record<string, unknown>).browser = {
@@ -103,9 +107,9 @@ describe('resolveTemplateValue', () => {
     expect(resolveTemplateValue('{auth.token}', ctx)).toBe('abc123');
   });
 
-  test('returns template string if no auth token provided', () => {
+  test('rejects unresolved auth placeholders', () => {
     const ctx: EmailServiceContext = {};
-    expect(resolveTemplateValue('{auth.token}', ctx)).toBe('{auth.token}');
+    expect(() => resolveTemplateValue('{auth.token}', ctx)).toThrow('Unresolved template variable');
   });
 
   test('resolves {timestamp}', () => {
@@ -137,9 +141,9 @@ describe('resolveTemplateValue', () => {
     expect(resolveTemplateValue('{emailUser}', ctx)).toBe('testuser');
   });
 
-  test('returns template string for unknown variable', () => {
+  test('rejects unknown variables', () => {
     const ctx: EmailServiceContext = {};
-    expect(resolveTemplateValue('{unknown}', ctx)).toBe('{unknown}');
+    expect(() => resolveTemplateValue('{unknown}', ctx)).toThrow('Unresolved template variable');
   });
 });
 
@@ -164,12 +168,11 @@ describe('resolveTemplateParams', () => {
     });
   });
 
-  test('skips undefined resolved values', () => {
+  test('rejects undefined resolved values', () => {
     const ctx: EmailServiceContext = {};
-    const params = { missing: '{unknown}' };
-    const resolved = resolveTemplateParams(params, ctx);
-    // Unknown variable returns the template string, not undefined
-    expect(resolved).toEqual({ missing: '{unknown}' });
+    expect(() => resolveTemplateParams({ missing: '{unknown}' }, ctx)).toThrow(
+      'Unresolved template variable'
+    );
   });
 
   test('handles empty params', () => {
@@ -202,6 +205,18 @@ describe('parseTimestampValue', () => {
     expect(parseTimestampValue('not-a-date')).toBeNull();
   });
 
+  test('returns null for partially-numeric string instead of parseInt-prefixing it', () => {
+    // parseInt('1718abc') === 1718 ≈ 1970 - a silent epoch-time message that
+    // corrupts sort order, newest-OTP selection, and retention math.
+    expect(parseTimestampValue('1718abc')).toBeNull();
+    expect(parseTimestampValue(' 1718abc ')).toBeNull();
+    expect(parseTimestampValue('1718x')).toBeNull();
+  });
+
+  test('accepts padded all-digit strings', () => {
+    expect(parseTimestampValue(' 1700000000 ')).toBe(1700000000);
+  });
+
   test('returns null for zero', () => {
     expect(parseTimestampValue(0)).toBeNull();
   });
@@ -228,6 +243,32 @@ describe('parseDateString', () => {
   test('parses datetime with dash-space format and Z appended', () => {
     // The function appends Z if not present, so "2023-11-14 22:13:20" → "2023-11-14T22:13:20Z"
     const result = parseDateString('2023-11-14 22:13:20');
+    expect(result).not.toBeNull();
+    expect(result?.toISOString()).toBe('2023-11-14T22:13:20.000Z');
+  });
+
+  test('keeps a negative numeric offset instead of appending Z', () => {
+    // Regression: the old check only looked for '+' / 'Z', so a NEGATIVE offset
+    // like "-0700" became "…T22:13:20 -0700Z" - an invalid date → null.
+    const result = parseDateString('2023-11-14 22:13:20 -0700');
+    expect(result).not.toBeNull();
+    expect(result?.toISOString()).toBe('2023-11-15T05:13:20.000Z');
+  });
+
+  test('keeps a positive numeric offset and normalizes it to ISO', () => {
+    const result = parseDateString('2023-11-14 22:13:20 +0200');
+    expect(result).not.toBeNull();
+    expect(result?.toISOString()).toBe('2023-11-14T20:13:20.000Z');
+  });
+
+  test('accepts an offset with a colon (HH:MM form)', () => {
+    const result = parseDateString('2023-11-14 22:13:20 -07:00');
+    expect(result).not.toBeNull();
+    expect(result?.toISOString()).toBe('2023-11-15T05:13:20.000Z');
+  });
+
+  test('accepts an explicit trailing Z', () => {
+    const result = parseDateString('2023-11-14 22:13:20Z');
     expect(result).not.toBeNull();
     expect(result?.toISOString()).toBe('2023-11-14T22:13:20.000Z');
   });
@@ -313,6 +354,25 @@ const testOperation: OperationConfig = {
 };
 
 describe('buildRequest', () => {
+  test('builds Burner v2 message requests with the address id supplied by the fetcher', () => {
+    const config = loadProviderConfig('burner');
+    const operation = config.operations.fetchEmails;
+    expect(
+      config.multiInstance?.instances?.every((instance) => instance.apiUrl.includes('/api/v2'))
+    ).toBe(true);
+    expect(operation).toBeDefined();
+    if (!operation) throw new Error('Burner message operation is required');
+
+    const request = buildRequest(config, operation, {
+      instanceUrl: 'https://alphac.qzz.io/api/v2',
+      variables: { addressId: 'inbox-123' },
+      auth: { token: 'test-token' },
+    });
+
+    expect(request.url).toBe('https://alphac.qzz.io/api/v2/inbox/inbox-123/messages');
+    expect((request.options.headers as Record<string, string>)['X-Burner-Key']).toBe('test-token');
+  });
+
   test('builds URL with function as query param', () => {
     const { url } = buildRequest(testProviderConfig, testOperation, {});
     expect(url).toContain('f=get_data');
@@ -335,6 +395,11 @@ describe('buildRequest', () => {
     expect(url).toContain('sid_token=tok123');
   });
 
+  test('resolves embedded auth placeholders in parameter templates', () => {
+    const ctx: EmailServiceContext = { auth: { token: 'tok123' } };
+    expect(resolveTemplateValue('Bearer {auth.token}', ctx)).toBe('Bearer tok123');
+  });
+
   test('adds optional params when provided', () => {
     const op: OperationConfig = {
       ...testOperation,
@@ -347,13 +412,35 @@ describe('buildRequest', () => {
   test('uses RESTful path for function starting with /', () => {
     const op: OperationConfig = {
       ...testOperation,
-      function: '/inbox/{inboxId}/messages',
+      function: '/inbox/{addressId}/messages',
     };
     const { url } = buildRequest(testProviderConfig, op, {
-      variables: { inboxId: '123' },
+      variables: { addressId: '123' },
     });
     expect(url).toContain('/inbox/123/messages');
     expect(url).not.toContain('f=');
+  });
+
+  test('replaces repeated path variables and regex-special header names safely', () => {
+    const op: OperationConfig = {
+      ...testOperation,
+      function: '/inbox/{addressId}/{addressId}/{headers.X+Token}',
+    };
+    const { url } = buildRequest(testProviderConfig, op, {
+      variables: { addressId: 'user/name' },
+      sessionHeaders: { 'X+Token': 'a/b' },
+    });
+    expect(url).toContain('/inbox/user%2Fname/user%2Fname/a%2Fb');
+  });
+
+  test('rejects unresolved placeholders in RESTful function paths', () => {
+    const op: OperationConfig = {
+      ...testOperation,
+      function: '/inbox/{missingId}',
+    };
+    expect(() => buildRequest(testProviderConfig, op, {})).toThrow(
+      'Unresolved template variable in provider function path'
+    );
   });
 
   test('replaces {instanceUrl} in apiUrl', () => {
@@ -443,7 +530,12 @@ describe('buildRequest', () => {
     expect((options.headers as Record<string, string>).Authorization).toBe('Bearer myjwt123');
   });
 
-  test('injects captured session cookies if send is enabled', () => {
+  test('does not inject captured session cookies into request headers', () => {
+    // A manual `Cookie` request header is a forbidden header in browsers and
+    // is silently dropped by fetch() - it can never work. Captured cookies
+    // are written into the browser cookie jar via browser.cookies.set by
+    // EmailService.applySessionCookies instead, so buildRequest must NOT
+    // fabricate a Cookie header.
     const config: ProviderConfig = {
       ...testProviderConfig,
       cookies: { send: true },
@@ -451,9 +543,7 @@ describe('buildRequest', () => {
     const { options } = buildRequest(config, testOperation, {
       sessionCookies: { PHPSESSID: 'session123', SUBSCR: 'sub456' },
     });
-    expect((options.headers as Record<string, string>).Cookie).toBe(
-      'PHPSESSID=session123; SUBSCR=sub456'
-    );
+    expect((options.headers as Record<string, string>).Cookie).toBeUndefined();
   });
 
   test('supports JSON POST request body serialization', () => {
@@ -697,6 +787,20 @@ describe('field transforms in mapMessageItem', () => {
 // ── pagination in fetchEmails ────────────────────────────────────────────────
 
 describe('pagination in fetchEmails', () => {
+  test('missing configured response path returns no messages instead of throwing during logging', async () => {
+    const config: ProviderConfig = {
+      ...testProviderConfig,
+      emailFetching: {
+        type: 'single_step',
+        operation: 'get_emails',
+        dataPath: 'missing.items',
+        responseMapping: { id: 'id' },
+      },
+    };
+    const record = { id: 'inb123', address: 'test@test.com' } as Address;
+    await expect(fetchEmails(config, record, async () => ({}))).resolves.toEqual([]);
+  });
+
   test('injects default offset pagination variables', async () => {
     const config: ProviderConfig = {
       ...testProviderConfig,
@@ -710,25 +814,25 @@ describe('pagination in fetchEmails', () => {
         },
       },
     };
-    const inbox = { id: 'inb123', address: 'test@test.com' } as unknown as Account;
+    const record = { id: 'inb123', address: 'test@test.com' } as unknown as Address;
 
-    let calledContext: EmailServiceContext | null = null;
+    const recordedContexts: EmailServiceContext[] = [];
     const executeOperation = mock(async (_op: string, ctx: EmailServiceContext) => {
-      calledContext = ctx;
+      recordedContexts.push(ctx);
       return { result: [] };
     });
 
     await fetchEmails(
       config,
-      inbox,
+      record,
       executeOperation as unknown as (
         opName: string,
         context?: EmailServiceContext
       ) => Promise<Record<string, unknown>>
     );
-    expect(calledContext).not.toBeNull();
-    expect((calledContext as any)?.variables?.myOffset).toBe(0);
-    expect((calledContext as any)?.variables?.pageSize).toBe(15);
+    expect(recordedContexts).toHaveLength(1);
+    expect(recordedContexts[0].variables?.myOffset).toBe(0);
+    expect(recordedContexts[0].variables?.pageSize).toBe(15);
   });
 });
 
@@ -742,6 +846,17 @@ describe('headers and cookies template expansion', () => {
     };
     expect(resolveTemplateValue('Prefix {headers.ETag}', ctx)).toBe('Prefix etag123');
     expect(resolveTemplateValue('Prefix {cookies.PHPSESSID}', ctx)).toBe('Prefix sess456');
+  });
+
+  test('rejects an unsafe dynamically substituted API URL', () => {
+    const config: ProviderConfig = {
+      ...testProviderConfig,
+      apiUrl: '{instanceUrl}/api',
+    };
+    // The SSRF guard throws the stable `errors.*` key (the UI localizes it).
+    expect(() =>
+      buildRequest(config, testOperation, { instanceUrl: 'http://127.0.0.1:8080' })
+    ).toThrow('errors.webdavHttpsOnly');
   });
 
   test('substitutes headers and cookies in buildRequest API URL and path', () => {

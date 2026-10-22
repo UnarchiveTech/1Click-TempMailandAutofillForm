@@ -1,0 +1,460 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Responsive Button Layout - rule 8 visual verification</title>
+<style>
+  :root {
+    --md-type-label-medium-size: 0.75rem;
+    --md-type-label-medium-tracking: 0.03125rem;
+    --surface: #fbf8ff;
+    --surface-container: #f3edf7;
+    --on-surface: #1d1b20;
+    --primary: #6750a4;
+    --on-primary: #ffffff;
+    --error: #b3261e;
+    --on-error: #ffffff;
+    --outline-variant: #cac4d0;
+    --font: system-ui, Roboto, ui-sans-serif, -apple-system, "Segoe UI", sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #ece7f2; font-family: var(--font); padding: 24px 16px 60px; color: var(--on-surface); }
+  h1 { font-size: 15px; font-weight: 700; text-align: center; margin-bottom: 6px; }
+  .sub { font-size: 11.5px; color: #57536b; text-align: center; margin-bottom: 18px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(430px, 1fr)); gap: 14px; max-width: 1400px; margin: 0 auto; }
+  .panel { background: var(--surface); border: 1px solid var(--outline-variant); border-radius: 14px; padding: 12px; box-shadow: 0 2px 6px rgba(0,0,0,.08); }
+  .panel h2 { font-size: 12px; font-weight: 700; color: #49454f; margin-bottom: 8px; }
+  .panel h2 code { font-weight: 600; color: #4f378b; }
+  .verdict { font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 99px; float: right; }
+  .ok { background: #d0e8d0; color: #1a5c1a; }
+  .bad { background: #f4d0cf; color: #8c1d18; }
+
+  /* shared row + button primitives (mirror the app's Tailwind classes) */
+  .row { display: flex; align-items: center; }
+  .wrap-col { display: flex; flex-direction: column; width: 100%; }
+  .btn {
+    display: flex; align-items: center; justify-content: center;
+    /* Deliberately mis-sized: the responsive fitting must replace 44px with the locked tier height. */
+    gap: 4px; padding: 0 10px; height: 44px; border: none; border-radius: 12px;
+    font-weight: 700; font-size: 12px; letter-spacing: .02em;
+    white-space: nowrap; overflow: visible; min-width: 0; cursor: pointer;
+    font-family: var(--font);
+  }
+  .btn.primary { background: var(--primary); color: var(--on-primary); }
+  .btn.error { background: var(--error); color: var(--on-error); }
+  .btn.neutral { background: #e7e0ec; color: #1d1b20; }
+  .btn .disc { width: 20px; height: 20px; border-radius: 50%; background: rgba(255,255,255,.22); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+  .btn svg { width: 14px; height: 14px; flex-shrink: 0; }
+  .btn .btn-label { white-space: nowrap; overflow: visible; }
+
+  /* flex-column icon-over-label actions */
+  .chip { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 6px 4px; border-radius: 8px; font-size: 11px; font-weight: 700; background: #e7e0ec; border: none; cursor: pointer; }
+  .chip svg { width: 14px; height: 14px; }
+  .chip span { white-space: nowrap; }
+
+  .meta { margin-top: 10px; font-size: 10.5px; color: #6f6a76; font-family: ui-monospace, Menlo, Consolas, monospace; white-space: pre; border-top: 1px dashed #cac4d0; padding-top: 6px; line-height: 1.5; }
+
+  /* ── The GLOBAL strip rule from src/styles.css ─────────────────────────────
+     Mirrored because it is part of the pill's geometry, not decoration: it pins
+     `.nav-label`'s font-size to `--md-type-label-medium-size` AND adds 0.5px of
+     tracking per character. Both are exactly what the fit has to reserve for, and
+     leaving this rule out of the mirror is why the harness kept reporting a
+     clean row while the shipped navbar sliced the last letter off every item. */
+  .nav-label {
+    font-size: var(--md-type-label-medium-size, 0.75rem);
+    line-height: var(--md-type-label-medium-line, 1rem);
+    letter-spacing: var(--md-type-label-medium-tracking, 0.03em);
+  }
+
+  /* ── Floating nav (mirror of Footer.svelte's STRUCTURE only) ──────────────
+     Every box below is sized by a `--nav-*` var that `navTokenStyle()` emits -
+     the same call the component makes - so this page holds no second copy of
+     the pill's geometry. Colours are illustrative: the pill's contrast rules
+     live in tests/unit/utils/nav-selection-contrast.test.ts. */
+  .section-title { font-size: 15px; font-weight: 700; text-align: center; margin: 30px 0 6px; }
+  /* Block stage (NOT a flex container): the pill's constraint has to be the
+     stage width, exactly as the app's is the shell width - a flex wrapper lets
+     the container grow to its min-content and the over-budget case silently
+     stops reproducing the app's shrink-and-clip behaviour. */
+  .nav-stage { display: block; margin: 0 auto; padding: 12px 0 6px; }
+  .nav-stage .footer-float { display: block; }
+  .bottom-nav-container { display: flex; align-items: stretch; justify-content: center; width: 100%; padding-inline: var(--footer-float-inset); }
+  .floating-nav {
+    position: relative; display: flex; align-items: center; min-width: 0; max-width: 100%;
+    background: color-mix(in srgb, var(--surface-container) 65%, transparent);
+    border-radius: var(--nav-island-radius); box-shadow: 0 1px 3px rgba(0,0,0,.16);
+  }
+  .pill-indicator {
+    position: absolute; top: 0; bottom: 0; left: 0; height: 100%;
+    background: var(--primary); opacity: .18; border-radius: var(--nav-item-radius);
+    z-index: 1; pointer-events: none;
+  }
+  .fab-placeholder {
+    align-self: stretch; width: auto; height: auto; aspect-ratio: 1 / 1;
+    min-width: var(--fab-size); min-height: var(--fab-size); border-radius: 50%;
+    background: var(--primary); flex-shrink: 0;
+  }
+  /* The app ships Tailwind's preflight, whose `button { font: inherit }` is what
+     makes a nav item render in the stack the fitter measures. Without it the
+     buttons fall back to the UA font (Arial) and this page measures a face the
+     row does not paint - the exact "silent geometry lie" the fitter's font
+     binding exists to prevent, and it showed up here as 1-2px of label clipping
+     in a row the fit had promised would fit. */
+  .nav-item, .fab-placeholder { font: inherit; }
+  .nav-item {
+    position: relative; z-index: 2; display: inline-flex; align-items: center; justify-content: center;
+    min-width: 0; max-width: none; box-sizing: border-box; white-space: nowrap;
+    border: 0; outline: none; background: transparent; color: var(--on-surface);
+    font-weight: var(--nav-label-weight, 700); font-size: var(--nav-font-size);
+    padding: var(--nav-item-pad-block-start) var(--nav-item-pad-x) var(--nav-item-pad-block-end);
+    border-radius: var(--nav-item-radius);
+  }
+  .nav-item.active { color: var(--primary); }
+  .nav-icon { display: inline-flex; width: 0; height: var(--nav-icon-size); margin-inline-end: 0; flex-shrink: 0; overflow: hidden; }
+  .nav-icon svg { width: 100%; height: 100%; }
+  .nav-item.active .nav-icon { width: var(--nav-icon-size); margin-inline-end: var(--nav-icon-gap); }
+  /* The component overrides the strip rule's size with the FITTED one (same as
+     the app): a label painting 12px while the fit reserved 11px is ~8% too wide. */
+  .nav-label { font-size: var(--nav-font-size); line-height: 1; overflow-x: clip; overflow-y: visible; min-width: 0; white-space: nowrap; text-overflow: clip; }
+  .nav-item.has-badge { padding-inline-end: var(--nav-item-pad-x-end); }
+  .nav-badge {
+    position: absolute; top: auto; bottom: var(--nav-badge-bottom); inset-inline-end: var(--nav-badge-inset);
+    min-width: var(--nav-badge-min-w); height: var(--nav-badge-height); padding: 0 var(--nav-badge-pad-x);
+    border-radius: calc(var(--nav-badge-height) / 2); font-size: var(--nav-badge-font-size);
+    font-weight: 700; line-height: var(--nav-badge-height); text-align: center;
+    background: var(--error); color: var(--on-error); z-index: 3; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<h1>Responsive Button Layout - rule 8 visual verification (real compiled module)</h1>
+<p class="sub">Each panel runs the bundled responsive fitting and verifies computed styles against AGENTS.md rule 8. Expected values are hard assertions, not eyeballs.</p>
+
+<div class="grid">
+  <div class="panel">
+    <h2>A - S default, wide row (2 buttons) <span class="verdict" id="v-A">…</span></h2>
+    <div class="row" id="rowA" style="width: 396px; gap: 12px; padding-inline: 8px;">
+      <button type="button" class="btn primary"><span class="disc"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="3" y="4" width="18" height="5" rx="1.5"/><path d="M5 9v10a1.5 1.5 0 0 0 1.5 1.5h11A1.5 1.5 0 0 0 19 19V9"/></svg></span><span class="btn-label">Archive</span></button>
+      <button type="button" class="btn error"><span class="disc"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M4 7h16M10 7V5a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v2"/><path d="M6 7l1 13a1 1 0 0 0 1 .9h8a1 1 0 0 0 1-.9l1-13"/></svg></span><span class="btn-label">Delete</span></button>
+    </div>
+    <div class="meta" id="m-A"></div>
+  </div>
+
+  <div class="panel">
+    <h2>B - S default, narrow row (4 long labels) <span class="verdict" id="v-B">…</span></h2>
+    <div class="row" id="rowB" style="width: 280px; gap: 12px;">
+      <button type="button" class="btn primary"><span class="disc"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M5 9v10a1.5 1.5 0 0 0 1.5 1.5h11A1.5 1.5 0 0 0 19 19V9"/></svg></span><span class="btn-label">Mark as read</span></button>
+      <button type="button" class="btn neutral"><span class="disc"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="9" y="9" width="11" height="11" rx="1.5"/><path d="M5 15V5a1 1 0 0 1 1-1h10"/></svg></span><span class="btn-label">Copy address</span></button>
+      <button type="button" class="btn error"><span class="disc"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M4 7h16"/><path d="M10 7V5a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v2"/></svg></span><span class="btn-label">Delete forever</span></button>
+      <button type="button" class="btn neutral"><span class="disc"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M4 7h16M10 7V5a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v2"/></svg></span><span class="btn-label">Move to trash</span></button>
+    </div>
+    <div class="meta" id="m-B"></div>
+  </div>
+
+  <div class="panel">
+    <h2>C - <code>data-action-tier="XS"</code>, 3 buttons (XS base must apply) <span class="verdict" id="v-C">…</span></h2>
+    <div class="row" id="rowC" data-action-tier="XS" style="width: 300px; gap: 18px;">
+      <button type="button" class="btn primary"><span class="disc"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M5 9v10a1.5 1.5 0 0 0 1.5 1.5h11A1.5 1.5 0 0 0 19 19V9"/></svg></span><span class="btn-label">Copy</span></button>
+      <button type="button" class="btn neutral"><span class="disc"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="3" y="3" width="7" height="7" rx="1"/></svg></span><span class="btn-label">QR</span></button>
+      <button type="button" class="btn neutral"><span class="disc"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="3" y="4" width="18" height="5" rx="1.5"/></svg></span><span class="btn-label">Archive</span></button>
+    </div>
+    <div class="meta" id="m-C"></div>
+  </div>
+
+  <div class="panel">
+    <h2>D - <code>data-action-tier="M"</code> must stay M (never → S) <span class="verdict" id="v-D">…</span></h2>
+    <div class="row" id="rowD" data-action-tier="M" style="width: 360px; gap: 8px;">
+      <button type="button" class="btn primary"><span class="disc"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M5 9v10a1.5 1.5 0 0 0 1.5 1.5h11A1.5 1.5 0 0 0 19 19V9"/></svg></span><span class="btn-label">Mark all as read</span></button>
+      <button type="button" class="btn neutral"><span class="disc"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M9 9h11M9 15h11"/></svg></span><span class="btn-label">Select all</span></button>
+      <button type="button" class="btn error"><span class="disc"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M4 7h16"/></svg></span><span class="btn-label">Delete</span></button>
+    </div>
+    <div class="meta" id="m-D"></div>
+  </div>
+
+  <div class="panel">
+    <h2>E - flex-column actions: tier interior applies, stack height stays shared <span class="verdict" id="v-E">…</span></h2>
+    <div class="row" id="rowE" data-responsive-button-layout-interior="fit" style="width: 300px; gap: 4px;">
+      <button type="button" class="chip"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="3" y="4" width="18" height="5" rx="1.5"/></svg><span>Archive</span></button>
+      <button type="button" class="chip"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M4 7h16"/></svg><span>Delete</span></button>
+      <button type="button" class="chip"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="3.2"/></svg><span>Report</span></button>
+    </div>
+    <div class="meta" id="m-E"></div>
+  </div>
+
+  <div class="panel">
+    <h2>F - nested row (AddressesView-style flex-col wrapper) <span class="verdict" id="v-F">…</span></h2>
+    <div class="wrap-col" id="rowF">
+      <div class="row" style="width: 340px; gap: 6px; justify-content: space-between;">
+        <button type="button" class="btn primary"><span class="disc"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M5 9v10a1.5 1.5 0 0 0 1.5 1.5h11A1.5 1.5 0 0 0 19 19V9"/></svg></span><span class="btn-label">Unarchive</span></button>
+        <button type="button" class="btn error"><span class="disc"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M4 7h16"/></svg></span><span class="btn-label">Delete</span></button>
+        <button type="button" class="btn neutral"><span class="disc"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M9 9h11M9 15h11"/></svg></span><span class="btn-label">Export</span></button>
+      </div>
+    </div>
+    <div class="meta" id="m-F"></div>
+  </div>
+
+  <div class="panel">
+    <h2>G - pathological: floor reached → truncation ONLY here <span class="verdict" id="v-G">…</span></h2>
+    <div class="row" id="rowG" style="width: 240px; gap: 12px;">
+      <button type="button" class="btn primary"><span class="disc"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M5 9v10a1.5 1.5 0 0 0 1.5 1.5h11A1.5 1.5 0 0 0 19 19V9"/></svg></span><span class="btn-label">Mark everything as already read</span></button>
+      <button type="button" class="btn neutral"><span class="disc"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M9 9h11M9 15h11"/></svg></span><span class="btn-label">Select absolutely every single inbox</span></button>
+      <button type="button" class="btn error"><span class="disc"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M4 7h16"/></svg></span><span class="btn-label">Delete everything permanently</span></button>
+    </div>
+    <div class="meta" id="m-G"></div>
+  </div>
+
+  <div class="panel">
+    <h2>H - S tier, justify-between (MailView floating bar) <span class="verdict" id="v-H">…</span></h2>
+    <div class="row" id="rowH" style="width: 340px; gap: 6px; justify-content: space-between;">
+      <button type="button" class="btn primary"><span class="disc"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M5 9v10a1.5 1.5 0 0 0 1.5 1.5h11A1.5 1.5 0 0 0 19 19V9"/></svg></span><span class="btn-label">Archive</span></button>
+      <button type="button" class="btn error"><span class="disc"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M4 7h16"/></svg></span><span class="btn-label">Delete</span></button>
+      <button type="button" class="btn neutral"><span class="disc"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 3v18M3 12h18"/></svg></span><span class="btn-label">Copy</span></button>
+    </div>
+    <div class="meta" id="m-H"></div>
+  </div>
+
+  <div class="panel">
+    <h2>I - MailboxView row (migrated), DE labels @344 <span class="verdict" id="v-I">…</span></h2>
+    <div class="row" id="rowI" data-action-tier="XS" style="width: 344px; gap: 8px; justify-content: space-between;">
+      <button type="button" class="btn primary"><span class="disc"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a1.6 1.6 0 0 1 1.6-1.6H15"/></svg></span><span class="btn-label">Kopieren</span></button>
+      <button type="button" class="btn neutral"><span class="disc"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM21 14v3M14 21h3M20 20h1"/></svg></span><span class="btn-label">QR</span></button>
+      <button type="button" class="btn neutral"><span class="disc"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="3" y="4" width="18" height="5" rx="1.5"/><path d="M5 9v10a1.5 1.5 0 0 0 1.5 1.5h11A1.5 1.5 0 0 0 19 19V9"/><path d="M10 13h4"/></svg></span><span class="btn-label">Archivieren</span></button>
+      <button type="button" class="btn error"><span class="disc"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M4 7h16M10 7V5a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v2M6 7l1 13a1 1 0 0 0 1 .9h8a1 1 0 0 0 1-.9l1-13"/><path d="M10 11v6M14 11v6"/></svg></span><span class="btn-label">Löschen</span></button>
+    </div>
+    <div class="meta" id="m-I"></div>
+  </div>
+
+  <div class="panel">
+    <h2>J - MailboxView row (4-action XS tier), EN labels @344 <span class="verdict" id="v-J">…</span></h2>
+    <div class="row" id="rowJ" data-action-tier="XS" style="width: 344px; gap: 8px; justify-content: space-between;">
+      <button type="button" class="btn primary"><span class="disc"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a1.6 1.6 0 0 1 1.6-1.6H15"/></svg></span><span class="btn-label">Copy</span></button>
+      <button type="button" class="btn neutral"><span class="disc"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM21 14v3M14 21h3M20 20h1"/></svg></span><span class="btn-label">QR</span></button>
+      <button type="button" class="btn neutral"><span class="disc"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="3" y="4" width="18" height="5" rx="1.5"/><path d="M5 9v10a1.5 1.5 0 0 0 1.5 1.5h11A1.5 1.5 0 0 0 19 19V9"/><path d="M10 13h4"/></svg></span><span class="btn-label">Archive</span></button>
+      <button type="button" class="btn error"><span class="disc"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M4 7h16M10 7V5a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v2M6 7l1 13a1 1 0 0 0 1 .9h8a1 1 0 0 0 1-.9l1-13"/><path d="M10 11v6M14 11v6"/></svg></span><span class="btn-label">Delete</span></button>
+    </div>
+    <div class="meta" id="m-J"></div>
+  </div>
+
+  <div class="panel">
+    <h2>K - M tier deep Overflow: gap tracks side padding <span class="verdict" id="v-K">…</span></h2>
+    <div class="row" id="rowK" data-action-tier="M" style="width: 390px; gap: 8px;">
+      <button type="button" class="btn primary"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M5 9v10a1.5 1.5 0 0 0 1.5 1.5h11A1.5 1.5 0 0 0 19 19V9"/></svg><span class="btn-label">Mark all as read</span></button>
+      <button type="button" class="btn error"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M4 7h16M10 7V5a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v2M6 7l1 13a1 1 0 0 0 1 .9h8a1 1 0 0 0 1-.9l1-13"/></svg><span class="btn-label">Delete forever permanently</span></button>
+    </div>
+    <div class="meta" id="m-K"></div>
+  </div>
+
+  <div class="panel">
+    <h2>L - M tier: smaller baseline gap preserved <span class="verdict" id="v-L">…</span></h2>
+    <div class="row" id="rowL" data-action-tier="M" style="width: 408px; gap: 8px;">
+      <button type="button" class="btn primary"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M5 9v10a1.5 1.5 0 0 0 1.5 1.5h11A1.5 1.5 0 0 0 19 19V9"/></svg><span class="btn-label">Mark all as read</span></button>
+      <button type="button" class="btn error"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M4 7h16M10 7V5a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v2M6 7l1 13a1 1 0 0 0 1 .9h8a1 1 0 0 0 1-.9l1-13"/></svg><span class="btn-label">Delete forever permanently</span></button>
+    </div>
+    <div class="meta" id="m-L"></div>
+  </div>
+</div>
+
+<h1 class="section-title">About page action rows - S toolbar + S actions, per locale</h1>
+<p class="sub">These panels mount the real <code>responsiveButtonLayout</code> over markup mirroring <code>AboutView.svelte</code>'s two §8 rows, fed with the real translations (en/de/ar, RTL included) at the real 350px popup row width. The vertical S stacks apply S typography and spacing while retaining one common taller hit area; horizontal S actions stay 40px high. Truncation may appear only in the responsive fitting's final <code>trunc</code> state.</p>
+<div class="grid" id="aboutGrid"></div>
+
+<h1 class="section-title">Floating nav pill - measured against the same tier model</h1>
+<p class="sub">These panels call the real <code>computeNavLayout</code> (with the app's own hidden-span label probe), <code>fitNavPill</code>, <code>navBadgePlacementPx</code> and <code>navTokenStyle()</code> from the bundled modules, then measure the rendered pill. PASS covers the tier floors, the badge reserve and that nothing paints outside its own button; the <code>layout fit</code> and <code>tier model</code> lines report where the pill still diverges from rule 8.</p>
+<div class="grid" id="navGrid"></div>
+
+<script type="module">
+import { mountAboutPanels } from './preview-about-panels.js';
+import { mountNavPanels } from './preview-nav-panels.js';
+import { responsiveButtonLayout } from './preview-responsive-button-layout-module.js';
+
+const r1 = (n) => Math.round(n * 10) / 10;
+
+function dumpRow(node) {
+  const buttons = [...node.querySelectorAll('button, [role="button"]')];
+  if (!buttons.length) return null;
+  const rects = buttons.map((b) => b.getBoundingClientRect());
+  const gaps = [];
+  for (let i = 0; i < rects.length - 1; i += 1) {
+    // Facing-edge distance, direction-agnostic (see the responsive fitting's measureGap) -
+    // the naive left−right diff spans AROUND both buttons under RTL.
+    gaps.push(
+      r1(
+        Math.max(
+          rects[i + 1].left - rects[i].right,
+          rects[i].left - rects[i + 1].right
+        )
+      )
+    );
+  }
+  const cs = getComputedStyle(buttons[0]);
+  const svg = buttons[0].querySelector('svg');
+  const label = buttons[0].querySelector('.btn-label') ?? buttons[0].querySelector('span');
+  const container = buttons[0].parentElement;
+  const rowStyle = getComputedStyle(container);
+  const containerRect = container.getBoundingClientRect();
+  const startInset = Math.min(...rects.map((rect) => rect.left)) - containerRect.left;
+  const endInset = containerRect.right - Math.max(...rects.map((rect) => rect.right));
+  return {
+    state: node.dataset.responsiveButtonLayoutState ?? '-',
+    font: r1(parseFloat(cs.fontSize)),
+    pad: r1(parseFloat(cs.paddingLeft)),
+    band: r1(parseFloat(cs.gap)),
+    icon: svg ? r1(parseFloat(getComputedStyle(svg).width)) : null,
+    heights: buttons.map((b) => r1(b.getBoundingClientRect().height)),
+    widths: buttons.map((b) => r1(b.getBoundingClientRect().width)),
+    gaps,
+    startInset: r1(startInset),
+    endInset: r1(endInset),
+    rowWidth: r1(container.clientWidth - (parseFloat(rowStyle.paddingLeft) || 0) - (parseFloat(rowStyle.paddingRight) || 0)),
+    sumPlusGaps: r1(gaps.reduce((a, g) => a + g, 0) + buttons.reduce((a, b) => a + b.getBoundingClientRect().width, 0)),
+    labelWrap: label ? getComputedStyle(label).whiteSpace : null,
+    labelOverflow: label ? getComputedStyle(label).overflow : null,
+    labelEllipsis: label ? getComputedStyle(label).textOverflow : null,
+  };
+}
+
+function verdict(id, pass, detail) {
+  const el = document.getElementById(`v-${id}`);
+  el.textContent = pass ? 'PASS' : 'FAIL';
+  el.className = `verdict ${pass ? 'ok' : 'bad'}`;
+  if (!pass) el.title = detail;
+  return pass;
+}
+
+const expectations = {
+  A: (d) =>
+    verdict('A',
+      d.state === 'stretch' && d.font === 14 && d.pad === 16 && d.band === 8 && d.icon === 20 &&
+      d.widths[0] === d.widths[1] && d.sumPlusGaps <= d.rowWidth + 0.6 &&
+      d.startInset === 8 && d.endInset === 8,
+      'stretch / font 14 / pad 16 / band 8 / icon 20 / equal widths / 8px at both outer edges'),
+  B: (d) =>
+    verdict('B',
+      d.sumPlusGaps <= d.rowWidth + 0.6 &&
+      d.font === 12 && d.icon === 16 && d.pad === 4 && d.band === 3 &&
+      d.state === 'trunc' && d.labelWrap === 'nowrap' &&
+      d.labelOverflow === 'hidden' && d.labelEllipsis === 'ellipsis',
+      '4 long labels at 280px: floor (12/16/4/3) reached → truncation FINALLY permitted (ellipsis)'),
+  C: (d) => {
+    const equalShare = (d.rowWidth - d.gaps.reduce((a, g) => a + g, 0)) / 3;
+    return verdict('C',
+      d.state === 'natural' && d.font === 14 && d.pad === 12 && d.band === 4 && d.icon === 20 &&
+      Math.max(...d.widths) > equalShare && d.sumPlusGaps <= d.rowWidth + 0.6,
+      'XS base applied; per-button guard: Archive wider than equal share → WHOLE row to Natural Width');
+  },
+  D: (d) =>
+    verdict('D',
+      d.font >= 14 && d.icon >= 20 && d.pad >= 8 && d.sumPlusGaps <= d.rowWidth + 0.6 &&
+      (d.state !== 'stretch' || d.font === 16),
+      'M tier LOCKED: font stays >= 14 (never S=12), icon >= 20, pad >= 8, fits'),
+  E: (d) =>
+    verdict('E',
+      (d.font === 14 || d.font === 12) && d.icon === 2 * d.font - 8 &&
+      d.pad >= 4 && d.band >= 3 && d.heights.every((h) => Math.abs(h - d.heights[0]) <= 1) &&
+      d.widths.every((w) => w > 0) && d.sumPlusGaps <= d.rowWidth + 0.6,
+      'flex-column actions: S tier interior applied, shared stack height retained, row fits'),
+  F: (d) =>
+    verdict('F',
+      ['natural', 'pad', 'coupled', 'font', 'trunc'].includes(d.state) &&
+      d.rowWidth === 340 && d.sumPlusGaps <= 340.1 && d.font >= 12 && d.pad >= 4 && d.band >= 4 &&
+      d.gaps.every((gap) => Math.abs(gap - 6) < 0.1),
+      'nested wrapper: fits the inner 340px row and preserves its 6px authored gap'),
+  G: (d) =>
+    verdict('G',
+      d.state === 'trunc' && d.font === 12 && d.icon === 16 && d.pad === 4 && d.band === 3 &&
+      d.labelOverflow === 'hidden' && d.labelEllipsis === 'ellipsis',
+      'floor reached (font 12 / icon 16 / pad 4 / gap 3) → truncation finally allowed'),
+  H: (d) => {
+    const equalShare = (d.rowWidth - d.gaps.reduce((a, g) => a + g, 0)) / 3;
+    return verdict('H',
+      d.state === 'natural' && d.font === 14 && d.pad === 16 && d.band === 8 &&
+      Math.max(...d.widths) > equalShare &&
+      d.sumPlusGaps <= d.rowWidth + 0.1 && d.gaps.every((gap) => Math.abs(gap - 6) < 0.1),
+      'justify-between cannot inflate the authored 6px gap; natural widths remain readable');
+  },
+  K: (d) =>
+    verdict('K',
+      d.state === 'font' && d.font === 14 && d.icon === 20 && d.pad >= 8 && d.band >= 5 &&
+      d.gaps.length === 1 && Math.abs(d.gaps[0] - Math.min(8, 0.75 * d.pad)) < 0.1 &&
+      d.sumPlusGaps <= d.rowWidth + 0.6 && d.labelWrap === 'nowrap' && d.labelOverflow === 'visible',
+      'M tier remains locked; the inter-button gap follows ¾ of side padding and full labels fit'),
+  L: (d) =>
+    verdict('L',
+      d.state === 'font' && d.font === 14 && d.icon === 20 && d.pad === 12 && d.band === 7 &&
+      d.gaps.length === 1 && Math.abs(d.gaps[0] - 8) < 0.6 &&
+      d.sumPlusGaps <= d.rowWidth + 0.6 && d.labelWrap === 'nowrap' && d.labelOverflow === 'visible',
+      'M tier keeps the smaller authored 8px gap at 12px side padding, with no truncation'),
+  I: (d) =>
+    verdict('I',
+      d.sumPlusGaps <= d.rowWidth + 0.6 && d.font >= 12 && d.icon >= 16 && d.pad >= 4 && d.band >= 3,
+      'MailboxView DE @344 (4-action row, locked XS): fits the row, XS floors respected, no clipping'),
+  J: (d) =>
+    verdict('J',
+      d.sumPlusGaps <= d.rowWidth + 0.6 && d.font === 12 && d.icon === 16 &&
+      d.pad >= 4 && d.band >= 4 &&
+      ['pad', 'coupled', 'font'].includes(d.state) &&
+      d.band <= 4 && d.gaps.every((gap) => gap <= Math.max(4, 0.75 * d.pad) + 0.1),
+      'MailboxView EN @344: compact tier floors remain intact, proportionate gaps and no clipping'),
+};
+
+function renderMeta(id, d) {
+  const el = document.getElementById(`m-${id}`);
+  el.textContent =
+    `state=${d.state}  font=${d.font}px  pad=${d.pad}px  icon↔label gap=${d.band}px  icon=${d.icon}px\n` +
+    `widths=[${d.widths.join(', ')}]px  gaps=[${d.gaps.join(', ')}]px  row=${d.rowWidth}px\n` +
+    `sum+gaps=${d.sumPlusGaps}px  ≤ row: ${d.sumPlusGaps <= d.rowWidth + 0.6 ? 'YES' : 'NO '}   ` +
+    `label: wrap=${d.labelWrap} overflow=${d.labelOverflow} ellipsis=${d.labelEllipsis}`;
+}
+
+// Mount the real responsive fitting on every scenario row.
+const rows = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L'];
+for (const id of rows) {
+  responsiveButtonLayout(document.getElementById(`row${id}`));
+}
+
+// The floating nav's panels run the same modules through the pill's fitter. It
+// resolves only once its panels are measured and `window.__navPanels` is set, so
+// anything that needs the nav verdicts waits on that promise (the check scripts
+// wait for the global) - never on the tier panels' 250ms timer below.
+mountNavPanels();
+mountAboutPanels();
+
+// Let the rAF-scheduled evaluations settle, then verify.
+setTimeout(() => {
+  const all = {};
+  for (const id of rows) {
+    const node = document.getElementById(`row${id}`);
+    const d = dumpRow(node);
+    all[id] = d;
+    renderMeta(id, d);
+    if (expectations[id]) expectations[id](d);
+    const gapCeiling = { XS: 8, S: 12, M: 8, L: 8, XL: 8 }[(node.dataset.actionTier || 'S').toUpperCase()];
+    if (d.gaps.some((gap) => gap > Math.min(gapCeiling, Math.max(4, 0.75 * d.pad)) + 0.1) ||
+        Math.abs(d.sumPlusGaps - d.rowWidth) > 0.2 ||
+        Math.abs(d.startInset - d.endInset) > 0.2) {
+      verdict(id, false, 'Visual gap exceeds its padding cap or the buttons do not fill both ends of their actual row');
+    }
+    if (id !== 'E') {
+      const tier = (node.dataset.actionTier || 'S').toUpperCase();
+      const heightByTier = { XS: 32, S: 40, M: 56, L: 96, XL: 136 };
+      const expectedHeight = heightByTier[tier];
+      const heightMismatch = d.heights.some((height) => Math.abs(height - expectedHeight) > 1);
+      if (heightMismatch) {
+        const verdictEl = document.getElementById(`v-${id}`);
+        const previousFailure = verdictEl.title;
+        verdict(
+          id,
+          false,
+          [previousFailure, `tier ${tier} height should be ${expectedHeight}px, got ${d.heights}`]
+            .filter(Boolean)
+            .join('; ')
+        );
+      }
+    }
+  }
+  window.__responsiveButtonLayout = all;
+  document.title += ' - done';
+}, 250);
+</script>
+</body>
+</html>

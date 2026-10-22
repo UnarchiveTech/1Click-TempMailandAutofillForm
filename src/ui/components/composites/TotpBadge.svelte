@@ -1,7 +1,8 @@
 <script lang="ts">
 import { onDestroy, onMount } from 'svelte';
+import { t } from 'svelte-i18n';
 import CopyButton from '@/ui/components/composites/CopyButton.svelte';
-import { generateTOTP } from '@/utils/totp.js';
+import { generateTOTP } from '@/utils/otp/totp.js';
 
 let {
   secret = '',
@@ -61,7 +62,7 @@ const strokeDashoffset = $derived(circumference * (1 - secondsRemaining / 30));
 
 <div class="inline-flex items-center gap-2 rounded-xl bg-md-surface-variant/40 border border-md-outline-variant/30 px-2.5 py-1 text-xs select-none {className}">
   <!-- Radial SVG Ring -->
-  <div class="relative w-5 h-5 flex items-center justify-center shrink-0" title="{secondsRemaining}s remaining">
+  <div class="relative w-5 h-5 flex items-center justify-center shrink-0" title={$t('time.secondsRemaining', { values: { n: secondsRemaining } })}>
     <svg class="w-5 h-5 -rotate-90 text-md-outline-variant/30" viewBox="0 0 24 24" aria-hidden="true">
       <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2.5" class="opacity-30" />
       <circle
@@ -91,9 +92,9 @@ const strokeDashoffset = $derived(circumference * (1 - secondsRemaining / 30));
     <!-- Copy Button -->
     <CopyButton
       text={code.replace(/\s+/g, '')}
-      purgeDelayMs={30000}
+      sensitive
       size="sm"
-      tooltip="Copy 2FA Code (Purges in 30s)"
+      tooltip={$t('contentAutofill.copyTotpCodeTooltip')}
     />
   {/if}
 </div>

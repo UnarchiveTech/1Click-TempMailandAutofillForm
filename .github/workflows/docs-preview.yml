@@ -1,0 +1,98 @@
+name: Documentation Preview
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, closed]
+    paths:
+      - 'docs-site/**'
+      - 'scripts/docs-*.ts'
+      - 'tests/e2e/docs-screenshots.e2e.ts'
+      - 'src/**'
+      - 'public/**'
+      - 'package.json'
+      - 'bun.lock'
+      - 'wxt.config.ts'
+      - '.github/workflows/docs-preview.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: docs-preview-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  docs-preview:
+    runs-on: ubuntu-latest
+    # Fork PRs get a read-only token - pr-preview-action cannot comment or
+    # publish for them, so only build previews for same-repo PRs / dispatches.
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Setup Bun
+        if: github.event.action != 'closed'
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - name: Cache Bun dependencies
+        if: github.event.action != 'closed'
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.bun/install/cache
+            node_modules
+          key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock', '**/package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install dependencies
+        if: github.event.action != 'closed'
+        run: bun install --frozen-lockfile
+
+      - name: Install Chromium for Playwright
+        if: github.event.action != 'closed'
+        run: bun x playwright install --with-deps chromium
+
+      - name: Build extension used by screenshots
+        if: github.event.action != 'closed'
+        run: bun run build
+
+      - name: Capture real-extension screenshots
+        if: github.event.action != 'closed'
+        run: xvfb-run -a bun x playwright test tests/e2e/docs-screenshots.e2e.ts --project=extension-chrome
+
+      - name: Build documentation site
+        if: github.event.action != 'closed'
+        env:
+          DOCS_BASE_PATH: /pr-preview/pr-${{ github.event.number }}/
+        run: bun run docs:build
+
+      - name: Validate documentation links
+        if: github.event.action != 'closed'
+        env:
+          DOCS_BASE_PATH: /pr-preview/pr-${{ github.event.number }}/
+        run: bun run docs:check-links
+
+      - name: Upload documentation artifact
+        if: github.event.action != 'closed'
+        uses: actions/upload-artifact@v7
+        with:
+          name: 1click-docs-preview
+          path: docs-site/dist
+          if-no-files-found: error
+
+      # Requires GitHub Pages to be enabled for the repository. The action
+      # publishes a temporary /pr-preview/pr-${{ github.event.number }}/ URL.
+      - name: Publish PR preview
+        uses: rossjrw/pr-preview-action@v1
+        with:
+          source-dir: docs-site/dist/
+          preview-branch: gh-pages
+          umbrella-dir: pr-preview
+          action: auto
+          wait-for-pages-deployment: true

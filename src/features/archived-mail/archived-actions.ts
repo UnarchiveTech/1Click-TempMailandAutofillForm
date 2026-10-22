@@ -1,8 +1,8 @@
-import type { Browser } from 'wxt/browser';
-import { t } from '@/utils/i18n-utils.js';
+import { getCachedLocale, t } from '@/utils/i18n/i18n-utils.js';
 import { logError } from '@/utils/logger.js';
-import { timeAgo } from '@/utils/time-format.js';
-import type { Account, Email } from '@/utils/types.js';
+import { getEmailMaps, resolveBagKey, setLogicalEmailMaps } from '@/utils/storage/storage-keys.js';
+import { timeAgo } from '@/utils/time/time-format.js';
+import type { Address, Email } from '@/utils/types.js';
 
 export interface ArchivedState {
   archivedEmails: Email[];
@@ -11,35 +11,42 @@ export interface ArchivedState {
 export interface ArchivedSetters {
   setArchivedEmails: (emails: Email[]) => void;
   setShowToast: (message: string, type?: 'success' | 'error' | 'warning') => void;
-  loadInboxes: () => Promise<void>;
+  loadAddresses: () => Promise<void>;
 }
 
 export async function loadArchivedEmails(ext: Browser, setters: ArchivedSetters) {
   try {
     const response = await ext.runtime.sendMessage({ type: 'getArchivedEmails' });
     if (response?.success) {
+      // The row stand-ins are the same facts the mailbox list shows, so they come
+      // from the same keys the rest of the app uses for them - an English
+      // literal here would win over those keys for the archived list alone.
+      const unknownSender = await t('common.unknown');
+      const noSubject = await t('notifications.noSubject');
       const archivedEmails = (response.archivedEmails || []).map((m: Email) => {
-        const inbox = m.original_inbox || '';
+        const addr = m.original_inbox || '';
         // Build a display-friendly sender: prefer "Name <addr>" when both exist,
-        // fall back to whichever is available, or 'Unknown'.
+        // fall back to whichever is available, or the localized unknown sender.
         const from =
-          m.from_name && m.from ? `${m.from_name} <${m.from}>` : m.from_name || m.from || 'Unknown';
+          m.from_name && m.from
+            ? `${m.from_name} <${m.from}>`
+            : m.from_name || m.from || unknownSender;
         return {
-          // Compound key prevents ID collisions when multiple inboxes share
+          // Compound key prevents ID collisions when multiple addresses share
           // provider-scoped numeric IDs (e.g. "1", "2").
-          id: inbox ? `${inbox}_${m.id}` : m.id,
-          subject: m.subject || 'No Subject',
+          id: addr ? `${addr}_${m.id}` : m.id,
+          subject: m.subject || noSubject,
           from,
           from_name: m.from_name,
           date: m.archived_at
-            ? new Date(m.archived_at).toLocaleDateString()
+            ? new Date(m.archived_at).toLocaleDateString(getCachedLocale())
             : timeAgo(m.received_at),
           otp: m.otp,
           body_html: m.body_html,
           body_plain: m.body_plain,
           raw_source: m.raw_source,
           received_at: m.received_at,
-          original_inbox: inbox,
+          original_inbox: addr,
         };
       });
       setters.setArchivedEmails(archivedEmails);
@@ -49,34 +56,34 @@ export async function loadArchivedEmails(ext: Browser, setters: ArchivedSetters)
   }
 }
 
-export async function restoreArchivedInbox(
+export async function restoreArchivedAddress(
   ext: Browser,
   email: Email,
   state: ArchivedState,
   setters: ArchivedSetters
 ) {
   try {
-    const inboxAddress = email.original_inbox || '';
-    if (!inboxAddress) {
-      setters.setShowToast(await t('toasts.emailRestoreNoInbox'), 'error');
+    const address = email.original_inbox || '';
+    if (!address) {
+      setters.setShowToast(await t('toasts.emailRestoreNoAddress'), 'error');
       return;
     }
 
     // Strip the compound UI prefix ("inbox@example.com_rawId") to get the raw
     // storage-level ID used inside the archivedEmails map.
-    const rawId = email.id.startsWith(`${inboxAddress}_`)
-      ? email.id.slice(inboxAddress.length + 1)
+    const rawId = email.id.startsWith(`${address}_`)
+      ? email.id.slice(address.length + 1)
       : email.id;
 
     // 1. Find corresponding inbox to unarchive
-    const { inboxes = [] } = (await ext.storage.local.get(['inboxes'])) as {
-      inboxes?: Account[];
+    const { addresses = [] } = (await ext.storage.local.get(['addresses'])) as {
+      addresses?: Address[];
     };
-    const inbox = inboxes.find((i) => i.address === inboxAddress);
-    if (inbox && inbox.accountStatus === 'archived') {
+    const record = addresses.find((i) => i.address === address);
+    if (record && record.accountStatus === 'archived') {
       const response = await ext.runtime.sendMessage({
-        type: 'unarchiveInbox',
-        inboxId: inbox.id,
+        type: 'unarchiveAddress',
+        addressId: record.id,
       });
       if (!response?.success) {
         throw new Error(response?.error || 'Failed to unarchive inbox');
@@ -84,22 +91,20 @@ export async function restoreArchivedInbox(
     }
 
     // 2. Move email from archivedEmails map back to storedEmails map in storage
-    const { storedEmails = {}, archivedEmails = {} } = (await ext.storage.local.get([
-      'storedEmails',
-      'archivedEmails',
-    ])) as {
-      storedEmails?: Record<string, Email[]>;
-      archivedEmails?: Record<string, Email[]>;
-    };
+    const { storedEmails = {}, archivedEmails = {} } = await getEmailMaps();
 
-    const archivedList = archivedEmails[inboxAddress] || [];
-    const storedList = storedEmails[inboxAddress] || [];
+    // Resolve case-insensitively: a casing drift must not split the mailbox
+    // across two keys (restoring under a second key would orphan the original).
+    const archivedKey = resolveBagKey(archivedEmails, address);
+    const storedKey = resolveBagKey(storedEmails, address);
+    const archivedList = archivedEmails[archivedKey] || [];
+    const storedList = storedEmails[storedKey] || [];
 
     // Filter from archived list using raw storage ID
     const updatedArchived = archivedList.filter((e) => e.id !== rawId);
-    archivedEmails[inboxAddress] = updatedArchived;
+    archivedEmails[archivedKey] = updatedArchived;
     if (updatedArchived.length === 0) {
-      delete archivedEmails[inboxAddress];
+      delete archivedEmails[archivedKey];
     }
 
     // Add to stored list
@@ -116,19 +121,19 @@ export async function restoreArchivedInbox(
 
       if (!storedList.some((e) => e.id === rawId)) {
         storedList.push(restoredEmail);
-        storedEmails[inboxAddress] = storedList;
+        storedEmails[storedKey] = storedList;
       }
     }
 
-    await ext.storage.local.set({ storedEmails, archivedEmails });
+    await setLogicalEmailMaps(storedEmails, archivedEmails);
 
     // 3. Update UI state - filter by the compound UI key
     setters.setArchivedEmails(state.archivedEmails.filter((e) => e.id !== email.id));
-    await setters.loadInboxes(); // Refresh the sidebar inboxes status
+    await setters.loadAddresses(); // Refresh the sidebar addresses status
     setters.setShowToast(await t('toasts.emailRestored'));
   } catch (e: unknown) {
     logError(
-      'restoreArchivedInbox error:',
+      'restoreArchivedAddress error:',
       undefined,
       e instanceof Error ? e : new Error(String(e))
     );
@@ -137,38 +142,38 @@ export async function restoreArchivedInbox(
 }
 
 export async function deleteArchivedEmail(
-  ext: Browser,
+  _ext: Browser,
   email: Email,
   state: ArchivedState,
   setters: ArchivedSetters
 ) {
   try {
-    const inboxAddress = email.original_inbox || '';
+    const address = email.original_inbox || '';
 
     // Strip the compound UI prefix to recover the raw storage ID
     const rawId =
-      inboxAddress && email.id.startsWith(`${inboxAddress}_`)
-        ? email.id.slice(inboxAddress.length + 1)
-        : email.id;
+      address && email.id.startsWith(`${address}_`) ? email.id.slice(address.length + 1) : email.id;
 
-    if (!inboxAddress) {
+    if (!address) {
       setters.setArchivedEmails(state.archivedEmails.filter((e) => e.id !== email.id));
       setters.setShowToast(await t('toasts.archivedEmailDeleted'));
       return;
     }
 
-    const { archivedEmails = {} } = (await ext.storage.local.get(['archivedEmails'])) as {
-      archivedEmails?: Record<string, Email[]>;
-    };
+    const { archivedEmails = {}, storedEmails = {} } = await getEmailMaps();
 
-    const archivedList = archivedEmails[inboxAddress] || [];
+    const archivedKey = resolveBagKey(archivedEmails, address);
+    const archivedList = archivedEmails[archivedKey] || [];
     const updatedArchived = archivedList.filter((e) => e.id !== rawId);
-    archivedEmails[inboxAddress] = updatedArchived;
+    archivedEmails[archivedKey] = updatedArchived;
     if (updatedArchived.length === 0) {
-      delete archivedEmails[inboxAddress];
+      delete archivedEmails[archivedKey];
     }
 
-    await ext.storage.local.set({ archivedEmails });
+    // One read of both maps: a second getEmailMaps() between the archive
+    // mutation and the write could re-read a bag another flow just changed
+    // and drop this delete on the floor (or resurrect a concurrent edit).
+    await setLogicalEmailMaps(storedEmails, archivedEmails);
     // Filter UI state by the compound key
     setters.setArchivedEmails(state.archivedEmails.filter((e) => e.id !== email.id));
     setters.setShowToast(await t('toasts.archivedEmailDeleted'));

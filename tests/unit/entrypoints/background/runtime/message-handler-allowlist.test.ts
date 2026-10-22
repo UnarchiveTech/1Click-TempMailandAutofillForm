@@ -16,14 +16,26 @@ describe('CONTENT_SCRIPT_ALLOWED_HANDLERS', () => {
   });
 
   test('destructive extension-only handlers are not allowlisted', () => {
-    const blocked = ['deleteInbox', 'hardReset', 'resetAnalytics', 'clearAllOtps', 'createInbox'];
+    const blocked = [
+      'deleteAddress',
+      'deleteAddresses',
+      'archiveAddresses',
+      'unarchiveAddresses',
+      'renewAddresses',
+      'checkEmails',
+      'checkEmailsBulk',
+      'hardReset',
+      'resetAnalytics',
+      'clearAllOtps',
+      'createAddress',
+    ];
     for (const key of blocked) {
       expect(CONTENT_SCRIPT_ALLOWED_HANDLERS.has(key)).toBe(false);
     }
   });
 
-  test('createInboxWithGesture is allowlisted for content scripts', () => {
-    expect(CONTENT_SCRIPT_ALLOWED_HANDLERS.has('createInboxWithGesture')).toBe(true);
+  test('createAddressWithGesture is allowlisted for content scripts', () => {
+    expect(CONTENT_SCRIPT_ALLOWED_HANDLERS.has('createAddressWithGesture')).toBe(true);
   });
 
   test('HANDLER_KEYS includes every registered handler', () => {

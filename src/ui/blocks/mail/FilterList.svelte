@@ -1,29 +1,46 @@
 <script lang="ts">
-import { onMount, type Snippet, untrack } from 'svelte';
-import { t } from 'svelte-i18n';
+import { onDestroy, onMount, type Snippet, untrack } from 'svelte';
+import { get } from 'svelte/store';
+import { locale, t } from 'svelte-i18n';
 import { browser } from 'wxt/browser';
 import ModalDialog from '@/ui/components/composites/ModalDialog.svelte';
 import SearchBar from '@/ui/components/composites/SearchBar.svelte';
 import Icon from '@/ui/components/icons/Icon.svelte';
-import { Btn, Radio } from '@/ui/components/primitives';
-import { avatarColor } from '@/utils/avatar-color.js';
-import { PORTAL_Z_CLASS } from '@/utils/portal-layers.js';
+import { Btn, IconButton, Radio } from '@/ui/components/primitives';
+import Avatar from '@/ui/components/primitives/Avatar.svelte';
 import {
   getSearchHistory,
   pushSearchHistory,
   removeSearchHistoryItem,
-} from '@/utils/search-history.js';
+} from '@/utils/search/search-history.js';
 import {
+  parseSearchShortcuts,
   reconcileBooleanPill,
   reconcileSavedFilterQuery,
   SHORTCUT_REGEX,
-} from '@/utils/search-shortcuts.js';
+} from '@/utils/search/search-shortcuts.js';
+import { parseNumberRecord, updateStoredObject } from '@/utils/storage/rmw.js';
+import { peekStoredJsonSync, updateStoredJsonMirror } from '@/utils/storage/stored-prefs-sync.js';
+import { avatarColor } from '@/utils/theme/avatar-color.js';
+import { avatarInitial } from '@/utils/theme/avatar-initials.js';
 import type { Email, SavedSearchFilter } from '@/utils/types.js';
+import {
+  anchoredFlyout,
+  flyoutContains,
+  hasInlineFlyoutSpace,
+} from '@/utils/ui/anchored-flyout.js';
+import { AVATAR_BOX } from '@/utils/ui/avatar-size.js';
+import { ELEVATION } from '@/utils/ui/elevation.js';
+import { PORTAL_Z_CLASS, portalFlyoutAction } from '@/utils/ui/portal-layers.js';
+import { responsiveButtonLayout } from '@/utils/ui/responsive-button-layout.js';
+import { controlSurface } from '@/utils/ui/row-surface.js';
+import type { FilterQueryProps } from './filter-list-props.js';
 
 let {
   searchQuery = '',
   sortBy = 'newest',
   otpOnly = false,
+  unreadOnly = false,
   hasAttachment = false,
   senderDomain = '',
   senderEmail = '',
@@ -41,6 +58,7 @@ let {
   onSearchChange = () => {},
   onSortChange = () => {},
   onOtpOnlyChange = () => {},
+  onUnreadOnlyChange = () => {},
   onHasAttachmentChange = () => {},
   onSenderDomainChange = () => {},
   onSelectedSendersChange = (_v: string[]) => {},
@@ -58,12 +76,13 @@ let {
     _selectedSenders: string[],
     _sortBy: string,
     _recipient: string,
-    _subject: string
+    _subject: string,
+    _unreadOnly: boolean
   ) => {},
   onLoadFilter = (_filter: SavedSearchFilter) => {},
   onRenameFilter = (_id: string, _name: string) => {},
   onDeleteFilter = (_id: string) => {},
-  onRefreshInbox = async () => {},
+  onRefreshMailbox = async () => {},
   /** Parent sets true while checkEmails / refresh is in flight */
   emailsLoading = false,
   onToggleNotifications = () => {},
@@ -77,58 +96,17 @@ let {
   layoutMenu = undefined as Snippet | undefined,
   /** When true, parent shows “filters applied” strip; chips stay available */
   showFilterMenuExternal = false,
-}: {
-  searchQuery?: string;
-  sortBy?: string;
-  otpOnly?: boolean;
-  hasAttachment?: boolean;
-  senderDomain?: string;
-  senderEmail?: string;
-  recipient?: string;
-  subject?: string;
-  notSenderDomain?: string;
-  notSenderEmail?: string;
-  notRecipient?: string;
-  notSubject?: string;
-  selectedSenders?: string[];
-  dateFrom?: string;
-  dateTo?: string;
-  emails?: Email[];
-  savedSearchFilters?: SavedSearchFilter[];
-  onSearchChange?: (v: string) => void;
-  onSortChange?: (v: string) => void;
-  onOtpOnlyChange?: (v: boolean) => void;
-  onHasAttachmentChange?: (v: boolean) => void;
-  onSenderDomainChange?: (v: string) => void;
-  onSelectedSendersChange?: (v: string[]) => void;
-  onDateFromChange?: (v: string) => void;
-  onDateToChange?: (v: string) => void;
-  onClearFilters?: () => void;
-  onSaveFilter?: (
-    name: string,
-    searchQuery: string,
-    hasOTP: boolean,
-    hasAttachment: boolean,
-    senderDomain: string,
-    dateFrom: string,
-    dateTo: string,
-    selectedSenders: string[],
-    sortBy: string,
-    recipient: string,
-    subject: string
-  ) => void;
-  onLoadFilter?: (filter: SavedSearchFilter) => void;
-  onRenameFilter?: (id: string, name: string) => void;
-  onDeleteFilter?: (id: string) => void;
-  onRefreshInbox?: () => void | Promise<void>;
+}: FilterQueryProps & {
+  /** Parent sets true while checkEmails / refresh is in flight */
   emailsLoading?: boolean;
-  onToggleNotifications?: () => void;
-  notificationsEnabled?: boolean;
+  /** Current mailbox address - used for per-address notification snooze */
   currentAddress?: string;
   onSearchFocus?: () => void;
   onSearchBlur?: () => void;
   onFilterClick?: () => void;
-  layoutMenu?: Snippet;
+  /** Optional layout control rendered just before the refresh control */
+  layoutMenu?: Snippet<[]>;
+  /** When true, parent shows “filters applied” strip; chips stay available */
   showFilterMenuExternal?: boolean;
 } = $props();
 
@@ -142,14 +120,14 @@ let filterMenuOpen = $state(false);
 let filterFlyout = $state<'from' | 'sort' | 'date' | 'saved' | null>(null);
 let notifMenuOpen = $state(false);
 let snoozeUntil = $state(0);
+let snoozeLoadGeneration = 0;
 /** / shortcuts panel (button or typing /) */
 let shortcutsPanelOpen = $state(false);
-/** Animated empty placeholder text (written only from timers, not effect deps) */
-let placeholderTyped = $state('');
 
 let hasActiveFilters = $derived(
   sortBy !== 'newest' ||
     otpOnly ||
+    unreadOnly ||
     hasAttachment ||
     !!dateFrom ||
     !!dateTo ||
@@ -160,33 +138,52 @@ let hasActiveFilters = $derived(
 );
 
 async function loadSnoozeForAddress() {
-  if (!currentAddress) {
+  // Generation token (same contract as AddressSelectorBar.loadSnooze): the
+  // effect below re-fires on every currentAddress change, so a slow storage
+  // read for address A must not resolve after the switch to B and paint A's
+  // snooze over B. The warm-mirror path is synchronous and needs no guard.
+  const generation = ++snoozeLoadGeneration;
+  const addr = currentAddress;
+  if (!addr) {
     snoozeUntil = 0;
+    return;
+  }
+  // Anti-flash: sync-first via the shared prefs mirror - the bell badge is
+  // correct at first paint when the mirror is warm.
+  const warmMap = peekStoredJsonSync<Record<string, number>>('notificationSnoozeByAddress');
+  if (warmMap) {
+    const until = warmMap[addr] || warmMap[addr.toLowerCase()] || 0;
+    snoozeUntil = until > Date.now() ? until : 0;
     return;
   }
   try {
     const res = (await browser.storage.local.get(['notificationSnoozeByAddress'])) as {
       notificationSnoozeByAddress?: Record<string, number>;
     };
+    if (generation !== snoozeLoadGeneration) return;
     const map = res.notificationSnoozeByAddress || {};
-    const until = map[currentAddress] || map[currentAddress.toLowerCase()] || 0;
+    const until = map[addr] || map[addr.toLowerCase()] || 0;
     snoozeUntil = until > Date.now() ? until : 0;
   } catch {
     /* ignore */
-    snoozeUntil = 0;
+    if (generation === snoozeLoadGeneration) snoozeUntil = 0;
   }
 }
 
 async function applySnooze(durationMs: number) {
-  if (!currentAddress) return;
+  const address = currentAddress;
+  if (!address) return;
   const until = Date.now() + durationMs;
   try {
-    const res = (await browser.storage.local.get(['notificationSnoozeByAddress'])) as {
-      notificationSnoozeByAddress?: Record<string, number>;
-    };
-    const map = { ...(res.notificationSnoozeByAddress || {}) };
-    map[currentAddress] = until;
-    await browser.storage.local.set({ notificationSnoozeByAddress: map });
+    // Serialized RMW: the snooze map is written from BOTH snooze surfaces (this
+    // menu and the address selector bar's bell), so a whole-key write of a map
+    // read before the other surface's write landed erased that address's snooze.
+    const next = await updateStoredObject(
+      'notificationSnoozeByAddress',
+      (current) => ({ ...current, [address]: until }),
+      parseNumberRecord
+    );
+    updateStoredJsonMirror('notificationSnoozeByAddress', next);
     snoozeUntil = until;
   } catch {
     /* ignore */
@@ -195,15 +192,22 @@ async function applySnooze(durationMs: number) {
 }
 
 async function clearSnooze() {
-  if (!currentAddress) return;
+  const address = currentAddress;
+  if (!address) return;
   try {
-    const res = (await browser.storage.local.get(['notificationSnoozeByAddress'])) as {
-      notificationSnoozeByAddress?: Record<string, number>;
-    };
-    const map = { ...(res.notificationSnoozeByAddress || {}) };
-    delete map[currentAddress];
-    delete map[currentAddress.toLowerCase()];
-    await browser.storage.local.set({ notificationSnoozeByAddress: map });
+    // Serialized RMW - same pair as applySnooze, and both casings of the
+    // address are removed from the map storage last held.
+    const next = await updateStoredObject(
+      'notificationSnoozeByAddress',
+      (current) => {
+        const map = { ...current };
+        delete map[address];
+        delete map[address.toLowerCase()];
+        return map;
+      },
+      parseNumberRecord
+    );
+    updateStoredJsonMirror('notificationSnoozeByAddress', next);
     snoozeUntil = 0;
   } catch {
     /* ignore */
@@ -211,27 +215,20 @@ async function clearSnooze() {
   notifMenuOpen = false;
 }
 
-function customSnooze() {
-  const raw = window.prompt(
-    $t('inbox.snoozeCustomPrompt') || $t('inbox.snoozePromptFallback'),
-    '60'
-  );
-  if (raw == null) return;
-  const mins = Number.parseInt(raw, 10);
-  if (!Number.isFinite(mins) || mins <= 0) return;
-  void applySnooze(mins * 60 * 1000);
-}
-
-/** Compact remaining snooze label for bell badge (e.g. 5m, 2h, 1d). */
+/**
+ * Compact remaining snooze label for the bell badge (e.g. 5m, 2h, 1d). Units
+ * come from the shared time locale keys - never spelled at the call site.
+ */
 function formatSnoozeRemaining(until: number, now = Date.now()): string {
   const ms = until - now;
   if (ms <= 0) return '';
+  const tr = get(t);
   const mins = Math.max(1, Math.ceil(ms / 60_000));
-  if (mins < 60) return `${mins}m`;
+  if (mins < 60) return tr('time.durationM', { values: { m: mins } });
   const hours = Math.max(1, Math.ceil(ms / 3_600_000));
-  if (hours < 24) return `${hours}h`;
+  if (hours < 24) return tr('time.durationH', { values: { h: hours } });
   const days = Math.max(1, Math.ceil(ms / 86_400_000));
-  return `${days}d`;
+  return tr('time.durationD', { values: { d: days } });
 }
 
 /** Bumps so remaining snooze badge text stays current without self-assign */
@@ -278,11 +275,13 @@ onMount(() => {
 });
 let fromDropdownOpen = $state(false);
 let savedFiltersDropdownOpen = $state(false);
+let builtInPresetsOpen = $state(false);
 let manageFiltersOpen = $state(false);
 let renamingFilterId = $state<string | null>(null);
 let renameFilterName = $state('');
 let renameInputRef = $state<HTMLInputElement | null>(null);
 let fromSearch = $state('');
+let searchRowRef = $state<HTMLElement | null>(null);
 let filterRowRef = $state<HTMLElement | null>(null);
 let showCustomRange = $state(false);
 let datePreset = $state<string>('any');
@@ -290,6 +289,37 @@ let datePreset = $state<string>('any');
 // Visual Search Pills & Autocomplete state
 let currentInputText = $state('');
 let showAutocomplete = $state(false);
+let searchBlurTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleSearchBlur() {
+  if (searchBlurTimer) clearTimeout(searchBlurTimer);
+  searchBlurTimer = setTimeout(() => {
+    searchBlurTimer = null;
+    // Moving from search to an inline filter action must not unmount that action.
+    if (
+      flyoutContains(searchRowRef, document.activeElement) ||
+      flyoutContains(filterRowRef, document.activeElement)
+    )
+      return;
+    searchFocused = false;
+    showAutocomplete = false;
+    shortcutsPanelOpen = false;
+    void commitSearchHistory();
+    onSearchBlur();
+  }, 200);
+}
+
+// A pending 200ms blur timer must not fire after unmount: it writes
+// searchFocused/showAutocomplete and calls onSearchBlur/commitSearchHistory
+// on a dead component (and onSearchBlur can re-trigger parent work).
+onDestroy(() => {
+  if (searchBlurTimer) {
+    clearTimeout(searchBlurTimer);
+    searchBlurTimer = null;
+  }
+  // Invalidate any in-flight snooze read with the same stroke.
+  snoozeLoadGeneration++;
+});
 
 let parsedPills = $derived.by(() => {
   if (!searchQuery) return [];
@@ -328,7 +358,7 @@ function shortcutComplement(pillText: string): string | null {
 
 function addPill(pillText: string) {
   if (parsedPills.includes(pillText)) return;
-  // A shortcut and its negated form are mutually exclusive — adding one drops
+  // A shortcut and its negated form are mutually exclusive - adding one drops
   // the other so the pill row mirrors the effective filter state
   // (last-token-wins semantics stay unambiguous in the UI).
   const complement = shortcutComplement(pillText);
@@ -344,16 +374,17 @@ function removePill(pillText: string) {
   const nextPills = parsedPills.filter((p) => p !== pillText);
   // Removing a positive boolean pill must flip its chip off so the filter
   // doesn't stay silently active with no visible pill (chips never contradict
-  // pills). Negated forms (e.g. !is:otp) leave the chip untouched — they mean
+  // pills). Negated forms (e.g. !is:otp) leave the chip untouched - they mean
   // "explicitly off", which matches the chip being off.
   if (pillText === 'is:otp') onOtpOnlyChange(false);
+  else if (pillText === 'is:unread') onUnreadOnlyChange(false);
   else if (pillText === 'has:attachment') onHasAttachmentChange(false);
   updateFullQuery(nextPills, currentInputText);
 }
 
 /** Toggle a boolean filter (OTP / attachment) from its chip, keeping the pill
  * row in sync: ON guarantees the positive pill, OFF removes both forms. */
-function toggleBooleanPill(pill: 'is:otp' | 'has:attachment', on: boolean) {
+function toggleBooleanPill(pill: 'is:otp' | 'is:unread' | 'has:attachment', on: boolean) {
   const nextPills = reconcileBooleanPill(parsedPills, pill, on);
   // Only push a query update when the pill row actually changed; the chip state
   // itself is still reported to the parent in both cases.
@@ -362,11 +393,13 @@ function toggleBooleanPill(pill: 'is:otp' | 'has:attachment', on: boolean) {
     updateFullQuery(nextPills, currentInputText);
   }
   if (pill === 'is:otp') onOtpOnlyChange(on);
+  else if (pill === 'is:unread') onUnreadOnlyChange(on);
   else onHasAttachmentChange(on);
 }
 
 function handleInputKeydown(e: KeyboardEvent) {
   if (e.key === 'Backspace' && !currentInputText && parsedPills.length > 0) {
+    e.preventDefault();
     const lastPill = parsedPills[parsedPills.length - 1];
     removePill(lastPill);
   } else if ((e.key === 'Enter' || e.key === ' ') && currentInputText.trim()) {
@@ -378,6 +411,11 @@ function handleInputKeydown(e: KeyboardEvent) {
 }
 
 let autocompleteSuggestions = $derived([
+  {
+    prefix: 'is:unread',
+    label: $t('inbox.searchShortcut.isUnreadLabel'),
+    description: $t('inbox.searchShortcut.isUnreadDesc'),
+  },
   {
     prefix: 'is:otp',
     label: $t('inbox.searchShortcut.isOtpLabel'),
@@ -437,70 +475,6 @@ let showSlashShortcuts = $derived(
   shortcutsPanelOpen ||
     (searchFocused && (currentInputText.trim() === '/' || currentInputText.trim().startsWith('/')))
 );
-
-const PLACEHOLDER_KEYS = [
-  'inbox.searchPlaceholderTags',
-  'inbox.searchPlaceholderEmails',
-  'inbox.searchPlaceholderShortcuts',
-] as const;
-
-// Animated rotating placeholder when search is empty.
-// Snapshot labels outside tick; never read placeholderTyped as an effect dependency.
-$effect(() => {
-  const busy = !!(searchQuery?.trim() || parsedPills.length > 0 || currentInputText.trim());
-  // Stabilize $t outputs into one dependency string
-  const labelsKey = PLACEHOLDER_KEYS.map((k) => $t(k)).join('\0');
-  if (busy) {
-    // untrack: do not subscribe this effect to placeholderTyped
-    untrack(() => {
-      if (placeholderTyped !== '') placeholderTyped = '';
-    });
-    return;
-  }
-
-  const labels = labelsKey.split('\0');
-  let cancelled = false;
-  let idx = 0;
-  let typed = '';
-  let phase: 'type' | 'hold' | 'delete' = 'type';
-  let timer: ReturnType<typeof setTimeout> | undefined;
-
-  const tick = () => {
-    if (cancelled) return;
-    const full = labels[idx % labels.length] || '';
-    if (phase === 'type') {
-      if (typed.length < full.length) {
-        typed = full.slice(0, typed.length + 1);
-        placeholderTyped = typed;
-        timer = setTimeout(tick, 45);
-      } else {
-        phase = 'hold';
-        timer = setTimeout(tick, 1400);
-      }
-    } else if (phase === 'hold') {
-      phase = 'delete';
-      timer = setTimeout(tick, 30);
-    } else if (typed.length > 0) {
-      typed = typed.slice(0, -1);
-      placeholderTyped = typed;
-      timer = setTimeout(tick, 28);
-    } else {
-      idx = (idx + 1) % labels.length;
-      phase = 'type';
-      timer = setTimeout(tick, 200);
-    }
-  };
-
-  typed = '';
-  untrack(() => {
-    if (placeholderTyped !== '') placeholderTyped = '';
-  });
-  timer = setTimeout(tick, 400);
-  return () => {
-    cancelled = true;
-    if (timer) clearTimeout(timer);
-  };
-});
 
 // Get display label for current sort option
 let sortLabel = $derived.by(() => {
@@ -579,10 +553,6 @@ function toggleSender(email: string) {
   onSelectedSendersChange(updated);
 }
 
-function getInitial(email: string, name: string): string {
-  return (name || email).trim().charAt(0).toUpperCase();
-}
-
 let datePresets = $derived([
   { value: 'any', label: $t('inbox.datePresetAny') },
   { value: 'week', label: $t('inbox.datePresetWeek') },
@@ -590,6 +560,29 @@ let datePresets = $derived([
   { value: '6months', label: $t('inbox.datePreset6Months') },
   { value: 'year', label: $t('inbox.datePresetYear') },
 ]);
+
+function applyBuiltInPreset(preset: 'unread' | 'otp' | 'attachment' | 'last24' | 'sender') {
+  if (preset === 'sender') {
+    fromDropdownOpen = true;
+    builtInPresetsOpen = false;
+    return;
+  }
+  onSearchChange('');
+  onSortChange('newest');
+  onSenderDomainChange('');
+  onSelectedSendersChange([]);
+  onDateFromChange('');
+  onDateToChange('');
+  onUnreadOnlyChange(preset === 'unread');
+  onOtpOnlyChange(preset === 'otp');
+  onHasAttachmentChange(preset === 'attachment');
+  if (preset === 'last24') {
+    const d = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const pad = (n: number) => String(n).padStart(2, '0');
+    onDateFromChange(`${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`);
+  }
+  builtInPresetsOpen = false;
+}
 
 function applyDatePreset(preset: string) {
   const now = new Date();
@@ -626,31 +619,35 @@ let dateChipLabel = $derived.by(() => {
   const fmtShort = (s: string) => {
     if (!s) return '';
     const [y, m, d] = s.split('-');
-    return `${m}/${d}/${y.slice(2)}`;
+    const date = new Date(Number(y), Number(m) - 1, Number(d));
+    return new Intl.DateTimeFormat($locale || 'en', {
+      month: 'numeric',
+      day: 'numeric',
+      year: '2-digit',
+    }).format(date);
   };
-  if (dateFrom && dateTo) return `${fmtShort(dateFrom)}–${fmtShort(dateTo)}`;
+  if (dateFrom && dateTo) return `${fmtShort(dateFrom)}-${fmtShort(dateTo)}`;
   if (dateTo) return $t('inbox.dateChipUntil', { values: { date: fmtShort(dateTo) } });
   if (dateFrom) return $t('inbox.dateChipFrom', { values: { date: fmtShort(dateFrom) } });
   return $t('filters.date');
 });
 </script>
 
-<div class="flex items-center gap-1 px-0 pb-1 relative" bind:this={filterRowRef}>
+<div class="flex items-center gap-1 px-0 pb-1 relative" bind:this={searchRowRef}>
   <!-- Canonical SearchBar (shared shell, voice, history, / shortcuts) + mailbox pills -->
   <div class="relative flex-1 min-w-0">
     <SearchBar
       scope="inbox"
       inputId="inbox-search-input"
       bind:value={currentInputText}
-      placeholder={parsedPills.length === 0
-        ? placeholderTyped || $t('inbox.searchEmailsPlaceholder')
-        : ''}
+      placeholder={parsedPills.length === 0 ? $t('inbox.searchEmailsPlaceholder') : ''}
       animatedPlaceholders={parsedPills.length === 0
         ? [
-            $t('inbox.searchEmailsPlaceholder'),
-            $t('mailManagement.searchAddressesOrTags'),
-            $t('inbox.searchOtp'),
-            $t('inbox.searchPlaceholderExclude'),
+            $t('searchPlaceholder.emails'),
+            $t('searchPlaceholder.senders'),
+            $t('searchPlaceholder.subjects'),
+            $t('searchPlaceholder.messageText'),
+            $t('searchPlaceholder.labels'),
           ]
         : []}
       ariaLabel={$t('inbox.focusSearch')}
@@ -670,27 +667,24 @@ let dateChipLabel = $derived.by(() => {
         if (val.trim().startsWith('/')) shortcutsPanelOpen = true;
         else if (!val.trim()) shortcutsPanelOpen = false;
       }}
+      onkeydown={handleInputKeydown}
       onFocus={() => {
+        if (searchBlurTimer) {
+          clearTimeout(searchBlurTimer);
+          searchBlurTimer = null;
+        }
         searchFocused = true;
         showAutocomplete = true;
         onSearchFocus();
         void refreshRecentSearches();
       }}
-      onBlur={() => {
-        setTimeout(() => {
-          searchFocused = false;
-          showAutocomplete = false;
-          shortcutsPanelOpen = false;
-          void commitSearchHistory();
-          onSearchBlur();
-        }, 200);
-      }}
+      onBlur={scheduleSearchBlur}
       onSubmit={(q) => {
         void pushSearchHistory('inbox', q).then(refreshRecentSearches);
       }}
     >
       {#snippet prefixContent()}
-        <span data-tour="search-pills" class="inline-flex flex-wrap items-center gap-1 min-w-0">
+        <span data-tour="search-pills" class="inline-flex flex-wrap items-center gap-1 min-w-0 {parsedPills.length > 0 ? 'me-1' : ''}">
         {#each parsedPills as pill (pill)}
           <span
             class="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-semibold rounded-md shrink-0 {pill.startsWith('!') ? 'bg-md-error/15 text-md-error border border-md-error/30' : 'bg-md-primary/15 text-md-primary border border-md-primary/20'}"
@@ -707,7 +701,7 @@ let dateChipLabel = $derived.by(() => {
               aria-label={$t('inbox.removeFilterPill', { values: { pill } })}
               title={$t('inbox.removeFilterPill', { values: { pill } })}
             >
-              <Icon name="x" class="w-3 h-3" />
+              <Icon name="close" class="w-3 h-3" />
             </button>
           </span>
         {/each}
@@ -718,10 +712,9 @@ let dateChipLabel = $derived.by(() => {
           <button
             id="button-filter"
             type="button"
-            class="w-8 h-8 flex items-center justify-center rounded-xl transition-colors {filterMenuOpen ||
-            hasActiveFilters
-              ? 'bg-md-primary/15 text-md-primary'
-              : 'bg-md-surface hover:bg-md-surface-variant text-md-on-surface/50'}"
+            class="w-8 h-8 flex items-center justify-center rounded-full bg-md-surface text-md-on-surface/50 active:brightness-95 transition-colors {controlSurface(
+              filterMenuOpen || hasActiveFilters
+            )}"
             aria-label={$t('inbox.filtersAria')}
             title={$t('inbox.filtersAria')}
             aria-expanded={filterMenuOpen}
@@ -743,6 +736,7 @@ let dateChipLabel = $derived.by(() => {
   {#if filterMenuOpen && !searchFocused}
         <button
           type="button"
+          use:portalFlyoutAction
           class="fixed inset-0 {PORTAL_Z_CLASS.navMenu} cursor-default bg-transparent"
           aria-label={$t('common.close')}
           onclick={() => {
@@ -752,21 +746,21 @@ let dateChipLabel = $derived.by(() => {
         ></button>
         <!-- Compact root menu + side flyouts (MenuList MD3 tokens) -->
         <div
-          class="menu-list absolute top-full end-0 mt-1 {PORTAL_Z_CLASS.accountMenu} w-[200px] rounded-xl border border-md-outline-variant/50 bg-md-surface-container-low shadow-xl motion-overlay-in overflow-visible"
+          use:anchoredFlyout={{ anchor: () => document.getElementById('button-filter'), placement: 'bottom-end', onClose: () => { filterMenuOpen = false; filterFlyout = null; } }}
+          class="menu-list absolute top-full end-0 mt-1 {PORTAL_Z_CLASS.accountMenu} w-[200px] rounded-xl border border-md-outline-variant/50 bg-md-surface-container-low {ELEVATION.level2} motion-overlay-in overflow-visible"
           role="menu"
           tabindex="-1"
           aria-label={$t('inbox.filtersAria')}
-          onmouseleave={() => { filterFlyout = null; }}
         >
           <button
             type="button"
             data-menu-item
             class="menu-list-item w-full flex items-center gap-2 px-2.5 py-2 text-sm text-start rounded-t-xl {filterFlyout === 'from' ? 'is-active' : ''}"
             role="menuitem"
-            onmouseenter={() => (filterFlyout = 'from')}
+            onmouseenter={(e) => { if (hasInlineFlyoutSpace(e.currentTarget, 220)) filterFlyout = 'from'; }}
             onclick={() => (filterFlyout = filterFlyout === 'from' ? null : 'from')}
           >
-            <Icon name="user" class="menu-list-icon w-4 h-4 shrink-0" />
+            <Icon name="person" class="menu-list-icon w-4 h-4 shrink-0" />
             <span class="flex-1 truncate font-medium">{$t('inbox.filterFrom')}</span>
             <Icon name="chevronRight" class="w-3.5 h-3.5 opacity-50 rtl-flip shrink-0" />
           </button>
@@ -775,12 +769,23 @@ let dateChipLabel = $derived.by(() => {
             data-menu-item
             class="menu-list-item w-full flex items-center gap-2 px-2.5 py-2 text-sm text-start {filterFlyout === 'sort' ? 'is-active' : ''}"
             role="menuitem"
-            onmouseenter={() => (filterFlyout = 'sort')}
+            onmouseenter={(e) => { if (hasInlineFlyoutSpace(e.currentTarget, 200)) filterFlyout = 'sort'; }}
             onclick={() => (filterFlyout = filterFlyout === 'sort' ? null : 'sort')}
           >
-            <Icon name="clock" class="menu-list-icon w-4 h-4 shrink-0" />
+            <Icon name="schedule" class="menu-list-icon w-4 h-4 shrink-0" />
             <span class="flex-1 truncate font-medium">{$t('inbox.filterSort')}</span>
             <Icon name="chevronRight" class="w-3.5 h-3.5 opacity-50 rtl-flip shrink-0" />
+          </button>
+          <button
+            type="button"
+            data-menu-item
+            class="menu-list-item w-full flex items-center gap-2 px-2.5 py-2 text-sm text-start {unreadOnly ? 'is-active' : ''}"
+            role="menuitem"
+            onclick={() => toggleBooleanPill('is:unread', !unreadOnly)}
+          >
+            <Icon name="mail" class="menu-list-icon w-4 h-4 shrink-0" />
+            <span class="flex-1 truncate font-medium">{$t('inbox.filterUnread')}</span>
+            <span class="menu-list-trailing text-xs font-bold">{unreadOnly ? $t('common.on') : $t('common.off')}</span>
           </button>
           <button
             type="button"
@@ -809,10 +814,10 @@ let dateChipLabel = $derived.by(() => {
             data-menu-item
             class="menu-list-item w-full flex items-center gap-2 px-2.5 py-2 text-sm text-start {filterFlyout === 'date' ? 'is-active' : ''}"
             role="menuitem"
-            onmouseenter={() => (filterFlyout = 'date')}
+            onmouseenter={(e) => { if (hasInlineFlyoutSpace(e.currentTarget, 220)) filterFlyout = 'date'; }}
             onclick={() => (filterFlyout = filterFlyout === 'date' ? null : 'date')}
           >
-            <Icon name="clock" class="menu-list-icon w-4 h-4 shrink-0" />
+            <Icon name="schedule" class="menu-list-icon w-4 h-4 shrink-0" />
             <span class="flex-1 truncate font-medium">{$t('inbox.filterDateRange')}</span>
             <Icon name="chevronRight" class="w-3.5 h-3.5 opacity-50 rtl-flip shrink-0" />
           </button>
@@ -822,7 +827,7 @@ let dateChipLabel = $derived.by(() => {
               data-menu-item
               class="menu-list-item w-full flex items-center gap-2 px-2.5 py-2 text-sm text-start rounded-b-xl {filterFlyout === 'saved' ? 'is-active' : ''}"
               role="menuitem"
-              onmouseenter={() => (filterFlyout = 'saved')}
+              onmouseenter={(e) => { if (hasInlineFlyoutSpace(e.currentTarget, 200)) filterFlyout = 'saved'; }}
               onclick={() => (filterFlyout = filterFlyout === 'saved' ? null : 'saved')}
             >
               <Icon name="filter" class="menu-list-icon w-4 h-4 shrink-0" />
@@ -833,12 +838,13 @@ let dateChipLabel = $derived.by(() => {
 
           <!-- Side flyouts -->
           {#if filterFlyout === 'from'}
-            <div class="absolute top-0 end-full me-1 w-[220px] max-h-56 overflow-y-auto rounded-xl border border-md-outline-variant/50 bg-md-surface-container-low shadow-xl {PORTAL_Z_CLASS.accountMenu} p-1" role="menu">
+            <div use:anchoredFlyout={{ placement: 'inline-start', onClose: () => { filterFlyout = null; } }} class="absolute top-0 end-full me-1 w-[220px] max-h-56 overflow-y-auto rounded-xl border border-md-outline-variant/50 bg-md-surface-container-low {ELEVATION.level2} {PORTAL_Z_CLASS.accountMenu} p-1" role="menu">
+              <button type="button" class="w-full text-start p-2 text-sm text-md-primary" onclick={() => { filterFlyout = null; }}><Icon name="back" class="inline w-4 h-4 rtl-flip" /> {$t('common.back')}</button>
               {#each senderSuggestions as suggestion (suggestion.email)}
                 {@const isSelected = selectedSenders.some((s) => s.toLowerCase() === suggestion.email.toLowerCase())}
                 <button
                   type="button"
-                  class="w-full flex items-center gap-2 px-2 py-2 text-start text-sm rounded-lg hover:bg-md-surface-variant {isSelected ? 'text-md-primary font-semibold' : ''}"
+                  class="w-full flex items-center gap-2 px-2 py-2 text-start text-sm rounded-lg hover:bg-md-surface-variant active:brightness-95 {isSelected ? 'text-md-primary font-semibold' : ''}"
                   onclick={() => toggleSender(suggestion.email)}
                 >
                   <span class="truncate flex-1">{suggestion.email}</span>
@@ -849,7 +855,8 @@ let dateChipLabel = $derived.by(() => {
               {/each}
             </div>
           {:else if filterFlyout === 'sort'}
-            <div class="absolute top-0 end-full me-1 w-[200px] max-h-64 overflow-y-auto rounded-xl border border-md-outline-variant bg-md-surface-container-low shadow-xl {PORTAL_Z_CLASS.accountMenu} py-1" role="menu">
+            <div use:anchoredFlyout={{ placement: 'inline-start', onClose: () => { filterFlyout = null; } }} class="absolute top-0 end-full me-1 w-[200px] max-h-64 overflow-y-auto rounded-xl border border-md-outline-variant bg-md-surface-container-low {ELEVATION.level2} {PORTAL_Z_CLASS.accountMenu} py-1" role="menu">
+              <button type="button" class="w-full text-start p-2 text-sm text-md-primary" onclick={() => { filterFlyout = null; }}><Icon name="back" class="inline w-4 h-4 rtl-flip" /> {$t('common.back')}</button>
               {#each [
                 ['newest', 'inbox.viewOptions.sortNewest'],
                 ['oldest', 'inbox.viewOptions.sortOldest'],
@@ -862,7 +869,7 @@ let dateChipLabel = $derived.by(() => {
               ] as [val, labelKey] (val)}
                 <button
                   type="button"
-                  class="w-full flex items-center gap-2 px-2.5 py-2 text-start text-sm hover:bg-md-surface-variant {sortBy === val ? 'text-md-primary font-medium' : 'text-md-on-surface'}"
+                  class="w-full flex items-center gap-2 px-2.5 py-2 text-start text-sm hover:bg-md-surface-variant active:brightness-95 {sortBy === val ? 'text-md-primary font-medium' : 'text-md-on-surface'}"
                   onclick={() => { onSortChange(val); filterMenuOpen = false; filterFlyout = null; }}
                 >
                   <span class="flex-1">{$t(labelKey)}</span>
@@ -871,28 +878,33 @@ let dateChipLabel = $derived.by(() => {
               {/each}
             </div>
           {:else if filterFlyout === 'date'}
-            <div class="absolute top-0 end-full me-1 w-[220px] rounded-xl border border-md-outline-variant bg-md-surface-container-low shadow-xl {PORTAL_Z_CLASS.accountMenu} p-3 space-y-2" role="menu">
-              <label class="block text-xs text-md-on-surface/50">{$t('inbox.filterDateFrom')}
+            <div use:anchoredFlyout={{ placement: 'inline-start', onClose: () => { filterFlyout = null; } }} class="absolute top-0 end-full me-1 w-[220px] rounded-xl border border-md-outline-variant bg-md-surface-container-low {ELEVATION.level2} {PORTAL_Z_CLASS.accountMenu} p-3 space-y-2" role="menu">
+              <button type="button" class="w-full text-start p-2 text-sm text-md-primary" onclick={() => { filterFlyout = null; }}><Icon name="back" class="inline w-4 h-4 rtl-flip" /> {$t('common.back')}</button>
+              <label class="block text-sm text-md-on-surface-variant">{$t('inbox.filterDateFrom')}
                 <input type="date" class="mt-0.5 w-full px-2 py-1.5 text-sm rounded-lg border border-md-outline-variant bg-md-surface" value={dateFrom} onchange={(e) => onDateFromChange((e.target as HTMLInputElement).value)} />
               </label>
-              <label class="block text-xs text-md-on-surface/50">{$t('inbox.filterDateTo')}
+              <label class="block text-sm text-md-on-surface-variant">{$t('inbox.filterDateTo')}
                 <input type="date" class="mt-0.5 w-full px-2 py-1.5 text-sm rounded-lg border border-md-outline-variant bg-md-surface" value={dateTo} onchange={(e) => onDateToChange((e.target as HTMLInputElement).value)} />
               </label>
             </div>
           {:else if filterFlyout === 'saved'}
-            <div class="absolute top-0 end-full me-1 w-[200px] max-h-48 overflow-y-auto rounded-xl border border-md-outline-variant bg-md-surface-container-low shadow-xl {PORTAL_Z_CLASS.accountMenu} py-1" role="menu">
+            <div use:anchoredFlyout={{ placement: 'inline-start', onClose: () => { filterFlyout = null; } }} class="absolute top-0 end-full me-1 w-[200px] max-h-48 overflow-y-auto rounded-xl border border-md-outline-variant bg-md-surface-container-low {ELEVATION.level2} {PORTAL_Z_CLASS.accountMenu} py-1" role="menu">
+              <button type="button" class="w-full text-start p-2 text-sm text-md-primary" onclick={() => { filterFlyout = null; }}><Icon name="back" class="inline w-4 h-4 rtl-flip" /> {$t('common.back')}</button>
               {#each savedSearchFilters as filter (filter.id)}
                 <button
                   type="button"
-                  class="w-full px-2.5 py-2 text-start text-sm hover:bg-md-surface-variant"
+                  class="w-full px-2.5 py-2 text-start text-sm hover:bg-md-surface-variant active:brightness-95"
                   onclick={() => {
                     // Reconcile the stored query's pills with its boolean flags
                     // so chips and pills never contradict after a filter load.
                     onSearchChange(
-                      reconcileSavedFilterQuery(filter.searchQuery, filter.hasOTP, !!filter.hasAttachment)
+                      reconcileSavedFilterQuery(filter.searchQuery, filter.hasOTP, !!filter.hasAttachment, filter.unreadOnly)
                     );
                     onSortChange(filter.sortBy || 'newest');
                     onOtpOnlyChange(filter.hasOTP);
+                    onUnreadOnlyChange(
+                      filter.unreadOnly ?? parseSearchShortcuts(filter.searchQuery).unreadOnly
+                    );
                     onHasAttachmentChange(!!filter.hasAttachment);
                     onSenderDomainChange(filter.senderDomain);
                     onSelectedSendersChange(filter.selectedSenders || []);
@@ -919,14 +931,14 @@ let dateChipLabel = $derived.by(() => {
     <button
       id="button-refresh-inbox"
       type="button"
-      class="relative w-8 h-8 flex items-center justify-center rounded-xl transition-colors mt-0 bg-md-surface hover:bg-md-surface-variant shrink-0"
+      class="relative w-8 h-8 flex items-center justify-center rounded-full transition-colors mt-0 bg-md-surface hover:bg-md-surface-variant active:bg-md-surface-variant/80 shrink-0"
       aria-label={$t('nav.fabRefresh')}
       title={$t('nav.fabRefresh')}
       disabled={refreshLoading}
       onclick={async () => {
         refreshLoading = true;
         try {
-          await onRefreshInbox();
+          await onRefreshMailbox();
         } finally {
           refreshLoading = false;
         }
@@ -941,7 +953,15 @@ let dateChipLabel = $derived.by(() => {
 
 <!-- Inline filter row (appears when search is focused) -->
 {#if searchFocused}
-  <div bind:this={filterRowRef} class="flex flex-col gap-2 px-1 pb-2 pt-0.5 relative">
+  <div
+    bind:this={filterRowRef}
+    class="flex flex-col gap-2 px-1 pb-2 pt-0.5 relative"
+    onfocusin={() => {
+      if (searchBlurTimer) clearTimeout(searchBlurTimer);
+      searchBlurTimer = null;
+    }}
+    onfocusout={scheduleSearchBlur}
+  >
     <!-- First row: filter chips -->
     <div class="flex items-center gap-1 flex-wrap">
 
@@ -949,7 +969,9 @@ let dateChipLabel = $derived.by(() => {
     <div class="relative shrink-0">
       <button
         id="button-from-filter"
-        class="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full border transition-colors {selectedSenders.length > 0 || senderDomain || senderEmail ? 'border-md-primary bg-md-primary/10 text-md-primary' : 'border-md-outline-variant bg-transparent text-md-on-surface/80 hover:bg-md-surface-variant'}"
+        class="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full border border-md-outline-variant bg-transparent text-md-on-surface/80 active:brightness-95 transition-colors {controlSurface(
+          selectedSenders.length > 0 || senderDomain || senderEmail
+        )}"
         aria-label={$t('inbox.filterBySenderAria')}
         onclick={() => { fromDropdownOpen = !fromDropdownOpen; sortDropdownOpen = false; dateDropdownOpen = false; savedFiltersDropdownOpen = false; }}
       >
@@ -967,25 +989,29 @@ let dateChipLabel = $derived.by(() => {
         <Icon name="chevronDown" class="w-3 h-3" />
       </button>
       {#if fromDropdownOpen}
-        <div class="absolute top-full start-0 mt-1 bg-md-surface-container border border-md-outline-variant rounded-2xl shadow-xl {PORTAL_Z_CLASS.accountMenu} overflow-hidden min-w-[260px]">
+        <div use:anchoredFlyout={{ onClose: () => { fromDropdownOpen = false; } }} class="absolute top-full start-0 mt-1 bg-md-surface-container border border-md-outline-variant rounded-2xl {ELEVATION.level2} {PORTAL_Z_CLASS.accountMenu} overflow-hidden min-w-[260px]">
           <!-- Header -->
           <div class="flex items-center justify-between px-4 py-3 border-b border-md-outline-variant/30">
             <span class="text-sm font-semibold text-md-on-surface">{$t('inbox.filterFrom')}</span>
-            <button id="button-close-from-filter" class="w-5 h-5 flex items-center justify-center text-md-on-surface/60 hover:text-md-on-surface transition-colors" aria-label={$t('inbox.closeFromFilterAria')} onclick={() => fromDropdownOpen = false}>
-              <Icon name="x" class="w-3.5 h-3.5" />
-            </button>
+            <IconButton
+              id="button-close-from-filter"
+              icon="close"
+              size="sm"
+              iconClass="w-3.5 h-3.5"
+              ariaLabel={$t('inbox.closeFromFilterAria')}
+              class="text-md-on-surface/60 hover:text-md-on-surface"
+              onclick={() => (fromDropdownOpen = false)}
+            />
           </div>
           <!-- Selected chips -->
           {#if selectedSenders.length > 0}
             <div class="flex flex-wrap gap-1.5 px-4 pt-3 pb-1">
               {#each selectedSenders as sender (sender)}
                 <div class="flex items-center gap-1 px-2 py-1 rounded-full border border-md-outline-variant text-xs bg-md-surface-variant">
-                  <span class="w-4 h-4 rounded-full flex items-center justify-center text-xs font-bold {avatarColor(sender)}">
-                    {getInitial(sender, '')}
-                  </span>
+                  <Avatar size="xs" letter={avatarInitial(sender, '')} email={sender} class="shrink-0" />
                   <span class="max-w-[120px] truncate">{sender}</span>
                   <button id="button-remove-sender-{sender}" onclick={() => toggleSender(sender)} aria-label={$t('inbox.removeSenderAria')} class="ms-0.5 text-md-on-surface/50 hover:text-md-on-surface">
-                    <Icon name="x" class="w-2.5 h-2.5" />
+                    <Icon name="close" class="w-2.5 h-2.5" />
                   </button>
                 </div>
               {/each}
@@ -1014,18 +1040,16 @@ let dateChipLabel = $derived.by(() => {
               {@const isSelected = selectedSenders.some((s) => s.toLowerCase() === suggestion.email.toLowerCase())}
               <button
                 id="button-select-sender-{suggestion.email}"
-                class="w-full flex items-center gap-3 px-4 py-2.5 hover:bg-md-surface-variant/50 transition-colors text-start"
+                class="w-full flex items-center gap-3 px-4 py-2.5 hover:bg-md-surface-variant/50 active:bg-md-surface-variant/70 transition-colors text-start"
                 onclick={() => toggleSender(suggestion.email)}
               >
-                <span class="w-7 h-7 rounded-full flex items-center justify-center text-sm font-bold shrink-0 transition-colors {avatarColor(
-                  suggestion.email
-                )} {isSelected ? 'ring-2 ring-md-primary ring-offset-1 ring-offset-md-surface' : ''}">
-                  {#if isSelected}
-                    ✓
-                  {:else}
-                    {getInitial(suggestion.email, suggestion.name)}
-                  {/if}
-                </span>
+                {#if isSelected}
+                  <!-- The tick IS this row's avatar - same tier as the letter beside it,
+                       so the badge is not a differently-sized disc of its own. -->
+                  <Avatar size="lg" letter="✓" email={suggestion.email} class="shrink-0 ring-2 ring-md-primary ring-offset-1 ring-offset-md-surface" />
+                {:else}
+                  <Avatar size="lg" letter={avatarInitial(suggestion.name || suggestion.email, '')} email={suggestion.email} class="shrink-0" />
+                {/if}
                 <div class="min-w-0">
                   <div class="text-sm text-md-on-surface truncate">{suggestion.email}</div>
                   <div class="text-xs text-md-on-surface/50 truncate">{suggestion.email}</div>
@@ -1043,7 +1067,9 @@ let dateChipLabel = $derived.by(() => {
     <div class="relative shrink-0">
       <button
         id="button-sort"
-        class="flex items-center gap-1.5 px-2 py-1.5 text-xs rounded-full border transition-colors {sortBy !== 'newest' ? 'border-md-primary bg-md-primary/10 text-md-primary' : 'border-md-outline-variant bg-transparent text-md-on-surface/80 hover:bg-md-surface-variant'}"
+        class="flex items-center gap-1.5 px-2 py-1.5 text-xs rounded-full border border-md-outline-variant bg-transparent text-md-on-surface/80 active:brightness-95 transition-colors {controlSurface(
+          sortBy !== 'newest'
+        )}"
         aria-label={$t('inbox.sortByAria')}
         onclick={() => { sortDropdownOpen = !sortDropdownOpen; dateDropdownOpen = false; savedFiltersDropdownOpen = false; fromDropdownOpen = false; }}
       >
@@ -1051,86 +1077,86 @@ let dateChipLabel = $derived.by(() => {
         <Icon name="chevronDown" class="w-3 h-3" />
       </button>
       {#if sortDropdownOpen}
-        <div class="absolute top-full start-0 mt-1 bg-md-surface border border-md-outline-variant rounded-xl shadow-lg {PORTAL_Z_CLASS.accountMenu} overflow-hidden min-w-[240px] p-1.5 space-y-1">
+        <div use:anchoredFlyout={{ onClose: () => { sortDropdownOpen = false; } }} class="absolute top-full start-0 mt-1 bg-md-surface border border-md-outline-variant rounded-xl {ELEVATION.level2} {PORTAL_Z_CLASS.accountMenu} overflow-hidden min-w-[240px] p-1.5 space-y-1">
           <!-- Date -->
-          <div class="flex items-center gap-2 px-1.5 py-1 rounded-lg hover:bg-md-surface-variant/40">
-            <Icon name="clock" class="w-3.5 h-3.5 shrink-0 text-md-on-surface/50" />
+          <div class="flex items-center gap-2 px-1.5 py-1 rounded-lg hover:bg-md-surface-variant/40 active:bg-md-surface-variant/60">
+            <Icon name="schedule" class="w-3.5 h-3.5 shrink-0 text-md-on-surface/50" />
             <span class="flex-1 min-w-0 text-xs font-semibold text-md-on-surface truncate">{$t('inbox.viewOptions.sortByDate')}</span>
             <div class="flex items-stretch rounded-md border border-md-outline-variant/50 overflow-hidden shrink-0" role="group" aria-label={$t('inbox.viewOptions.sortByDate')}>
               <button
                 id="button-sort-newest"
                 type="button"
-                class="px-2 py-1 text-label-sm font-bold transition-colors {sortBy === 'newest' ? 'bg-md-primary text-md-on-primary' : 'bg-md-surface text-md-on-surface hover:bg-md-surface-variant'}"
+                class="px-2 py-1 text-xs font-bold transition-colors {sortBy === 'newest' ? 'bg-md-primary text-md-on-primary' : 'bg-md-surface text-md-on-surface hover:bg-md-surface-variant active:brightness-95'}"
                 onclick={() => { onSortChange('newest'); sortDropdownOpen = false; }}
               >{$t('inbox.viewOptions.sortNewestShort')}</button>
               <span class="w-px bg-md-outline-variant/60 shrink-0" aria-hidden="true"></span>
               <button
                 id="button-sort-oldest"
                 type="button"
-                class="px-2 py-1 text-label-sm font-bold transition-colors {sortBy === 'oldest' ? 'bg-md-primary text-md-on-primary' : 'bg-md-surface text-md-on-surface hover:bg-md-surface-variant'}"
+                class="px-2 py-1 text-xs font-bold transition-colors {sortBy === 'oldest' ? 'bg-md-primary text-md-on-primary' : 'bg-md-surface text-md-on-surface hover:bg-md-surface-variant active:brightness-95'}"
                 onclick={() => { onSortChange('oldest'); sortDropdownOpen = false; }}
               >{$t('inbox.viewOptions.sortOldestShort')}</button>
             </div>
           </div>
 
           <!-- Sender name -->
-          <div class="flex items-center gap-2 px-1.5 py-1 rounded-lg hover:bg-md-surface-variant/40">
-            <Icon name="user" class="w-3.5 h-3.5 shrink-0 text-md-on-surface/50" />
+          <div class="flex items-center gap-2 px-1.5 py-1 rounded-lg hover:bg-md-surface-variant/40 active:bg-md-surface-variant/60">
+            <Icon name="person" class="w-3.5 h-3.5 shrink-0 text-md-on-surface/50" />
             <span class="flex-1 min-w-0 text-xs font-semibold text-md-on-surface truncate">{$t('inbox.viewOptions.sortBySenderName')}</span>
             <div class="flex items-stretch rounded-md border border-md-outline-variant/50 overflow-hidden shrink-0" role="group" aria-label={$t('inbox.viewOptions.sortBySenderName')}>
               <button
                 id="button-sort-senderNameAsc"
                 type="button"
-                class="px-2 py-1 text-label-sm font-bold transition-colors {sortBy === 'senderNameAsc' ? 'bg-md-primary text-md-on-primary' : 'bg-md-surface text-md-on-surface hover:bg-md-surface-variant'}"
+                class="px-2 py-1 text-xs font-bold transition-colors {sortBy === 'senderNameAsc' ? 'bg-md-primary text-md-on-primary' : 'bg-md-surface text-md-on-surface hover:bg-md-surface-variant active:brightness-95'}"
                 onclick={() => { onSortChange('senderNameAsc'); sortDropdownOpen = false; }}
               >{$t('inbox.viewOptions.sortAscShort')}</button>
               <span class="w-px bg-md-outline-variant/60 shrink-0" aria-hidden="true"></span>
               <button
                 id="button-sort-senderNameDesc"
                 type="button"
-                class="px-2 py-1 text-label-sm font-bold transition-colors {sortBy === 'senderNameDesc' ? 'bg-md-primary text-md-on-primary' : 'bg-md-surface text-md-on-surface hover:bg-md-surface-variant'}"
+                class="px-2 py-1 text-xs font-bold transition-colors {sortBy === 'senderNameDesc' ? 'bg-md-primary text-md-on-primary' : 'bg-md-surface text-md-on-surface hover:bg-md-surface-variant active:brightness-95'}"
                 onclick={() => { onSortChange('senderNameDesc'); sortDropdownOpen = false; }}
               >{$t('inbox.viewOptions.sortDescShort')}</button>
             </div>
           </div>
 
           <!-- Sender email -->
-          <div class="flex items-center gap-2 px-1.5 py-1 rounded-lg hover:bg-md-surface-variant/40">
-            <Icon name="envelope" class="w-3.5 h-3.5 shrink-0 text-md-on-surface/50" />
+          <div class="flex items-center gap-2 px-1.5 py-1 rounded-lg hover:bg-md-surface-variant/40 active:bg-md-surface-variant/60">
+            <Icon name="mail" class="w-3.5 h-3.5 shrink-0 text-md-on-surface/50" />
             <span class="flex-1 min-w-0 text-xs font-semibold text-md-on-surface truncate">{$t('inbox.viewOptions.sortBySenderEmail')}</span>
             <div class="flex items-stretch rounded-md border border-md-outline-variant/50 overflow-hidden shrink-0" role="group" aria-label={$t('inbox.viewOptions.sortBySenderEmail')}>
               <button
                 id="button-sort-senderEmailAsc"
                 type="button"
-                class="px-2 py-1 text-label-sm font-bold transition-colors {sortBy === 'senderEmailAsc' ? 'bg-md-primary text-md-on-primary' : 'bg-md-surface text-md-on-surface hover:bg-md-surface-variant'}"
+                class="px-2 py-1 text-xs font-bold transition-colors {sortBy === 'senderEmailAsc' ? 'bg-md-primary text-md-on-primary' : 'bg-md-surface text-md-on-surface hover:bg-md-surface-variant active:brightness-95'}"
                 onclick={() => { onSortChange('senderEmailAsc'); sortDropdownOpen = false; }}
               >{$t('inbox.viewOptions.sortAscShort')}</button>
               <span class="w-px bg-md-outline-variant/60 shrink-0" aria-hidden="true"></span>
               <button
                 id="button-sort-senderEmailDesc"
                 type="button"
-                class="px-2 py-1 text-label-sm font-bold transition-colors {sortBy === 'senderEmailDesc' ? 'bg-md-primary text-md-on-primary' : 'bg-md-surface text-md-on-surface hover:bg-md-surface-variant'}"
+                class="px-2 py-1 text-xs font-bold transition-colors {sortBy === 'senderEmailDesc' ? 'bg-md-primary text-md-on-primary' : 'bg-md-surface text-md-on-surface hover:bg-md-surface-variant active:brightness-95'}"
                 onclick={() => { onSortChange('senderEmailDesc'); sortDropdownOpen = false; }}
               >{$t('inbox.viewOptions.sortDescShort')}</button>
             </div>
           </div>
 
           <!-- Subject -->
-          <div class="flex items-center gap-2 px-1.5 py-1 rounded-lg hover:bg-md-surface-variant/40">
+          <div class="flex items-center gap-2 px-1.5 py-1 rounded-lg hover:bg-md-surface-variant/40 active:bg-md-surface-variant/60">
             <Icon name="mail" class="w-3.5 h-3.5 shrink-0 text-md-on-surface/50" />
             <span class="flex-1 min-w-0 text-xs font-semibold text-md-on-surface truncate">{$t('inbox.viewOptions.sortBySubject')}</span>
             <div class="flex items-stretch rounded-md border border-md-outline-variant/50 overflow-hidden shrink-0" role="group" aria-label={$t('inbox.viewOptions.sortBySubject')}>
               <button
                 id="button-sort-subjectAsc"
                 type="button"
-                class="px-2 py-1 text-label-sm font-bold transition-colors {sortBy === 'subjectAsc' ? 'bg-md-primary text-md-on-primary' : 'bg-md-surface text-md-on-surface hover:bg-md-surface-variant'}"
+                class="px-2 py-1 text-xs font-bold transition-colors {sortBy === 'subjectAsc' ? 'bg-md-primary text-md-on-primary' : 'bg-md-surface text-md-on-surface hover:bg-md-surface-variant active:brightness-95'}"
                 onclick={() => { onSortChange('subjectAsc'); sortDropdownOpen = false; }}
               >{$t('inbox.viewOptions.sortAscShort')}</button>
               <span class="w-px bg-md-outline-variant/60 shrink-0" aria-hidden="true"></span>
               <button
                 id="button-sort-subjectDesc"
                 type="button"
-                class="px-2 py-1 text-label-sm font-bold transition-colors {sortBy === 'subjectDesc' ? 'bg-md-primary text-md-on-primary' : 'bg-md-surface text-md-on-surface hover:bg-md-surface-variant'}"
+                class="px-2 py-1 text-xs font-bold transition-colors {sortBy === 'subjectDesc' ? 'bg-md-primary text-md-on-primary' : 'bg-md-surface text-md-on-surface hover:bg-md-surface-variant active:brightness-95'}"
                 onclick={() => { onSortChange('subjectDesc'); sortDropdownOpen = false; }}
               >{$t('inbox.viewOptions.sortDescShort')}</button>
             </div>
@@ -1142,7 +1168,9 @@ let dateChipLabel = $derived.by(() => {
     <!-- OTP chip -->
     <button
       id="button-otp-only"
-      class="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full border transition-colors shrink-0 {otpOnly ? 'border-md-primary bg-md-primary/10 text-md-primary' : 'border-md-outline-variant bg-transparent text-md-on-surface/80 hover:bg-md-surface-variant'}"
+      class="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full border border-md-outline-variant bg-transparent text-md-on-surface/80 active:brightness-95 transition-colors shrink-0 {controlSurface(
+        otpOnly
+      )}"
       aria-label={$t('inbox.otpOnlyAria')}
       onclick={() => { toggleBooleanPill('is:otp', !otpOnly); }}
     >
@@ -1152,7 +1180,9 @@ let dateChipLabel = $derived.by(() => {
     <!-- Has-attachment chip -->
     <button
       id="button-has-attachment"
-      class="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full border transition-colors shrink-0 {hasAttachment ? 'border-md-primary bg-md-primary/10 text-md-primary' : 'border-md-outline-variant bg-transparent text-md-on-surface/80 hover:bg-md-surface-variant'}"
+      class="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full border border-md-outline-variant bg-transparent text-md-on-surface/80 active:brightness-95 transition-colors shrink-0 {controlSurface(
+        hasAttachment
+      )}"
       aria-label={$t('inbox.filterHasAttachment')}
       onclick={() => { toggleBooleanPill('has:attachment', !hasAttachment); }}
     >
@@ -1163,7 +1193,9 @@ let dateChipLabel = $derived.by(() => {
     <div class="relative shrink-0">
       <button
         id="button-date-filter"
-        class="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full border transition-colors {(dateFrom || dateTo) ? 'border-md-primary bg-md-primary/10 text-md-primary' : 'border-md-outline-variant bg-transparent text-md-on-surface/80 hover:bg-md-surface-variant'}"
+        class="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full border border-md-outline-variant bg-transparent text-md-on-surface/80 active:brightness-95 transition-colors {controlSurface(
+          dateFrom || dateTo
+        )}"
         aria-label={$t('inbox.filterByDateAria')}
         onclick={() => { dateDropdownOpen = !dateDropdownOpen; sortDropdownOpen = false; showCustomRange = false; savedFiltersDropdownOpen = false; fromDropdownOpen = false; }}
       >
@@ -1171,19 +1203,28 @@ let dateChipLabel = $derived.by(() => {
         <Icon name="chevronDown" class="w-3 h-3" />
       </button>
       {#if dateDropdownOpen}
-        <div class="absolute top-full start-0 mt-1 bg-md-surface-container border border-md-outline-variant rounded-2xl shadow-xl {PORTAL_Z_CLASS.accountMenu} overflow-hidden min-w-[220px]">
+        <div use:anchoredFlyout={{ onClose: () => { dateDropdownOpen = false; } }} class="absolute top-full start-0 mt-1 bg-md-surface-container border border-md-outline-variant rounded-2xl {ELEVATION.level2} {PORTAL_Z_CLASS.accountMenu} overflow-hidden min-w-[220px]">
           <!-- Header -->
           <div class="flex items-center justify-between px-4 py-3 border-b border-md-outline-variant/30">
             <span class="text-sm font-semibold text-md-on-surface">{$t('filters.date')}</span>
-            <button id="button-close-date-filter" class="w-5 h-5 flex items-center justify-center text-md-on-surface/60 hover:text-md-on-surface transition-colors" aria-label={$t('inbox.closeDateFilterAria')} onclick={() => { dateDropdownOpen = false; showCustomRange = false; }}>
-              <Icon name="x" class="w-3.5 h-3.5" />
-            </button>
+            <IconButton
+              id="button-close-date-filter"
+              icon="close"
+              size="sm"
+              iconClass="w-3.5 h-3.5"
+              ariaLabel={$t('inbox.closeDateFilterAria')}
+              class="text-md-on-surface/60 hover:text-md-on-surface"
+              onclick={() => {
+                dateDropdownOpen = false;
+                showCustomRange = false;
+              }}
+            />
           </div>
           {#if !showCustomRange}
             <!-- Preset options -->
             <div class="py-2">
               {#each datePresets as preset (preset.value)}
-                <label class="flex items-center gap-3 px-4 py-2.5 cursor-pointer hover:bg-md-surface-variant/50 transition-colors">
+                <label class="flex items-center gap-3 px-4 py-2.5 cursor-pointer hover:bg-md-surface-variant/50 active:bg-md-surface-variant/70 transition-colors">
                   <span class="w-4 h-4 rounded-full border-2 flex items-center justify-center shrink-0 transition-colors {datePreset === preset.value ? 'border-md-primary' : 'border-md-outline-variant'}">
                     {#if datePreset === preset.value}
                       <span class="w-2 h-2 rounded-full bg-md-primary"></span>
@@ -1215,22 +1256,22 @@ let dateChipLabel = $derived.by(() => {
                 {$t('common.back')}
               </button>
               <div class="flex flex-col gap-1">
-                <span class="text-xs text-md-on-surface/50">{$t('inbox.filterDateFrom')}</span>
+                <span class="text-sm text-md-on-surface-variant">{$t('inbox.filterDateFrom')}</span>
                 <input
                   id="input-date-from"
                   type="date"
-                  class="w-full px-2 py-1 rounded border border-md-outline-variant text-xs bg-md-surface-container-low outline-none focus:border-md-primary focus:ring-1 focus:ring-md-primary"
+                  class="w-full px-2 py-1 rounded border border-md-outline-variant text-sm bg-md-surface-container-low outline-none focus:border-md-primary focus:ring-1 focus:ring-md-primary"
                   aria-label={$t('inbox.dateFromAria')}
                   value={dateFrom}
                   onchange={(e) => { onDateFromChange((e.target as HTMLInputElement).value); datePreset = 'custom'; }}
                 />
               </div>
               <div class="flex flex-col gap-1">
-                <span class="text-xs text-md-on-surface/50">{$t('inbox.filterDateTo')}</span>
+                <span class="text-sm text-md-on-surface-variant">{$t('inbox.filterDateTo')}</span>
                 <input
                   id="input-date-to"
                   type="date"
-                  class="w-full px-2 py-1 rounded border border-md-outline-variant text-xs bg-md-surface-container-low outline-none focus:border-md-primary focus:ring-1 focus:ring-md-primary"
+                  class="w-full px-2 py-1 rounded border border-md-outline-variant text-sm bg-md-surface-container-low outline-none focus:border-md-primary focus:ring-1 focus:ring-md-primary"
                   aria-label={$t('inbox.dateToAria')}
                   value={dateTo}
                   onchange={(e) => { onDateToChange((e.target as HTMLInputElement).value); datePreset = 'custom'; }}
@@ -1243,7 +1284,7 @@ let dateChipLabel = $derived.by(() => {
                 class="w-full"
                 onclick={() => dateDropdownOpen = false}
               >
-                {$t('inbox.filterApply')}
+                {$t('common.apply')}
               </Btn>
             </div>
           {/if}
@@ -1256,7 +1297,7 @@ let dateChipLabel = $derived.by(() => {
       <div class="relative shrink-0">
         <button
           id="button-saved-filters"
-          class="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full border transition-colors border-md-outline-variant bg-transparent text-md-on-surface/80 hover:bg-md-surface-variant"
+          class="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full border transition-colors border-md-outline-variant bg-transparent text-md-on-surface/80 hover:bg-md-surface-variant active:brightness-95"
           aria-label={$t('inbox.savedFiltersAria')}
           onclick={() => { savedFiltersDropdownOpen = !savedFiltersDropdownOpen; sortDropdownOpen = false; dateDropdownOpen = false; fromDropdownOpen = false; manageFiltersOpen = false; }}
         >
@@ -1264,17 +1305,20 @@ let dateChipLabel = $derived.by(() => {
           <Icon name="chevronDown" class="w-3 h-3" />
         </button>
         {#if savedFiltersDropdownOpen}
-          <div class="absolute top-full start-0 mt-1 bg-md-surface border border-md-outline-variant rounded-xl shadow-lg {PORTAL_Z_CLASS.accountMenu} overflow-hidden min-w-[150px]">
+          <div use:anchoredFlyout={{ onClose: () => { savedFiltersDropdownOpen = false; } }} class="absolute top-full start-0 mt-1 bg-md-surface border border-md-outline-variant rounded-xl {ELEVATION.level2} {PORTAL_Z_CLASS.accountMenu} overflow-hidden min-w-[150px]">
             {#each savedSearchFilters as filter (filter.id)}
               <button
                 id="button-load-filter-{filter.id}"
-                class="w-full px-3 min-h-12 text-sm text-start hover:bg-md-surface-variant transition-colors text-md-on-surface"
+                class="w-full px-3 min-h-12 text-sm text-start hover:bg-md-surface-variant active:brightness-95 transition-colors text-md-on-surface"
                 onclick={() => {
                   onSearchChange(
-                    reconcileSavedFilterQuery(filter.searchQuery, filter.hasOTP, !!filter.hasAttachment)
+                    reconcileSavedFilterQuery(filter.searchQuery, filter.hasOTP, !!filter.hasAttachment, filter.unreadOnly)
                   );
                   onSortChange(filter.sortBy || 'newest');
                   onOtpOnlyChange(filter.hasOTP);
+                  onUnreadOnlyChange(
+                    filter.unreadOnly ?? parseSearchShortcuts(filter.searchQuery).unreadOnly
+                  );
                   onHasAttachmentChange(!!filter.hasAttachment);
                   onSenderDomainChange(filter.senderDomain);
                   onSelectedSendersChange(filter.selectedSenders || []);
@@ -1293,11 +1337,33 @@ let dateChipLabel = $derived.by(() => {
       </div>
     {/if}
 
+    <!-- Built-in filter presets -->
+    <div class="relative shrink-0">
+      <button
+        id="button-filter-presets"
+        class="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full border border-md-outline-variant bg-transparent text-md-on-surface/80 hover:bg-md-surface-variant active:brightness-95 transition-colors"
+        aria-label={$t('inbox.filterPresetsAria')}
+        onclick={() => { builtInPresetsOpen = !builtInPresetsOpen; sortDropdownOpen = false; dateDropdownOpen = false; fromDropdownOpen = false; savedFiltersDropdownOpen = false; }}
+      >
+        {$t('inbox.filterPresets')}
+        <Icon name="chevronDown" class="w-3 h-3" />
+      </button>
+      {#if builtInPresetsOpen}
+        <div use:anchoredFlyout={{ onClose: () => { builtInPresetsOpen = false; } }} class="absolute top-full start-0 mt-1 bg-md-surface border border-md-outline-variant rounded-xl {ELEVATION.level2} {PORTAL_Z_CLASS.accountMenu} overflow-hidden min-w-[190px]">
+          <button type="button" class="w-full px-3 min-h-10 text-sm text-start hover:bg-md-surface-variant active:brightness-95" onclick={() => applyBuiltInPreset('unread')}>{$t('inbox.filterPresetUnread')}</button>
+          <button type="button" class="w-full px-3 min-h-10 text-sm text-start hover:bg-md-surface-variant active:brightness-95" onclick={() => applyBuiltInPreset('otp')}>{$t('inbox.filterPresetOtp')}</button>
+          <button type="button" class="w-full px-3 min-h-10 text-sm text-start hover:bg-md-surface-variant active:brightness-95" onclick={() => applyBuiltInPreset('attachment')}>{$t('inbox.filterPresetAttachment')}</button>
+          <button type="button" class="w-full px-3 min-h-10 text-sm text-start hover:bg-md-surface-variant active:brightness-95" onclick={() => applyBuiltInPreset('last24')}>{$t('inbox.filterPresetLast24')}</button>
+          <button type="button" class="w-full px-3 min-h-10 text-sm text-start hover:bg-md-surface-variant active:brightness-95" onclick={() => applyBuiltInPreset('sender')}>{$t('inbox.filterPresetSender')}</button>
+        </div>
+      {/if}
+    </div>
+
     <!-- Manage Filters chip -->
     {#if savedSearchFilters.length > 0}
       <button
         id="button-manage-filters"
-        class="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full border transition-colors border-md-outline-variant bg-transparent text-md-on-surface/80 hover:bg-md-surface-variant shrink-0"
+        class="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full border transition-colors border-md-outline-variant bg-transparent text-md-on-surface/80 hover:bg-md-surface-variant active:brightness-95 shrink-0"
         aria-label={$t('inbox.manageFiltersAria')}
         onclick={() => { manageFiltersOpen = true; savedFiltersDropdownOpen = false; sortDropdownOpen = false; dateDropdownOpen = false; fromDropdownOpen = false; }}
       >
@@ -1306,23 +1372,23 @@ let dateChipLabel = $derived.by(() => {
     {/if}
 
     <!-- Clear all chip (only shown if any filter is active) -->
-    {#if sortBy !== 'newest' || otpOnly || hasAttachment || dateFrom || dateTo || selectedSenders.length > 0 || searchQuery}
+    {#if sortBy !== 'newest' || otpOnly || unreadOnly || hasAttachment || dateFrom || dateTo || selectedSenders.length > 0 || searchQuery}
       <button
         id="button-clear-filters"
-        class="flex items-center gap-1 px-3 py-1.5 text-xs rounded-full border border-md-error/50 bg-transparent text-md-error hover:bg-md-error/10 transition-colors shrink-0"
+        class="flex items-center gap-1 px-3 py-1.5 text-xs rounded-full border border-md-error/50 bg-transparent text-md-error hover:bg-md-error/10 active:bg-md-error/30 transition-colors shrink-0"
         aria-label={$t('inbox.clearAllFiltersAria')}
-        onclick={() => { onClearFilters(); onSearchChange(''); onSortChange('newest'); onOtpOnlyChange(false); onHasAttachmentChange(false); onSenderDomainChange(''); onDateFromChange(''); onDateToChange(''); onSelectedSendersChange([]); }}
+        onclick={() => { onClearFilters(); onSearchChange(''); onSortChange('newest'); onOtpOnlyChange(false); onUnreadOnlyChange(false); onHasAttachmentChange(false); onSenderDomainChange(''); onDateFromChange(''); onDateToChange(''); onSelectedSendersChange([]); }}
       >
-        <Icon name="x" class="w-3 h-3" />
+        <Icon name="close" class="w-3 h-3" />
         {$t('common.clear')}
       </button>
     {/if}
 
     <!-- Save as filter button (only shown if current filter is not saved and has active filters) -->
-    {#if !currentFilterSaved && (sortBy !== 'newest' || otpOnly || hasAttachment || dateFrom || dateTo || selectedSenders.length > 0 || searchQuery !== '')}
+    {#if !currentFilterSaved && (sortBy !== 'newest' || otpOnly || unreadOnly || hasAttachment || dateFrom || dateTo || selectedSenders.length > 0 || searchQuery !== '')}
       <button
         id="button-save-as-filter"
-        class="flex items-center gap-1 px-3 py-1.5 text-xs rounded-full border border-md-primary bg-transparent text-md-primary hover:bg-md-primary/10 transition-colors shrink-0"
+        class="flex items-center gap-1 px-3 py-1.5 text-xs rounded-full border border-md-primary bg-transparent text-md-primary hover:bg-md-primary/10 active:bg-md-primary/30 transition-colors shrink-0"
         aria-label={$t('inbox.saveAsFilterAria')}
         onclick={() => { showSaveFilter = true; }}
       >
@@ -1338,6 +1404,7 @@ let dateChipLabel = $derived.by(() => {
 {#if showSaveFilter}
   <ModalDialog
     open={true}
+    activityDialogKey="dialog:filter"
     title={$t('filters.saveFilter')}
     maxWidth="sm"
     onClose={() => { saveFilterName = ''; showSaveFilter = false; }}
@@ -1352,7 +1419,7 @@ let dateChipLabel = $derived.by(() => {
       onkeydown={(e) => {
         if (e.key === 'Enter') {
           if (saveFilterName.trim()) {
-            onSaveFilter(saveFilterName.trim(), searchQuery, otpOnly, hasAttachment, senderDomain, dateFrom, dateTo, selectedSenders, sortBy, recipient, subject);
+            onSaveFilter(saveFilterName.trim(), searchQuery, otpOnly, hasAttachment, senderDomain, dateFrom, dateTo, selectedSenders, sortBy, recipient, subject, unreadOnly);
             saveFilterName = '';
             showSaveFilter = false;
           }
@@ -1361,22 +1428,7 @@ let dateChipLabel = $derived.by(() => {
       use:focusOnMount
     />
     {#snippet footer()}
-      <Btn
-        id="button-save-filter-confirm"
-        variant="primary"
-        size="md"
-        class="flex-1"
-        aria-label={$t('filtersManagement.saveFilterAction')}
-        onclick={() => {
-          if (saveFilterName.trim()) {
-            onSaveFilter(saveFilterName.trim(), searchQuery, otpOnly, hasAttachment, senderDomain, dateFrom, dateTo, selectedSenders, sortBy, recipient, subject);
-            saveFilterName = '';
-            showSaveFilter = false;
-          }
-        }}
-      >
-        {$t('filtersManagement.save')}
-      </Btn>
+      <div class="w-full flex flex-nowrap items-center justify-between gap-3" use:responsiveButtonLayout data-action-tier="S">
       <Btn
         id="button-cancel-save-filter"
         variant="ghost"
@@ -1385,8 +1437,25 @@ let dateChipLabel = $derived.by(() => {
         aria-label={$t('filtersManagement.cancelSaveAction')}
         onclick={() => { saveFilterName = ''; showSaveFilter = false; }}
       >
-        {$t('filtersManagement.cancel')}
+        {$t('common.cancel')}
       </Btn>
+      <Btn
+        id="button-save-filter-confirm"
+        variant="primary"
+        size="md"
+        class="flex-1"
+        aria-label={$t('filtersManagement.saveFilterAction')}
+        onclick={() => {
+          if (saveFilterName.trim()) {
+            onSaveFilter(saveFilterName.trim(), searchQuery, otpOnly, hasAttachment, senderDomain, dateFrom, dateTo, selectedSenders, sortBy, recipient, subject, unreadOnly);
+            saveFilterName = '';
+            showSaveFilter = false;
+          }
+        }}
+      >
+        {$t('common.save')}
+      </Btn>
+      </div>
     {/snippet}
   </ModalDialog>
 {/if}
@@ -1395,14 +1464,15 @@ let dateChipLabel = $derived.by(() => {
 {#if manageFiltersOpen}
   <ModalDialog
     open={true}
+    activityDialogKey="dialog:filter"
     title={$t('inbox.filterManageFilters')}
     maxWidth="md"
     onClose={() => manageFiltersOpen = false}
   >
     <!-- Filter List -->
-    <div class="max-h-[60vh] overflow-y-auto -mx-1 px-1 space-y-2">
+    <div class="space-y-2">
         {#each savedSearchFilters as filter (filter.id)}
-          <div class="flex items-center gap-2 p-3 rounded-xl bg-md-surface-container-low border border-md-outline-variant/30">
+          <div class="input-row gap-2 p-3 rounded-xl bg-md-surface-container-low border border-md-outline-variant/30">
             {#if renamingFilterId === filter.id}
               <!-- Rename mode -->
               <input
@@ -1426,7 +1496,7 @@ let dateChipLabel = $derived.by(() => {
               />
               <button
                 id="button-confirm-rename-{filter.id}"
-                class="px-3 py-2 rounded-lg bg-md-primary text-md-on-primary text-sm font-medium hover:bg-md-primary/90 transition-colors"
+                class="px-3 py-2 rounded-lg bg-md-primary text-md-on-primary text-sm font-medium hover:bg-md-primary/90 active:brightness-95 transition-colors"
                 onclick={() => {
                   if (renameFilterName.trim()) {
                     onRenameFilter(filter.id, renameFilterName.trim());
@@ -1435,21 +1505,21 @@ let dateChipLabel = $derived.by(() => {
                   }
                 }}
               >
-                {$t('filtersManagement.save')}
+                {$t('common.save')}
               </button>
               <button
                 id="button-cancel-rename-{filter.id}"
-                class="px-3 py-2 rounded-lg bg-transparent hover:bg-md-surface-variant text-sm transition-colors"
+                class="px-3 py-2 rounded-lg bg-transparent hover:bg-md-surface-variant active:brightness-95 text-sm transition-colors"
                 onclick={() => { renamingFilterId = null; renameFilterName = ''; }}
               >
-                {$t('filtersManagement.cancel')}
+                {$t('common.cancel')}
               </button>
             {:else}
               <!-- View mode -->
               <span class="flex-1 text-sm font-medium text-md-on-surface truncate">{filter.name}</span>
               <button
                 id="button-rename-{filter.id}"
-                class="p-2 rounded-lg hover:bg-md-surface-variant transition-colors"
+                class="p-2 rounded-full hover:bg-md-surface-variant active:bg-md-surface-variant/80 transition-colors"
                 aria-label={$t('filtersManagement.renameFilter', { values: { name: filter.name } })}
                 onclick={() => { renamingFilterId = filter.id; renameFilterName = filter.name; }}
               >
@@ -1457,17 +1527,17 @@ let dateChipLabel = $derived.by(() => {
               </button>
               <button
                 id="button-delete-filter-{filter.id}"
-                class="p-2 rounded-lg hover:bg-md-error/10 transition-colors"
+                class="p-2 rounded-full hover:bg-md-error/10 active:bg-md-error/20 transition-colors"
                 aria-label={$t('filtersManagement.deleteFilter', { values: { name: filter.name } })}
                 onclick={() => onDeleteFilter(filter.id)}
               >
-                <Icon name="trash" class="w-4 h-4 text-md-error" />
+                <Icon name="delete" class="w-4 h-4 text-md-error" />
               </button>
             {/if}
           </div>
         {/each}
         {#if savedSearchFilters.length === 0}
-          <p class="text-center text-sm text-md-on-surface/40 py-8">{$t('filtersManagement.noSavedFilters')}</p>
+          <p class="dialog-body-padding text-center text-sm text-md-on-surface/40">{$t('filtersManagement.noSavedFilters')}</p>
         {/if}
     </div>
   </ModalDialog>

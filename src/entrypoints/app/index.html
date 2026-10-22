@@ -3,6 +3,12 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!-- Pre-hydration fallback only. HTML cannot use `__MSG_*__` placeholders
+       (Chrome resolves those in the manifest and CSS only), so the tab title
+       stays the brand name until AppLayout assigns the localized title at
+       runtime. Unlike popup/index.html this value is NOT lifted into the
+       manifest - it is what the user sees in the tab strip while the app
+       boots, so it must stay a real string, never a placeholder. -->
   <title>1Click: Temp Mail & Autofill Form</title>
 </head>
 <body>

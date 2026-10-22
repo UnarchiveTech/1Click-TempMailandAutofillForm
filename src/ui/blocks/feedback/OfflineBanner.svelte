@@ -15,10 +15,10 @@ let { onDismiss = () => {} }: { onDismiss?: () => void } = $props();
   <span class="flex-1 min-w-0 leading-snug">{$t('offline.noConnection')}</span>
   <button
     type="button"
-    class="shrink-0 w-6 h-6 flex items-center justify-center rounded-full hover:bg-white/20 transition-colors"
+    class="shrink-0 w-6 h-6 flex items-center justify-center rounded-full hover:bg-white/20 active:bg-white/30 transition-colors"
     aria-label={$t('offline.dismiss')}
     onclick={onDismiss}
   >
-    <Icon name="x" class="w-3.5 h-3.5" />
+    <Icon name="close" class="w-3.5 h-3.5" />
   </button>
 </div>
